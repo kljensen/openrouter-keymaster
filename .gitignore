@@ -1,0 +1,31 @@
+# Rust build output
+target/
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Local runtime state and generated key material
+.openrouter-keymaster/
+tmp/
+*.db
+*.sqlite
+*.sqlite3
+*.state
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local-only agent tooling
+.agents/
+.agent-sync/
+.claude/
