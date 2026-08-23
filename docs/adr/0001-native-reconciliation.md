@@ -41,9 +41,10 @@ desired TOML + non-secret identity state + freshly observed OpenRouter state
     -> typed plan -> ordered apply -> verification
 ```
 
-Every run reads all three inputs, computes a typed plan as a pure function of
-them, executes that plan in a fixed dependency order, and re-reads OpenRouter
-to verify the result.
+Every run reads all three inputs and computes a typed plan as a pure function
+of them. `plan` stops there and renders the result; it never writes. `apply`
+recomputes the plan under its lock, executes it in a fixed dependency order,
+and re-reads OpenRouter to verify the result.
 
 Keymaster does not embed Terraform or OpenTofu, does not implement a provider
 protocol, and does not identify remote resources by mutable display name.
@@ -73,9 +74,9 @@ The following lifecycle semantics follow from that model and are fixed:
 
 ## Consequences
 
-Planning is a pure function of three explicit inputs, so it can be tested
-exhaustively without HTTP, a filesystem, or a clock, and re-planning identical
-inputs produces identical output.
+Planning is a pure function of three explicit inputs, so representative cases
+and invariants can be tested without HTTP, a filesystem, or a clock, and
+re-planning identical inputs produces identical output.
 
 Because identity is stored rather than inferred, renaming a key in the
 OpenRouter dashboard is drift that Keymaster corrects, not an identity change
@@ -92,8 +93,9 @@ a deleted credential.
 Negative consequences:
 
 - **Keymaster owns a state format, and therefore a compatibility burden.** The
-  state file is load-bearing: losing it means every managed resource has to be
-  re-imported by hash, and corrupting it can mean losing track of a live
+  state file is load-bearing: losing it means re-importing every managed
+  resource by its immutable identifier — a key by its hash, a guardrail by its
+  UUID — and corrupting it can mean losing track of a live
   credential. Every future change to the format needs a version bump and a
   migration path, and operators need to back it up. This cost is permanent and
   is the main thing the stateless alternative would have avoided.
@@ -119,15 +121,18 @@ Negative consequences:
 **Embed Terraform or OpenTofu, or implement a provider protocol.** This would
 give a mature plan/apply engine, a state format with remote backends and
 locking, and an existing ecosystem — the official OpenRouter Terraform provider
-already covers much of the API surface. Rejected for three reasons. First,
-Terraform's state stores resource attributes, and for an inference key that
-means the one-time plaintext lands in state; the official provider does exactly
-this, marked sensitive but still present. Keymaster's core invariant is that
-plaintext is write-only material that never enters persistent state. Second,
-the provider protocol's create/read/update/delete contract assumes a resource
-can be re-read after creation; a resource whose secret exists only in the
-create response, with no idempotency token, does not fit it, and the recovery
-protocol in ADR-0002 would have to fight the framework. Third, it would make
+already covers much of the API surface. Rejected for three reasons. First, the
+default and idiomatic thing for a provider to do with a computed sensitive
+attribute is retain it in state — the official OpenRouter provider retains the
+one-time plaintext, marked sensitive but present — and Keymaster's core
+invariant is that plaintext never enters persistent state at all. A provider
+could be written to discard it, but then Terraform's state no longer describes
+the resource it manages, which is working against the tool. Second, the
+provider protocol's create/read/update/delete contract assumes a resource can
+be re-read after creation; a resource whose secret exists only in the create
+response, with no idempotency token, does not fit it, and the journaling and
+operator-driven ambiguity recovery in ADR-0002 have no place in the framework's
+lifecycle. Third, it would make
 Keymaster a plugin to a tool the operator must already run, rather than a
 single binary, for a resource set this small.
 
@@ -146,8 +151,8 @@ handle.
 **One-shot imperative batches.** Commands like "create these keys" and "set
 this budget", with no desired-state file and no plan step. Simple, obvious, and
 easy to write. Rejected because it puts convergence in the operator's head:
-nothing detects drift, nothing tells you what the current configuration differs
-from, and repeating a command is not safe. It also has no place to record an
+nothing detects drift, the operator must compare desired and remote state by
+hand, and repeating a command is not safe. It also has no place to record an
 in-flight create, so an interrupted run leaves no trace at all — the worst
 possible outcome for an operation that may have produced an unknown live key.
 
