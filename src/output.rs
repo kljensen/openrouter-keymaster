@@ -82,6 +82,23 @@ impl<O: Write, E: Write> Renderer<O, E> {
         }
     }
 
+    /// Writes one warning to stderr, in human format only.
+    ///
+    /// Under `--json` a stream carries exactly one document, so a warning
+    /// cannot be a second one on stderr. JSON results carry their warnings in
+    /// the result document's `warnings` field instead, which is why this is a
+    /// no-op there rather than an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying write error.
+    pub fn warning(&mut self, message: &str) -> io::Result<()> {
+        match self.format {
+            Format::Human => writeln!(self.err, "warning: {message}"),
+            Format::Json => Ok(()),
+        }
+    }
+
     /// Writes one diagnostic to stderr.
     ///
     /// # Errors

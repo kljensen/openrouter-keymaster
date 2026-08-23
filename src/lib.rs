@@ -27,4 +27,5 @@ pub mod ids;
 pub mod output;
 pub mod plan;
 pub mod redaction;
+pub mod report;
 pub mod state;

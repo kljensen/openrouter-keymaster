@@ -26,7 +26,7 @@ fn main() -> ExitCode {
 /// Runs a parsed command and renders its outcome.
 fn dispatch(cli: &Cli) -> ExitCode {
     let mut renderer = renderer(Format::from_json_flag(cli.json));
-    match app::run(cli) {
+    match app::run(cli, &mut renderer) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // A diagnostic that cannot be written cannot itself be reported.

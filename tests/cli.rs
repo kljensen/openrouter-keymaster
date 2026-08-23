@@ -148,7 +148,7 @@ fn recover_resolve_requires_exactly_one_finding() {
 #[test]
 fn a_parsed_command_fails_with_an_application_error_on_stderr() {
     keymaster()
-        .arg("plan")
+        .arg("apply")
         .assert()
         .code(APPLICATION_ERROR)
         .stdout(predicate::str::is_empty())
@@ -156,11 +156,9 @@ fn a_parsed_command_fails_with_an_application_error_on_stderr() {
 }
 
 #[test]
-fn every_command_parses_and_reaches_its_handler() {
-    let commands: [&[&str]; 12] = [
-        &["plan"],
+fn every_unimplemented_command_parses_and_reaches_its_handler() {
+    let commands: [&[&str]; 10] = [
         &["apply"],
-        &["status"],
         &["import", "key", "jobfeed", "--hash", "sha256:aaaa"],
         &[
             "import",
@@ -188,10 +186,40 @@ fn every_command_parses_and_reaches_its_handler() {
     }
 }
 
+/// `plan` and `status` are implemented, so "reaching the handler" means
+/// reading the configuration. Both are given a path that does not exist, which
+/// stops them before a client is built and therefore before any network call.
+#[test]
+fn the_read_only_commands_reach_their_handler_and_stop_at_the_configuration() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let missing = directory.path().join("nowhere.toml");
+
+    for command in ["plan", "status"] {
+        keymaster()
+            .arg("--config")
+            .arg(&missing)
+            .arg(command)
+            .assert()
+            .code(APPLICATION_ERROR)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains("cannot read"));
+    }
+}
+
+#[test]
+fn plan_help_documents_that_exit_zero_covers_a_plan_with_changes() {
+    keymaster()
+        .args(["plan", "--help"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("Exit code 0"))
+        .stdout(predicate::str::contains("whether or not there are changes"));
+}
+
 #[test]
 fn json_diagnostics_are_one_uncolored_json_document() {
     let output = keymaster()
-        .args(["--json", "plan"])
+        .args(["--json", "apply"])
         .output()
         .expect("the binary runs");
 
@@ -259,7 +287,7 @@ fn global_paths_are_accepted_from_any_position() {
         .arg(&state)
         .assert()
         .code(APPLICATION_ERROR)
-        .stderr(predicate::str::contains("not implemented"));
+        .stderr(predicate::str::contains(config.display().to_string()));
 }
 
 #[test]
@@ -267,9 +295,12 @@ fn an_ambient_credential_does_not_change_behavior_or_appear_in_output() {
     // The only test that sets the credential: it must stay out of the output.
     const AMBIENT: &str = "sk-or-mgmt-FAKEAMBIENTCREDENTIAL";
 
+    let directory = tempfile::tempdir().expect("a temporary directory");
     let output = Command::cargo_bin("keymaster")
         .expect("the binary builds")
         .env(CREDENTIAL_VAR, AMBIENT)
+        .arg("--config")
+        .arg(directory.path().join("nowhere.toml"))
         .args(["--json", "status"])
         .output()
         .expect("the binary runs");
@@ -282,5 +313,5 @@ fn an_ambient_credential_does_not_change_behavior_or_appear_in_output() {
         !stderr.contains(AMBIENT),
         "the credential must not be echoed"
     );
-    assert!(stderr.contains("not_implemented"));
+    assert!(stderr.contains("config_read"));
 }

@@ -3,10 +3,9 @@
 A declarative OpenRouter management CLI, written in Rust.
 
 Keymaster is an early work in progress. The command-line surface below is
-final for v0.1, but no command does its work yet: the OpenRouter API client,
-planning, and apply behavior are not implemented, so every command fails with
-a "not implemented yet" error and exits 1. The desired-state configuration
-model is implemented but not yet reached by any command.
+final for v0.1. The two read-only commands, `plan` and `status`, are
+implemented end to end; every writing command still fails with a "not
+implemented yet" error and exits 1.
 
 ## Build, run, and test
 
@@ -19,9 +18,9 @@ cargo test
 ## Commands
 
 ```text
-keymaster plan                          show the changes an apply would make
+keymaster plan                          show the changes an apply would make   [works]
+keymaster status                        report bindings and incomplete operations [works]
 keymaster apply                         converge OpenRouter with the configuration
-keymaster status                        report bindings and incomplete operations
 keymaster import key NAME --hash HASH   bind an existing key by its hash
 keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID
 keymaster rotate NAME                   stage a replacement key
@@ -40,6 +39,79 @@ Global options: `--config PATH` (default `keymaster.toml`), `--state PATH`
 `--no-resource-created` or `--leaked-hash HASH`. Keymaster never guesses which
 one is true.
 
+## Plan and status
+
+Both commands do the same four read-only things — validate the whole
+configuration, load state, read a complete snapshot of OpenRouter, and print —
+and neither makes an API write, invokes a receiver, or touches the state file.
+State is read without taking the writer lock, so a `plan` never blocks an
+`apply` and never rewrites the file, even when it observes remote drift.
+
+`plan` prints every action an apply would take, dependencies before dependents,
+each with the resource it is about, its immutable remote identity, the managed
+fields that differ, why the planner proposes it, and how much care it needs:
+
+| Safety class | Meaning |
+| ------------ | ------- |
+| `report` | Writes nothing; something to look at |
+| `routine` | A write that cannot widen what any credential may do |
+| `expanding` | A write that widens what an existing credential may do |
+| `issuing` | Issues new secret material |
+
+**A privilege expansion is made hard to miss.** Enabling a key, raising or
+removing a budget, shortening a budget's reset period, widening an allowlist,
+narrowing a denylist, weakening zero-data-retention enforcement, excluding BYOK
+spend from a limit, and removing a key's guardrail are each reported as a named
+expansion. In human output the action carries a `!` marker and the run ends
+with a `! privilege expansions` section; in JSON each action carries
+`expands_privilege` and an `expansions` array naming the expansion and the
+field it applies to.
+
+**An unfinished operation is reported with everything needed to resolve it**:
+the operation identifier, the phase it stopped in, the timestamp of that phase,
+the created key's hash when the journal recorded one, and a remediation
+sentence naming the exact `keymaster recover` command for that phase. None of
+those is secret; a key's plaintext is exactly what is never recorded anywhere.
+While an operation of unknown outcome stands, the plan is `blocked` and nothing
+is executable.
+
+**"Nothing to apply" has two causes and they are not the same**, so a plan ends
+in one of three outcomes: `converged` (every action is a no-op — OpenRouter
+matches the configuration), `changes_pending` (an apply would execute at least
+one action), or `held_back` (there is work and none of it can run, behind an
+adoption, a missing resource, an unfinished operation, or a dependency on one
+of those). The outcome is a field in JSON and the last line of human output.
+
+`status` reports the same underlying facts from the other direction: which
+local address owns which remote resource and where the binding came from,
+whether that resource is still in the snapshot, each key's observed usage and
+remaining budget, which addresses are orphaned, which remote resources no local
+address owns, and the one unfinished operation if there is one. A retained
+hash — a predecessor waiting for retirement is a live credential until
+something disables it — is joined against the snapshot like any other key the
+address owns, so its remote presence, disabled flag, and spend are reported
+too.
+
+**Text OpenRouter wrote is scrubbed before it is printed.** A display name, a
+description, a slug, and an unrecognized reset schedule are free text nothing
+has validated. Each goes through `redaction::redact` as it enters a report
+DTO, so a credential someone pasted into a key's name is replaced with
+`[redacted]` rather than read back, and an ANSI escape or bidirectional
+override in one is shown escaped rather than allowed to rewrite the line an
+operator is reading.
+
+Output is deterministic: the planner is a pure function of its three inputs and
+rendering reads no clock, so two runs over unchanged inputs print identical
+bytes. Stdout carries the result only and is safe to pipe; warnings go to
+stderr in human runs, and travel in the result document's `warnings` field
+under `--json`, where a stream carries exactly one JSON document.
+
+**Exit code 0 means planning succeeded, whether or not there are changes.**
+There is no Terraform-style detailed exit code. A failure exits 1 with an
+actionable category — `config_invalid`, `config_read`, `config_syntax`,
+`missing_credential`, `authentication`, `transport`, `timeout`, `http_status`,
+`state_parse`, and the rest — in the diagnostic's `kind` field.
+
 ## Credentials
 
 The management credential is read from the `OPENROUTER_MANAGEMENT_KEY`
@@ -47,6 +119,17 @@ environment variable only. There is deliberately no command-line option for
 it, so it cannot appear in a process argument list, and no command echoes it.
 In memory it is a `client::ManagementKey`, which cannot be serialized, prints
 as `[redacted]`, and clears its buffer when dropped.
+
+`OPENROUTER_BASE_URL` overrides the API root, which is
+`https://openrouter.ai/api/v1` otherwise. It is not a credential and is
+validated like any other base URL: absolute, HTTP or HTTPS, no trailing slash
+or query. It exists so the compiled binary can be run against the local test
+harness, and so an operator behind a gateway can name it deliberately rather
+than having ambient proxy settings redirect a credential. An override that is
+present but unusable — a value that is not valid Unicode, or not a base URL —
+stops the run rather than falling back, because quietly reverting to
+production would send the management credential somewhere the operator did not
+name. Unset, or set to nothing at all, means production.
 
 ## Configuration
 
@@ -191,6 +274,16 @@ the other modules return values.
 | 1 | Application error |
 | 2 | Usage error |
 
+A successful `plan` exits 0 whether or not it found changes to make, and a
+successful `status` exits 0 whatever it reports. Only a failure — a
+configuration, credential, state, or API error — exits 1, and its `kind` names
+the category.
+
+Results are rendered from dedicated DTOs in `src/report/`, not from the domain
+types: a field added to a planner or state type cannot silently change the
+output contract, and no type that could hold secret material is reachable from
+one.
+
 ## Checks
 
 `just check` runs exactly what CI runs:
@@ -236,6 +329,14 @@ with `mod support;`. It uses no external network and no real credential.
 `tests/harness.rs` has one demonstration test per capability, including one
 that proves the server received the expected bearer credential while sentinel
 scanning proves it reached neither diagnostics nor any written artifact.
+
+`tests/plan.rs` runs the compiled binary against that harness for the
+representative planning cases — converged, drift, name collision, missing,
+unmanaged, and an unfinished operation — and for the failure categories. Every
+run in it scans stdout, stderr, and the whole project directory for the
+sentinel on the success path and the failure path alike, and one case proves
+that `plan` and `status` sent nothing but `GET` requests and left the state
+file byte for byte as they found it.
 
 ## Lint policy
 

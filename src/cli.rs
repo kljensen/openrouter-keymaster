@@ -49,12 +49,34 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Show the changes an apply would make. Makes no remote or local write.
+    #[command(long_about = "\
+Show the changes an apply would make.
+
+Plan validates the whole configuration, loads local state without rewriting \
+it, reads a complete snapshot of OpenRouter, and prints the actions an apply \
+would take and why. It makes no API write, invokes no receiver, and leaves the \
+state file byte for byte as it found it.
+
+Exit code 0 means planning succeeded, whether or not there are changes to \
+make: there is no separate exit code for a plan that found work to do. Exit \
+code 1 means planning failed — a configuration, credential, state, or API \
+error, whose category is named in the diagnostic.")]
     Plan,
 
     /// Converge OpenRouter with the desired configuration.
     Apply,
 
     /// Report bindings, remote presence, and incomplete operations.
+    #[command(long_about = "\
+Report bindings, remote presence, and incomplete operations.
+
+Status prints which local address owns which remote resource, whether that \
+resource is still there, what each key has spent against its budget, which \
+remote resources no local address owns, and any operation an earlier run left \
+unfinished. Like plan, it makes no write of any kind.
+
+Exit code 0 means the report was produced, whatever it says. Exit code 1 means \
+it could not be — a configuration, credential, state, or API error.")]
     Status,
 
     /// Bind an existing remote resource to a local address.
