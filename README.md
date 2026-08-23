@@ -2,19 +2,62 @@
 
 A declarative OpenRouter management CLI, written in Rust.
 
-Keymaster is an early work in progress. Today it is a hello-world baseline; the
-OpenRouter API client, desired-state configuration, planning, and apply
-behavior are not implemented yet.
+Keymaster is an early work in progress. The command-line surface below is
+final for v0.1, but no command does its work yet: the OpenRouter API client,
+desired-state configuration, planning, and apply behavior are not implemented,
+so every command fails with a "not implemented yet" error and exits 1.
 
 ## Build, run, and test
 
 ```sh
 cargo build
-cargo run
+cargo run -- --help
 cargo test
 ```
 
-`cargo run` prints the placeholder Keymaster greeting and exits successfully.
+## Commands
+
+```text
+keymaster plan                          show the changes an apply would make
+keymaster apply                         converge OpenRouter with the configuration
+keymaster status                        report bindings and incomplete operations
+keymaster import key NAME --hash HASH   bind an existing key by its hash
+keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID
+keymaster rotate NAME                   stage a replacement key
+keymaster recover inspect NAME          report an interrupted key operation
+keymaster recover resolve NAME ...      attest what an ambiguous operation did
+keymaster recover replace NAME          replace a key after resolving ambiguity
+keymaster retire NAME --hash HASH       disable a tracked retained key
+keymaster delete key --hash HASH        permanently delete a tracked key
+keymaster state forget ADDRESS          relinquish local ownership of an address
+```
+
+Global options: `--config PATH` (default `keymaster.toml`), `--state PATH`
+(default `.openrouter-keymaster/state.json`), and `--json`.
+
+`recover resolve` requires exactly one attested finding, either
+`--no-resource-created` or `--leaked-hash HASH`. Keymaster never guesses which
+one is true.
+
+## Credentials
+
+The management credential is read from the `OPENROUTER_MANAGEMENT_KEY`
+environment variable only. There is deliberately no command-line option for
+it, so it cannot appear in a process argument list, and no command echoes it.
+
+## Output and exit codes
+
+Stdout carries requested results only — human-readable text, or exactly one
+JSON document when `--json` is given. Stderr carries diagnostics, also as one
+JSON document under `--json`. Neither is ever colored, so `--json` output is
+machine-readable on a terminal. Only `src/output.rs` writes to either stream;
+the other modules return values.
+
+| Exit code | Meaning |
+| --------- | ------- |
+| 0 | Success, including `--help` and `--version` |
+| 1 | Application error |
+| 2 | Usage error |
 
 ## Checks
 

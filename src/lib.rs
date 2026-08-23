@@ -1,17 +1,9 @@
-//! Keymaster library entry point.
+//! Keymaster: declarative OpenRouter key and guardrail management.
+//!
+//! The binary is a thin wrapper over these modules. Only [`output`] writes to
+//! stdout or stderr; everything else returns values.
 
-/// The placeholder greeting printed by the `keymaster` binary.
-#[must_use]
-pub fn greeting() -> &'static str {
-    "Hello from Keymaster, a declarative OpenRouter management CLI."
-}
-
-#[cfg(test)]
-mod tests {
-    use super::greeting;
-
-    #[test]
-    fn greeting_identifies_keymaster() {
-        assert!(greeting().contains("Keymaster"));
-    }
-}
+pub mod app;
+pub mod cli;
+pub mod error;
+pub mod output;
