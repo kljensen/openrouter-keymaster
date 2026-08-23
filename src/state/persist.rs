@@ -318,12 +318,25 @@ impl StateLock<'_> {
     ///
     /// # Errors
     ///
-    /// Returns [`StateError::Conflict`] when the file changed since this state
-    /// was read, [`StateError::SerialExhausted`] when the serial cannot
-    /// advance, or [`StateError::Write`] when the state could not be made
-    /// durable. See the module's durability guarantee for what the file holds
-    /// afterwards.
+    /// Returns [`StateError::Inconsistent`] when the state in memory violates
+    /// an invariant the reader enforces, [`StateError::Conflict`] when the
+    /// file changed since this state was read,
+    /// [`StateError::SerialExhausted`] when the serial cannot advance, or
+    /// [`StateError::Write`] when the state could not be made durable. See the
+    /// module's durability guarantee for what the file holds afterwards.
     pub fn write(&self, state: &mut State) -> Result<(), StateError> {
+        // The reader enforces these on every load, so a state that fails them
+        // would be written once and refused forever after. Checking here fails
+        // the run that built the inconsistency instead of the next one to open
+        // the file, and it costs a walk of a structure that holds a handful of
+        // bindings.
+        state
+            .check_invariants()
+            .map_err(|message| StateError::Inconsistent {
+                path: self.file.path.clone(),
+                message,
+            })?;
+
         let on_disk = self.file.read()?.serial();
         if on_disk != state.serial {
             return Err(StateError::Conflict {

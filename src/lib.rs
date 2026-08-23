@@ -25,5 +25,6 @@ pub mod config;
 pub mod error;
 pub mod ids;
 pub mod output;
+pub mod plan;
 pub mod redaction;
 pub mod state;

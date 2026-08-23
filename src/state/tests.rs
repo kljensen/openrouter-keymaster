@@ -175,6 +175,179 @@ fn the_create_and_delivery_sequence_ends_in_a_promoted_current_key() {
     assert_eq!(current.hash, hash("h1"));
     assert_eq!(current.generation, 1);
     assert_eq!(current.bound_at, at(9));
+    // Where the plaintext went, so a later change of destination is a reason
+    // to replace the key rather than an invisible difference.
+    assert_eq!(
+        current.receiver,
+        Some(ReceiverFingerprint::from_digest([7; 32]))
+    );
+}
+
+#[test]
+fn an_imported_key_records_no_delivery_destination() {
+    let mut state = State::new();
+    let jobfeed = address("jobfeed");
+    state
+        .bind_key(&jobfeed, hash("h1"), 1, at(0))
+        .expect("binding");
+
+    let current = state
+        .key(&jobfeed)
+        .and_then(KeyBinding::current)
+        .expect("a current key");
+    assert_eq!(current.receiver, None);
+}
+
+#[test]
+fn binding_a_key_always_records_an_import_that_reads_back() {
+    // `bind_key` is the import path and records `imported` whatever the caller
+    // thinks. A key Keymaster created is bound by promotion, which is the only
+    // place that knows where the plaintext went; binding one here would write
+    // a created key with no destination — the shape the reader refuses — so
+    // the type no longer offers the choice.
+    let scratch = Scratch::new();
+    let jobfeed = address("jobfeed");
+    let mut state = State::new();
+    state
+        .begin_create(&jobfeed, begin(1), at(0))
+        .expect("starting a create");
+    state
+        .abandon_create(&jobfeed)
+        .expect("a create the server refused");
+    assert_eq!(
+        state.key(&jobfeed).expect("the binding").origin(),
+        Origin::Created
+    );
+
+    state
+        .bind_key(&jobfeed, hash("h1"), 1, at(1))
+        .expect("importing a key instead");
+
+    let binding = state.key(&jobfeed).expect("the binding");
+    assert_eq!(binding.origin(), Origin::Imported);
+    assert_eq!(binding.current().expect("a current key").receiver, None);
+
+    scratch.store(&mut state);
+    assert_eq!(scratch.file().read().expect("reading back"), state);
+}
+
+#[test]
+fn a_write_refuses_a_state_the_reader_would_reject() {
+    // Every public path keeps a binding consistent, so this has to reach past
+    // them to build the shape at all — which is the point. The check makes the
+    // run that produced an inconsistency fail, rather than the next run to
+    // open a file that can never be read again.
+    let scratch = Scratch::new();
+    let (mut state, jobfeed) = in_phase(Phase::Delivered);
+    state.promote_key(&jobfeed, at(9)).expect("promoting");
+    scratch.store(&mut state);
+    let stored = scratch.file().read().expect("reading back");
+
+    state
+        .keys
+        .get_mut(&jobfeed)
+        .and_then(|binding| binding.current.as_mut())
+        .expect("a current key")
+        .receiver = None;
+
+    let file = scratch.file();
+    let lock = file.lock().expect("taking the lock");
+    let error = lock
+        .write(&mut state)
+        .expect_err("a state the reader would refuse");
+    assert_eq!(error.kind(), "state_inconsistent", "{error}");
+    assert!(error.to_string().contains("records no receiver"), "{error}");
+    drop(lock);
+
+    // The file still holds what was there before, at the serial it had.
+    assert_eq!(scratch.file().read().expect("reading back"), stored);
+}
+
+#[test]
+fn rotating_an_imported_key_leaves_a_binding_that_reads_back() {
+    // Keymaster created and delivered the key this address now holds, so the
+    // binding is `created` and records where the plaintext went. Writing
+    // anything else here would produce a file the reader refuses.
+    let mut state = State::new();
+    let jobfeed = address("jobfeed");
+    state
+        .bind_key(&jobfeed, hash("h0"), 1, at(0))
+        .expect("importing");
+    state
+        .begin_create(&jobfeed, begin(2), at(1))
+        .expect("starting a rotation");
+    for transition in [
+        Transition::Created { hash: hash("h1") },
+        Transition::Secured,
+        Transition::DeliveryStarted,
+        Transition::Delivered,
+    ] {
+        state
+            .advance_key(&jobfeed, transition, at(2))
+            .expect("advancing");
+    }
+    state.promote_key(&jobfeed, at(3)).expect("promoting");
+
+    let binding = state.key(&jobfeed).expect("the binding");
+    assert_eq!(binding.origin(), Origin::Created);
+    assert_eq!(binding.retained()[0].hash, hash("h0"));
+
+    let scratch = Scratch::new();
+    scratch.store(&mut state);
+    assert_eq!(scratch.file().read().expect("reading back"), state);
+}
+
+#[test]
+fn a_current_key_whose_origin_and_delivery_record_disagree_is_refused() {
+    // The planner reads the delivery record to decide whether a changed
+    // destination is a reason to replace a live credential, so a created key
+    // with no record would read as an imported one and silently turn "the
+    // receiver moved" into "nothing to do". Both halves of the shape are
+    // refused rather than interpreted.
+    let created_without = r#"{"version":1,"serial":1,"guardrails":{},"keys":{"jobfeed":{
+        "origin":"created","current":{"hash":"h1","generation":1,
+        "bound_at":"2026-01-01T00:00:00Z"}}}}"#;
+    let error = read_document(created_without).expect_err("a created key with no receiver");
+    assert_eq!(error.kind(), "state_corrupt", "{error}");
+    assert!(error.to_string().contains("records no receiver"), "{error}");
+
+    let imported_with = format!(
+        r#"{{"version":1,"serial":1,"guardrails":{{}},"keys":{{"jobfeed":{{
+        "origin":"imported","current":{{"hash":"h1","generation":1,
+        "bound_at":"2026-01-01T00:00:00Z","receiver":"{FINGERPRINT}"}}}}}}}}"#
+    );
+    let error = read_document(&imported_with).expect_err("an imported key with a receiver");
+    assert_eq!(error.kind(), "state_corrupt", "{error}");
+    assert!(error.to_string().contains("was imported"), "{error}");
+}
+
+#[test]
+fn both_delivery_records_a_current_key_may_have_read_back() {
+    let created = format!(
+        r#"{{"version":1,"serial":1,"guardrails":{{}},"keys":{{"jobfeed":{{
+        "origin":"created","current":{{"hash":"h1","generation":1,
+        "bound_at":"2026-01-01T00:00:00Z","receiver":"{FINGERPRINT}"}}}}}}}}"#
+    );
+    let state = read_document(&created).expect("a created key that records its receiver");
+    assert_eq!(
+        state
+            .key(&address("jobfeed"))
+            .and_then(KeyBinding::current)
+            .and_then(|current| current.receiver.clone()),
+        Some(ReceiverFingerprint::from_digest([7; 32]))
+    );
+
+    let imported = r#"{"version":1,"serial":1,"guardrails":{},"keys":{"jobfeed":{
+        "origin":"imported","current":{"hash":"h1","generation":1,
+        "bound_at":"2026-01-01T00:00:00Z"}}}}"#;
+    let state = read_document(imported).expect("an imported key that records none");
+    assert_eq!(
+        state
+            .key(&address("jobfeed"))
+            .and_then(KeyBinding::current)
+            .and_then(|current| current.receiver.clone()),
+        None
+    );
 }
 
 #[test]
@@ -542,10 +715,10 @@ fn binding_a_key_is_one_to_one_and_repeating_it_is_a_no_op() {
     let laptop = address("laptop");
 
     state
-        .bind_key(&jobfeed, hash("h1"), 1, Origin::Imported, at(0))
+        .bind_key(&jobfeed, hash("h1"), 1, at(0))
         .expect("binding");
     state
-        .bind_key(&jobfeed, hash("h1"), 1, Origin::Imported, at(1))
+        .bind_key(&jobfeed, hash("h1"), 1, at(1))
         .expect("repeating the same binding");
     assert_eq!(state.address_owning(&hash("h1")), Some(&jobfeed));
     assert_eq!(
@@ -554,14 +727,14 @@ fn binding_a_key_is_one_to_one_and_repeating_it_is_a_no_op() {
     );
 
     assert_eq!(
-        state.bind_key(&laptop, hash("h1"), 1, Origin::Imported, at(2)),
+        state.bind_key(&laptop, hash("h1"), 1, at(2)),
         Err(BindError::HashOwnedElsewhere {
             hash: hash("h1"),
             owner: jobfeed.clone(),
         })
     );
     assert_eq!(
-        state.bind_key(&jobfeed, hash("h2"), 1, Origin::Imported, at(2)),
+        state.bind_key(&jobfeed, hash("h2"), 1, at(2)),
         Err(BindError::AddressBound {
             address: jobfeed,
             hash: hash("h1"),
@@ -577,13 +750,13 @@ fn binding_records_the_generation_the_configuration_asks_for() {
     // Rebuilding lost state: the configuration is already at generation 3, so
     // recording 1 would make the next plan propose replacing a live key.
     state
-        .bind_key(&jobfeed, hash("h1"), 3, Origin::Imported, at(0))
+        .bind_key(&jobfeed, hash("h1"), 3, at(0))
         .expect("binding");
     assert_eq!(state.key(&jobfeed).expect("the binding").generation(), 3);
 
     // Repeating the import is a no-op, and a later rise is recorded.
     state
-        .bind_key(&jobfeed, hash("h1"), 3, Origin::Imported, at(1))
+        .bind_key(&jobfeed, hash("h1"), 3, at(1))
         .expect("repeating the same binding");
     assert_eq!(
         state.key(&jobfeed).expect("the binding").current(),
@@ -591,10 +764,11 @@ fn binding_records_the_generation_the_configuration_asks_for() {
             hash: hash("h1"),
             generation: 3,
             bound_at: at(0),
+            receiver: None,
         })
     );
     state
-        .bind_key(&jobfeed, hash("h1"), 4, Origin::Imported, at(2))
+        .bind_key(&jobfeed, hash("h1"), 4, at(2))
         .expect("a raised generation");
     assert_eq!(state.key(&jobfeed).expect("the binding").generation(), 4);
 
@@ -607,7 +781,7 @@ fn binding_records_the_generation_the_configuration_asks_for() {
 /// current h1, which is still the live key.
 fn with_a_failed_candidate_above_the_current_key() -> (State, Address) {
     let state = read_document(
-        r#"{"version":1,"serial":1,"guardrails":{},"keys":{"jobfeed":{"origin":"created",
+        r#"{"version":1,"serial":1,"guardrails":{},"keys":{"jobfeed":{"origin":"imported",
         "current":{"hash":"h1","generation":1,"bound_at":"2026-01-01T00:00:00Z"},
         "retained":[{"hash":"h2","generation":2,"status":"failed_candidate",
         "recorded_at":"2026-01-01T00:00:00Z"}]}}}"#,
@@ -631,7 +805,7 @@ fn a_binding_may_not_take_a_generation_another_key_at_the_address_holds() {
     // Raising the current key to 2 would give h1 and h2 the same generation
     // at one address, so equality with what the address records is not enough.
     assert_eq!(
-        state.bind_key(&jobfeed, hash("h1"), 2, Origin::Imported, at(9)),
+        state.bind_key(&jobfeed, hash("h1"), 2, at(9)),
         Err(BindError::GenerationUnavailable {
             address: jobfeed.clone(),
             recorded: 2,
@@ -644,13 +818,13 @@ fn a_binding_may_not_take_a_generation_another_key_at_the_address_holds() {
     // one equality that is allowed, and it changes nothing.
     let before = state.clone();
     state
-        .bind_key(&jobfeed, hash("h1"), 1, Origin::Imported, at(9))
+        .bind_key(&jobfeed, hash("h1"), 1, at(9))
         .expect("re-importing the key already bound");
     assert_eq!(state, before);
 
     // Clearing everything the address records is what a new number means.
     state
-        .bind_key(&jobfeed, hash("h1"), 3, Origin::Imported, at(9))
+        .bind_key(&jobfeed, hash("h1"), 3, at(9))
         .expect("a generation above every one recorded");
     assert_eq!(state.key(&jobfeed).expect("the binding").generation(), 3);
 }
@@ -676,7 +850,7 @@ fn a_retained_key_is_not_bindable_as_the_current_one() {
     // h2 is disabled or awaiting retirement. Binding it as current would also
     // leave one hash recorded twice at one address.
     assert_eq!(
-        state.bind_key(&jobfeed, hash("h2"), 3, Origin::Imported, at(9)),
+        state.bind_key(&jobfeed, hash("h2"), 3, at(9)),
         Err(BindError::HashRetained {
             address: jobfeed.clone(),
             hash: hash("h2"),
@@ -691,7 +865,7 @@ fn a_bound_generation_must_be_at_least_one_and_may_not_fall() {
     let jobfeed = address("jobfeed");
 
     assert_eq!(
-        state.bind_key(&jobfeed, hash("h1"), 0, Origin::Imported, at(0)),
+        state.bind_key(&jobfeed, hash("h1"), 0, at(0)),
         Err(BindError::GenerationInvalid {
             address: jobfeed.clone()
         })
@@ -699,10 +873,10 @@ fn a_bound_generation_must_be_at_least_one_and_may_not_fall() {
     assert!(state.key(&jobfeed).is_none());
 
     state
-        .bind_key(&jobfeed, hash("h1"), 3, Origin::Imported, at(0))
+        .bind_key(&jobfeed, hash("h1"), 3, at(0))
         .expect("binding");
     assert_eq!(
-        state.bind_key(&jobfeed, hash("h1"), 2, Origin::Imported, at(1)),
+        state.bind_key(&jobfeed, hash("h1"), 2, at(1)),
         Err(BindError::GenerationUnavailable {
             address: jobfeed.clone(),
             recorded: 3,
@@ -726,7 +900,7 @@ fn binding_an_address_does_not_drop_the_hashes_it_still_owns() {
 
     let jobfeed = address("jobfeed");
     state
-        .bind_key(&jobfeed, hash("h1"), 2, Origin::Imported, at(0))
+        .bind_key(&jobfeed, hash("h1"), 2, at(0))
         .expect("binding");
 
     let binding = state.key(&jobfeed).expect("the binding");
@@ -740,7 +914,7 @@ fn binding_an_address_does_not_drop_the_hashes_it_still_owns() {
 fn an_address_with_an_operation_in_progress_cannot_be_rebound() {
     let (mut state, jobfeed) = in_phase(Phase::CreateStarted);
     assert_eq!(
-        state.bind_key(&jobfeed, hash("h1"), 1, Origin::Imported, at(9)),
+        state.bind_key(&jobfeed, hash("h1"), 1, at(9)),
         Err(BindError::OperationInProgress {
             address: jobfeed.clone()
         })
@@ -752,7 +926,7 @@ fn a_created_hash_may_not_already_belong_to_another_address() {
     let mut state = State::new();
     let laptop = address("laptop");
     state
-        .bind_key(&laptop, hash("h1"), 1, Origin::Imported, at(0))
+        .bind_key(&laptop, hash("h1"), 1, at(0))
         .expect("binding");
 
     let jobfeed = address("jobfeed");
@@ -1066,7 +1240,8 @@ fn a_refused_delivery_recorded_anywhere_but_secured_is_refused() {
 fn a_pending_generation_at_or_below_the_current_one_is_refused() {
     let error = read_document(&format!(
         r#"{{"version":1,"serial":1,"guardrails":{{}},"keys":{{"jobfeed":{{"origin":"created",
-        "current":{{"hash":"h1","generation":2,"bound_at":"2026-01-01T00:00:00Z"}},
+        "current":{{"hash":"h1","generation":2,"bound_at":"2026-01-01T00:00:00Z",
+        "receiver":"{FINGERPRINT}"}},
         "pending":{{"id":"op-1","generation":2,"phase":"create_started",
         "phase_at":"2026-01-01T00:00:00Z","name":"golf-jobfeed",
         "receiver":"{FINGERPRINT}"}}}}}}}}"#
@@ -1108,7 +1283,7 @@ fn two_keys_at_one_address_sharing_a_generation_are_refused() {
     // The rule `bind_key` and `begin_create` enforce as state is built, applied
     // to a file that could have been hand-edited into this shape.
     let error = read_document(
-        r#"{"version":1,"serial":1,"guardrails":{},"keys":{"jobfeed":{"origin":"created",
+        r#"{"version":1,"serial":1,"guardrails":{},"keys":{"jobfeed":{"origin":"imported",
         "current":{"hash":"h1","generation":2,"bound_at":"2026-01-01T00:00:00Z"},
         "retained":[{"hash":"h2","generation":2,"status":"awaiting_retirement",
         "recorded_at":"2026-01-01T00:00:00Z"}]}}}"#,
@@ -1119,7 +1294,7 @@ fn two_keys_at_one_address_sharing_a_generation_are_refused() {
 
     // Two retained keys can collide with each other just as easily.
     let error = read_document(
-        r#"{"version":1,"serial":1,"guardrails":{},"keys":{"jobfeed":{"origin":"created",
+        r#"{"version":1,"serial":1,"guardrails":{},"keys":{"jobfeed":{"origin":"imported",
         "current":{"hash":"h1","generation":3,"bound_at":"2026-01-01T00:00:00Z"},
         "retained":[{"hash":"h2","generation":2,"status":"retired",
         "recorded_at":"2026-01-01T00:00:00Z"},
@@ -1131,7 +1306,7 @@ fn two_keys_at_one_address_sharing_a_generation_are_refused() {
 
     // Distinct generations are what a real rotation leaves behind.
     read_document(
-        r#"{"version":1,"serial":1,"guardrails":{},"keys":{"jobfeed":{"origin":"created",
+        r#"{"version":1,"serial":1,"guardrails":{},"keys":{"jobfeed":{"origin":"imported",
         "current":{"hash":"h3","generation":3,"bound_at":"2026-01-01T00:00:00Z"},
         "retained":[{"hash":"h2","generation":2,"status":"awaiting_retirement",
         "recorded_at":"2026-01-01T00:00:00Z"},
@@ -1205,7 +1380,7 @@ fn an_address_named_twice_in_one_file_is_refused() {
     // Two distinct addresses are of course fine.
     let state = read_document(
         r#"{"version":1,"serial":1,"guardrails":{},"keys":{
-        "jobfeed":{"origin":"created","current":{"hash":"h1","generation":1,
+        "jobfeed":{"origin":"imported","current":{"hash":"h1","generation":1,
         "bound_at":"2026-01-01T00:00:00Z"}},
         "laptop":{"origin":"imported","current":{"hash":"h2","generation":1,
         "bound_at":"2026-01-01T00:00:00Z"}}}}"#,
@@ -1218,7 +1393,7 @@ fn an_address_named_twice_in_one_file_is_refused() {
 fn one_remote_key_bound_to_two_addresses_is_refused() {
     let error = read_document(
         r#"{"version":1,"serial":1,"guardrails":{},"keys":{
-        "jobfeed":{"origin":"created","current":{"hash":"h1","generation":1,
+        "jobfeed":{"origin":"imported","current":{"hash":"h1","generation":1,
         "bound_at":"2026-01-01T00:00:00Z"}},
         "laptop":{"origin":"imported","current":{"hash":"h1","generation":1,
         "bound_at":"2026-01-01T00:00:00Z"}}}}"#,
@@ -1294,13 +1469,13 @@ fn key_plaintext_cannot_be_read_back_as_a_hash() {
 fn write_under_fault(scratch: &Scratch, fault: Fault) -> (StateError, State) {
     let mut previous = State::new();
     previous
-        .bind_key(&address("jobfeed"), hash("h1"), 1, Origin::Imported, at(0))
+        .bind_key(&address("jobfeed"), hash("h1"), 1, at(0))
         .expect("binding");
     scratch.store(&mut previous);
 
     let faulty = StateFile::with_fault(&scratch.path, fault);
     let mut next = faulty.read().expect("reading state");
-    next.bind_key(&address("laptop"), hash("h2"), 1, Origin::Imported, at(1))
+    next.bind_key(&address("laptop"), hash("h2"), 1, at(1))
         .expect("binding");
 
     let lock = faulty.lock().expect("taking the lock");

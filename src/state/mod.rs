@@ -20,6 +20,13 @@
 //!
 //! [`StateFile`] owns durability: an exclusive lock for writers, a temporary
 //! file, an fsync, and an atomic rename.
+//!
+//! The format is pre-release. Migrations begin at v0.1: until it ships there
+//! is no population of state files to carry forward, so a shape an earlier
+//! development build wrote and this one cannot interpret is rejected as
+//! corrupt rather than migrated. Refusing it is the safe answer — every field
+//! here identifies a live spending credential — and it keeps the invariants
+//! below unconditional instead of split across versions.
 
 mod persist;
 
@@ -217,6 +224,16 @@ pub struct CurrentKey {
     /// When this hash became current.
     #[serde(with = "time::serde::rfc3339")]
     pub bound_at: OffsetDateTime,
+    /// Where this key's plaintext was delivered, as a non-secret digest of the
+    /// receiver's specification.
+    ///
+    /// Recorded on promotion, because a delivered secret cannot be moved: if
+    /// the configuration later names a different destination, the only way to
+    /// honour it is to create a replacement key. Absent for an imported key,
+    /// whose plaintext Keymaster never held, and that absence is never a
+    /// reason to replace anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receiver: Option<ReceiverFingerprint>,
 }
 
 /// Why a hash is still tracked after it stopped being current.
@@ -389,7 +406,11 @@ impl KeyBinding {
     }
 
     /// Every hash this binding names, in any role.
-    fn hashes(&self) -> impl Iterator<Item = &KeyHash> {
+    ///
+    /// Public because owning a hash in any role is what makes a remote key
+    /// managed: the planner reports every key no binding names as unmanaged,
+    /// and a retained predecessor is not a stranger's key.
+    pub fn hashes(&self) -> impl Iterator<Item = &KeyHash> {
         self.current
             .iter()
             .map(|current| &current.hash)
@@ -489,7 +510,7 @@ impl State {
             .map(|(address, _)| address)
     }
 
-    /// Binds a key hash to an address as its current key.
+    /// Binds an existing key hash to an address as its current key.
     ///
     /// This is what `import` records, and it makes no remote call. The caller
     /// passes the generation the configuration asks for, not a counter of its
@@ -499,6 +520,12 @@ impl State {
     ///
     /// Repeating the same binding is a no-op; repeating it after the
     /// configured generation rose records the higher one.
+    ///
+    /// The origin is always `imported`, and is not the caller's to choose. A
+    /// key Keymaster created is bound by [`State::promote_key`], which is the
+    /// only place that knows where the plaintext went; binding one here would
+    /// record a created key with no delivery destination, which is the one
+    /// shape the reader refuses.
     ///
     /// # Errors
     ///
@@ -511,7 +538,6 @@ impl State {
         address: &Address,
         hash: KeyHash,
         generation: u32,
-        origin: Origin,
         at: OffsetDateTime,
     ) -> Result<(), BindError> {
         if generation == 0 {
@@ -550,11 +576,14 @@ impl State {
         self.keys.insert(
             address.clone(),
             KeyBinding {
-                origin,
+                origin: Origin::Imported,
                 current: Some(CurrentKey {
                     hash,
                     generation,
                     bound_at: at,
+                    // An imported key's plaintext was never Keymaster's to
+                    // deliver, so it records no destination (ADR-0001).
+                    receiver: None,
                 }),
                 pending: None,
                 retained,
@@ -798,6 +827,11 @@ impl State {
     /// Any previous current hash moves to `awaiting_retirement`; rotation
     /// never disables a predecessor.
     ///
+    /// The binding's origin becomes `created`, because the key it now names is
+    /// one Keymaster created and delivered. Rotating a key an operator
+    /// imported replaces it with Keymaster's own; the imported hash stays
+    /// tracked as the predecessor, and the origin describes what is current.
+    ///
     /// # Errors
     ///
     /// Returns [`TransitionError`] when there is no pending operation or it
@@ -840,10 +874,12 @@ impl State {
                 recorded_at: at,
             });
         }
+        binding.origin = Origin::Created;
         binding.current = Some(CurrentKey {
             hash,
             generation: pending.generation,
             bound_at: at,
+            receiver: Some(pending.receiver),
         });
         Ok(())
     }
@@ -1026,6 +1062,7 @@ where
 fn check_binding(address: &Address, binding: &KeyBinding) -> Result<(), String> {
     check_generations(address, binding)?;
     check_distinct_generations(address, binding)?;
+    check_delivery_record(address, binding)?;
 
     let Some(pending) = &binding.pending else {
         return Ok(());
@@ -1054,6 +1091,35 @@ fn check_binding(address: &Address, binding: &KeyBinding) -> Result<(), String> 
         ));
     }
     Ok(())
+}
+
+/// Checks that the current key's delivery record matches its origin.
+///
+/// A key Keymaster created was delivered somewhere, and promotion records
+/// where; a key an operator imported was never Keymaster's to deliver, so it
+/// records nothing. The two shapes are what the planner reads to decide
+/// whether a changed destination is a reason to replace a live credential, and
+/// a created key with no destination would read exactly like an imported one —
+/// silently turning "the receiver moved" into "nothing to do".
+///
+/// So the ambiguous shape is refused rather than interpreted. A file written
+/// by an early build of this unreleased version can hold one; it is rejected,
+/// not migrated (see the module documentation).
+fn check_delivery_record(address: &Address, binding: &KeyBinding) -> Result<(), String> {
+    let Some(current) = &binding.current else {
+        return Ok(());
+    };
+    match (binding.origin, current.receiver.is_some()) {
+        (Origin::Created, false) => Err(format!(
+            "the key current at `{address}` was created by Keymaster but records no receiver; a \
+             created key was delivered somewhere, and promotion records where"
+        )),
+        (Origin::Imported, true) => Err(format!(
+            "the key current at `{address}` was imported but records a receiver; Keymaster never \
+             held an imported key's plaintext, so it cannot have delivered it"
+        )),
+        (Origin::Created, true) | (Origin::Imported, false) => Ok(()),
+    }
 }
 
 /// Checks that no recorded generation is zero.
@@ -1161,6 +1227,16 @@ pub enum StateError {
         message: String,
     },
 
+    /// The state a run built is internally inconsistent, so it was not
+    /// written.
+    #[error("refusing to write state {}: {message}", path.display())]
+    Inconsistent {
+        /// The file that was left as it was.
+        path: std::path::PathBuf,
+        /// Which invariant the state in memory violates.
+        message: String,
+    },
+
     /// Another writer holds the exclusive lock.
     #[error("{message}")]
     Locked {
@@ -1219,6 +1295,7 @@ impl StateError {
             Self::Parse { .. } => "state_parse",
             Self::UnsupportedVersion { .. } => "state_unsupported_version",
             Self::Corrupt { .. } => "state_corrupt",
+            Self::Inconsistent { .. } => "state_inconsistent",
             Self::Locked { .. } => "state_locked",
             Self::Write { .. } => "state_write",
             Self::SerialExhausted { .. } => "state_serial_exhausted",

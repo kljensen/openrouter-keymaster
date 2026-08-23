@@ -8,7 +8,7 @@ use std::thread;
 
 use keymaster::config::Receiver;
 use keymaster::ids::{Address, KeyHash, OperationId, ReceiverFingerprint, RemoteName};
-use keymaster::state::{BeginCreate, Origin, Phase, State, StateFile, Transition};
+use keymaster::state::{BeginCreate, Phase, State, StateFile, Transition};
 use support::sentinel::{SECRET_SENTINEL_KEY, assert_absent, assert_absent_under};
 use tempfile::TempDir;
 use time::OffsetDateTime;
@@ -109,7 +109,7 @@ fn concurrent_writers_cannot_lose_a_serial_update() {
                     };
                     let mut state = lock.read().expect("reading state");
                     state
-                        .bind_key(&address, hash.clone(), 1, Origin::Imported, at(0))
+                        .bind_key(&address, hash.clone(), 1, at(0))
                         .expect("binding");
                     if lock.write(&mut state).is_ok() {
                         return;
