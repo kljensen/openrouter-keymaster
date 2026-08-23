@@ -19,9 +19,23 @@ const REPLACEMENT: &str = "[redacted]";
 /// Matching is case-insensitive and looks anywhere in the value, because a
 /// secret pasted into a configuration field is as likely to be surrounded by
 /// other text as to stand alone.
+///
+/// The search allocates nothing. That is a security property, not a
+/// performance one: this runs on credential plaintext — `KeyHash::parse`
+/// checks every hash the create response returns — and a lowercased copy would
+/// be a second, untracked allocation of the secret, dropped without being
+/// cleared and beyond the reach of every wrapper that exists to clear it.
+///
+/// Comparing raw bytes is safe here because the marker is ASCII, and a UTF-8
+/// multi-byte sequence never contains an ASCII byte: no window can match part
+/// of a character.
 #[must_use]
 pub fn looks_like_credential(value: &str) -> bool {
-    value.to_ascii_lowercase().contains(CREDENTIAL_MARKER)
+    let marker = CREDENTIAL_MARKER.as_bytes();
+    value
+        .as_bytes()
+        .windows(marker.len())
+        .any(|window| window.eq_ignore_ascii_case(marker))
 }
 
 /// Escapes everything that is not plain printable text.
@@ -77,6 +91,39 @@ mod tests {
         assert!(looks_like_credential("Bearer SK-OR-V1-ABC"));
         assert!(!looks_like_credential("google/gemini-2.5-flash"));
         assert!(!looks_like_credential("skorv1"));
+    }
+
+    #[test]
+    fn the_marker_is_matched_whatever_its_case_and_wherever_it_sits() {
+        // The scan compares bytes rather than lowercasing a copy, so every
+        // mixed spelling, every position, and every length near the marker's
+        // own is worth stating outright.
+        for matched in [
+            "sk-or-",
+            "SK-OR-",
+            "Sk-Or-V1-abc",
+            "sK-oR-MGMT-abc",
+            "trailing sk-OR-v1",
+            "sk-or-v1 leading",
+            "…sk-or-v1…",
+            "naïve sk-OR-mgmt-abc",
+        ] {
+            assert!(looks_like_credential(matched), "{matched}");
+        }
+
+        for unmatched in [
+            "",
+            "sk-or",
+            "SK-OR",
+            "sk_or_v1",
+            "skor-v1",
+            "google/gemini-2.5-flash",
+            "a name with no marker in it at all",
+            // Multi-byte characters cannot combine into an ASCII marker.
+            "ѕk-оr-v1",
+        ] {
+            assert!(!looks_like_credential(unmatched), "{unmatched}");
+        }
     }
 
     #[test]
