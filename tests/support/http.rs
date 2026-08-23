@@ -1,0 +1,313 @@
+//! A local HTTP server for tests, built on `wiremock`.
+//!
+//! The point of an HTTP server rather than a fake client is that the code
+//! under test is the real client: it serializes real requests, opens real
+//! connections, and parses real responses. Nothing here knows about
+//! Keymaster's types, so it stays usable as the client grows.
+//!
+//! `wiremock` is async and Keymaster's client is blocking, so [`TestServer`]
+//! owns a runtime and exposes a synchronous surface. Tests never write
+//! `async`.
+
+use std::collections::BTreeMap;
+use std::io;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use serde_json::Value;
+use tokio::runtime::{Builder, Runtime};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+/// What [`describe_request`] prints in place of a credential.
+pub const REDACTED: &str = "<redacted>";
+
+/// Headers whose values are credentials and are never printed.
+const SECRET_HEADERS: [&str; 2] = ["authorization", "proxy-authorization"];
+
+/// Longest request body [`describe_request`] prints.
+const BODY_EXCERPT_BYTES: usize = 512;
+
+/// A local HTTP server with a synchronous interface.
+pub struct TestServer {
+    // Declared before `runtime` so the server shuts down first.
+    server: MockServer,
+    runtime: Runtime,
+}
+
+impl TestServer {
+    /// Starts a server on an unused local port.
+    #[must_use]
+    pub fn start() -> Self {
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a tokio runtime for the test server");
+        let server = runtime.block_on(MockServer::start());
+        Self { server, runtime }
+    }
+
+    /// The server's root URL, for example `http://127.0.0.1:53019`.
+    #[must_use]
+    pub fn base_url(&self) -> String {
+        self.server.uri()
+    }
+
+    /// The server's root URL with OpenRouter's API prefix, so a client under
+    /// test can be pointed at it with one base-URL override.
+    #[must_use]
+    pub fn api_base_url(&self) -> String {
+        format!("{}/api/v1", self.server.uri())
+    }
+
+    /// The full URL of one path below the API prefix.
+    #[must_use]
+    pub fn api_url(&self, path: &str) -> String {
+        format!("{}/{}", self.api_base_url(), path.trim_start_matches('/'))
+    }
+
+    /// Registers a mock. It stays active until the server is dropped.
+    ///
+    /// Do not give the mock a `Mock::expect` count. `wiremock` verifies those
+    /// on drop and its failure message dumps every recorded request verbatim,
+    /// `Authorization` header included, which defeats the redaction in
+    /// [`describe_request`]. Assert counts with [`Self::assert_request_count`]
+    /// instead; without an expectation, `wiremock`'s verification has nothing
+    /// to report.
+    pub fn mount(&self, mock: Mock) {
+        self.runtime.block_on(self.server.register(mock));
+    }
+
+    /// Every request the server received, in order.
+    #[must_use]
+    pub fn requests(&self) -> Vec<Request> {
+        self.runtime
+            .block_on(self.server.received_requests())
+            .unwrap_or_default()
+    }
+
+    /// The request at `index`, or a panic naming every request received.
+    #[must_use]
+    pub fn request(&self, index: usize) -> Request {
+        let requests = self.requests();
+        requests.get(index).cloned().unwrap_or_else(|| {
+            panic!(
+                "no request at index {index}; the server received {count}:\n{received}",
+                count = requests.len(),
+                received = describe_requests(&requests)
+            )
+        })
+    }
+
+    /// Fails unless exactly `expected` requests arrived, naming each one with
+    /// credentials redacted. This is the harness's replacement for
+    /// `wiremock`'s own expectation verification.
+    pub fn assert_request_count(&self, expected: usize) {
+        let requests = self.requests();
+        assert!(
+            requests.len() == expected,
+            "expected {expected} request(s) but the server received {count}:\n{received}",
+            count = requests.len(),
+            received = describe_requests(&requests)
+        );
+    }
+}
+
+/// One request rendered for a failure message, with credentials redacted.
+#[must_use]
+pub fn describe_request(request: &Request) -> String {
+    let mut description = format!("{} {}", request.method, request.url.path());
+    if let Some(query) = request.url.query() {
+        description.push('?');
+        description.push_str(query);
+    }
+
+    let mut names: Vec<&str> = request.headers.keys().map(|name| name.as_str()).collect();
+    names.sort_unstable();
+    for name in names {
+        let value = if SECRET_HEADERS.contains(&name) {
+            REDACTED.to_owned()
+        } else {
+            header(request, name).unwrap_or_else(|| "<not printable>".to_owned())
+        };
+        description.push_str(&format!("\n  {name}: {value}"));
+    }
+
+    if !request.body.is_empty() {
+        let excerpt = String::from_utf8_lossy(&request.body);
+        let excerpt: String = excerpt.chars().take(BODY_EXCERPT_BYTES).collect();
+        description.push_str(&format!("\n  body: {excerpt}"));
+    }
+    description
+}
+
+/// Several requests rendered for a failure message.
+#[must_use]
+pub fn describe_requests(requests: &[Request]) -> String {
+    if requests.is_empty() {
+        return "  (no requests)".to_owned();
+    }
+    requests
+        .iter()
+        .enumerate()
+        .map(|(index, request)| format!("[{index}] {}", describe_request(request)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One header's value, or `None` when it is absent or not printable.
+#[must_use]
+pub fn header(request: &Request, name: &str) -> Option<String> {
+    request
+        .headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// A request's body as JSON, so tests assert structure rather than bytes.
+#[must_use]
+pub fn body_json(request: &Request) -> Value {
+    request.body_json().unwrap_or_else(|error| {
+        panic!(
+            "request body is not JSON ({error}):\n{}",
+            describe_request(request)
+        )
+    })
+}
+
+/// A JSON response.
+#[must_use]
+pub fn json_response(status: u16, body: &Value) -> ResponseTemplate {
+    ResponseTemplate::new(status).set_body_json(body)
+}
+
+/// A JSON response that arrives late, for timeout tests.
+#[must_use]
+pub fn delayed(status: u16, body: &Value, delay: Duration) -> ResponseTemplate {
+    json_response(status, body).set_delay(delay)
+}
+
+/// A success whose body claims to be JSON but is truncated.
+#[must_use]
+pub fn malformed_json() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(r#"{"data": [{"hash": "#, "application/json")
+}
+
+/// A success with a body far larger than any real response, for bounded-read
+/// tests.
+#[must_use]
+pub fn oversized_body(bytes: usize) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(vec![b'x'; bytes], "application/json")
+}
+
+/// A 429 carrying `Retry-After` in seconds.
+#[must_use]
+pub fn rate_limited(retry_after_seconds: u32) -> ResponseTemplate {
+    ResponseTemplate::new(429)
+        .insert_header("retry-after", retry_after_seconds.to_string().as_str())
+        .set_body_raw("rate limited", "text/plain")
+}
+
+/// Aborts the connection instead of replying: the request was sent and the
+/// acknowledgement is lost. Pass to `MockBuilder::respond_with_err`.
+pub fn connection_lost(_request: &Request) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "the test server dropped the connection",
+    )
+}
+
+/// Replies with each template in turn, then repeats the last one.
+///
+/// This is how a test scripts a sequence: a 500 then a success, a page then an
+/// empty page, drift appearing on the second read.
+pub struct Scripted {
+    templates: Vec<ResponseTemplate>,
+    next: Mutex<usize>,
+}
+
+impl Scripted {
+    /// Builds a responder from an ordered sequence. Panics if it is empty.
+    #[must_use]
+    pub fn new(templates: impl IntoIterator<Item = ResponseTemplate>) -> Self {
+        let templates: Vec<_> = templates.into_iter().collect();
+        assert!(
+            !templates.is_empty(),
+            "a scripted responder needs at least one response"
+        );
+        Self {
+            templates,
+            next: Mutex::new(0),
+        }
+    }
+
+    /// Builds a responder that returns each JSON body in turn with status 200.
+    #[must_use]
+    pub fn json(bodies: impl IntoIterator<Item = Value>) -> Self {
+        Self::new(
+            bodies
+                .into_iter()
+                .map(|body| json_response(200, &body))
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
+impl Respond for Scripted {
+    // The request is unused: the sequence depends on call order, not content.
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let mut next = self.next.lock().expect("the responder is not poisoned");
+        let index = (*next).min(self.templates.len() - 1);
+        *next += 1;
+        self.templates
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| panic!("scripted response {index} is missing"))
+    }
+}
+
+/// Mutable remote state, for drift tests.
+///
+/// A test seeds it, reads through the client, changes it, and reads again —
+/// exactly what happens when someone edits a key in the OpenRouter dashboard
+/// between two Keymaster runs. Stored values are normalized the way a server
+/// normalizes them, so an ordering difference cannot be mistaken for drift.
+#[derive(Clone, Default)]
+pub struct RemoteCollection(Arc<Mutex<BTreeMap<String, Value>>>);
+
+impl RemoteCollection {
+    /// An empty collection.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds or replaces one resource, keyed by its immutable identity.
+    pub fn put(&self, identity: &str, resource: Value) {
+        self.lock()
+            .insert(identity.to_owned(), super::fixtures::normalize(resource));
+    }
+
+    /// Removes one resource, as a deletion in the dashboard would.
+    pub fn remove(&self, identity: &str) {
+        self.lock().remove(identity);
+    }
+
+    /// The resources currently present, in identity order.
+    #[must_use]
+    pub fn items(&self) -> Vec<Value> {
+        self.lock().values().cloned().collect()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Value>> {
+        self.0
+            .lock()
+            .expect("the remote collection is not poisoned")
+    }
+}
+
+impl Respond for RemoteCollection {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        json_response(200, &super::fixtures::page(self.items()))
+    }
+}

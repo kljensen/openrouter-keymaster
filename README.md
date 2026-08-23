@@ -81,6 +81,30 @@ The Rust toolchain is pinned in `rust-toolchain.toml` and must match
 `package.rust-version` in `Cargo.toml`; `tests/toolchain_pin.rs` fails if they
 drift apart.
 
+## Test harness
+
+`tests/support/` is shared test support that any integration test picks up
+with `mod support;`. It uses no external network and no real credential.
+
+- `http` — a local `wiremock` server with a synchronous interface, so tests of
+  the blocking client never write `async`. It matches routes and methods,
+  captures headers and bodies, counts requests, scripts ordered responses,
+  holds mutable remote state for drift tests, and produces the failure modes
+  the client has to survive: delay, lost connection, malformed JSON, an
+  oversized body, 4xx, 429 with `Retry-After`, and 5xx. Failures print the
+  requests that arrived, with credential headers redacted.
+- `fixtures` — small hand-written JSON bodies with obviously fake secrets.
+- `clock` — a clock that moves only when a test moves it.
+- `receiver` — a fake secret receiver covering the four delivery outcomes:
+  delivered, definitely rejected, timed out, and acknowledgement lost.
+- `sentinel` — a unique secret sentinel with scanners that assert its absence
+  from strings, files, and directory trees, and its presence where disclosure
+  is the expected behavior.
+
+`tests/harness.rs` has one demonstration test per capability, including one
+that proves the server received the expected bearer credential while sentinel
+scanning proves it reached neither diagnostics nor any written artifact.
+
 ## Lint policy
 
 `Cargo.toml` `[lints]` forbids `unsafe_code` and denies `dbg!`, `todo!`,
