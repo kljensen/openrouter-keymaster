@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
-use crate::ids::{Address, RemoteName, Uuid};
+use crate::ids::{Address, ReceiverFingerprint, RemoteName, Uuid};
 
 /// The only schema version this build understands.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -203,14 +203,8 @@ impl Receiver {
     /// can produce the same bytes. Joining the arguments with a separator
     /// would not do: `["a b"]` and `["a", "b"]` are different receivers.
     #[must_use]
-    pub fn fingerprint(&self) -> String {
-        let digest = self.digest();
-        let mut hex = String::with_capacity(digest.len() * 2);
-        for byte in digest {
-            use std::fmt::Write as _;
-            let _ = write!(hex, "{byte:02x}");
-        }
-        hex
+    pub fn fingerprint(&self) -> ReceiverFingerprint {
+        ReceiverFingerprint::from_digest(self.digest())
     }
 
     /// The SHA-256 of this receiver's unambiguously encoded specification.

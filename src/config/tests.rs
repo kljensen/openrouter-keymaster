@@ -284,6 +284,8 @@ fn fingerprint_of(source: &str) -> String {
         .next()
         .expect("one configured receiver")
         .fingerprint()
+        .as_str()
+        .to_owned()
 }
 
 #[test]

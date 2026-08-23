@@ -68,6 +68,42 @@ Three properties are worth knowing before editing one:
   file and nothing else — no credential, no network, no write — and report
   every problem in one pass, each named by its configuration path.
 
+## Local state
+
+State lives in `.openrouter-keymaster/state.json` (git-ignored) unless
+`--state` says otherwise, in a directory Keymaster creates `0700` with the file
+`0600`. It records which immutable remote identity — a key hash, a guardrail
+UUID — each local address owns, where that binding came from, and which
+lifecycle transitions an interrupted run left incomplete. It holds no observed
+policy or usage: those are read fresh from OpenRouter every run.
+
+**State never contains a credential.** No type in it has a field for one, and
+the key-hash type refuses credential-shaped input, so even a confused caller
+cannot write a key's plaintext to disk.
+
+Operating notes:
+
+- **Back it up.** Losing state means re-importing every managed resource by its
+  hash or UUID; there is no way to recover a binding from a display name.
+- **One writer.** `apply` and the other writing commands take an exclusive lock
+  by creating `<state>.lock`. A second run fails immediately with a message
+  naming the lock file rather than waiting. A killed run leaves the file
+  behind; removing it is safe once no Keymaster is running. The lock is local,
+  so it does not coordinate two machines — see ADR-0001.
+- **Reads never write.** `plan` and `status` load state and leave the file
+  exactly as they found it, even when they observe remote drift.
+- **Writes are atomic.** State is written to a sibling temporary file, fsynced,
+  and renamed into place, so an interrupted write leaves the previous file
+  intact rather than a truncated one.
+- **A newer file is refused, not reinterpreted.** State carries a schema
+  version; a file written by a later Keymaster stops this one with an error.
+- **One operation at a time.** At most one key creation or delivery may be
+  incomplete across the whole file; an apply stops at the first unresolved one
+  until an operator resolves it with `keymaster recover`.
+- **Unix only.** These durability and permission guarantees are implemented
+  with Unix primitives, so v0.1 fails to build on other platforms rather than
+  offering a weaker version of them.
+
 ## Output and exit codes
 
 Stdout carries requested results only — human-readable text, or exactly one
