@@ -50,6 +50,7 @@ with a one-line note saying why.
 | ADR | Title | Status |
 | --- | --- | --- |
 | [0001](0001-native-reconciliation.md) | Native declarative reconciliation | Accepted |
+| [0002](0002-journaled-key-creation.md) | Journaled key creation and delivery | Accepted |
 
 ## Review
 
