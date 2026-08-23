@@ -1,9 +1,9 @@
 //! Small hand-written JSON fixtures.
 //!
-//! These are approximations of the OpenRouter management API, written by hand
-//! and kept short enough to read in one screen. The authoritative wire types
-//! land with the client (issues #8 and #9); until then these exist so tests
-//! have a realistic shape to assert against.
+//! These follow the shapes in OpenRouter's published OpenAPI document, written
+//! by hand and kept short enough to read in one screen. They are deliberately
+//! not exhaustive: a response carries more fields than these, and a test that
+//! cares about one adds it.
 //!
 //! Every secret-looking value here is obviously fake. Nothing in this file
 //! hides an authentication or request-shape assertion: a test that cares about
@@ -17,7 +17,17 @@ pub const FAKE_MANAGEMENT_KEY: &str = "sk-or-mgmt-FAKEFAKEFAKE";
 /// An obviously fake inference key, as `POST /keys` would return once.
 pub const FAKE_INFERENCE_KEY: &str = "sk-or-v1-FAKEFAKEFAKE";
 
+/// An obviously fake workspace, in the UUID form the API uses.
+pub const FAKE_WORKSPACE_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+/// Obviously fake guardrail UUIDs.
+pub const FAKE_GUARDRAIL_ID: &str = "11111111-1111-4111-8111-111111111111";
+pub const OTHER_FAKE_GUARDRAIL_ID: &str = "22222222-2222-4222-8222-222222222222";
+
 /// One API key as a list or get response returns it.
+///
+/// The usage counters are non-zero on purpose: they are remote read-only data,
+/// and a test that mistook one for a managed field should fail loudly.
 #[must_use]
 pub fn api_key(hash: &str, name: &str) -> Value {
     json!({
@@ -26,8 +36,22 @@ pub fn api_key(hash: &str, name: &str) -> Value {
         "label": name,
         "disabled": false,
         "limit": 5.0,
-        "usage": 0.0,
+        "limit_remaining": 3.75,
+        "limit_reset": "monthly",
+        "include_byok_in_limit": false,
+        "expires_at": null,
+        "workspace_id": FAKE_WORKSPACE_ID,
+        "usage": 1.25,
+        "usage_daily": 0.25,
+        "usage_weekly": 0.5,
+        "usage_monthly": 1.25,
+        "byok_usage": 0.0,
+        "byok_usage_daily": 0.0,
+        "byok_usage_weekly": 0.0,
+        "byok_usage_monthly": 0.0,
         "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+        "creator_user_id": "user_FAKE",
     })
 }
 
@@ -48,15 +72,46 @@ pub fn guardrail(id: &str, name: &str, allowed_models: &[&str]) -> Value {
         "name": name,
         "description": null,
         "allowed_models": allowed_models,
-        "limit": 10.0,
+        "allowed_providers": null,
+        "ignored_models": null,
+        "ignored_providers": null,
+        "limit_usd": 10.0,
+        "reset_interval": "monthly",
+        "include_byok_in_budgets": false,
+        "enforce_zdr": null,
+        "enforce_zdr_anthropic": true,
+        "workspace_id": FAKE_WORKSPACE_ID,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    })
+}
+
+/// One key-to-guardrail assignment.
+#[must_use]
+pub fn assignment(id: &str, key_hash: &str, guardrail_id: &str) -> Value {
+    json!({
+        "id": id,
+        "key_hash": key_hash,
+        "guardrail_id": guardrail_id,
+        "key_name": "a key",
+        "key_label": "a key",
+        "assigned_by": "user_FAKE",
         "created_at": "2026-01-01T00:00:00Z",
     })
 }
 
-/// A collection page.
+/// A collection page, as `GET /keys` returns one: records and nothing else.
 #[must_use]
 pub fn page(items: Vec<Value>) -> Value {
     json!({ "data": items })
+}
+
+/// A collection page that also reports a total, as the guardrail and
+/// assignment endpoints do. The total is a parameter so a test can make it
+/// disagree with the records.
+#[must_use]
+pub fn counted_page(items: Vec<Value>, total_count: u64) -> Value {
+    json!({ "data": items, "total_count": total_count })
 }
 
 /// A page with no items, which ends pagination.

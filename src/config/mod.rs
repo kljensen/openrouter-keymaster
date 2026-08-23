@@ -256,8 +256,9 @@ impl ResetInterval {
         }
     }
 
-    /// Parses the configured spelling.
-    fn parse(value: &str) -> Option<Self> {
+    /// Parses the configured spelling. Also used to read the same word back
+    /// from the API, so a desired interval and an observed one compare equal.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "daily" => Some(Self::Daily),
             "weekly" => Some(Self::Weekly),

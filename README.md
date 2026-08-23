@@ -154,6 +154,29 @@ below inspectable.
   so no caller can route that plaintext into `Debug` or `Serialize` by choosing
   its own response type.
 
+## Reading OpenRouter
+
+`src/api/` reads the resources Keymaster manages: keys, guardrails, and the
+assignments between them. `api::Reader` is read-only — no write endpoint exists
+yet — and its types are observations, not desires. Usage counters, remaining
+budget, and creation timestamps are OpenRouter's alone, so they live in
+`KeyUsage` and `RemoteTimestamps` rather than beside the managed fields, where
+a diff could pick one up and propose "fixing" recorded spend.
+
+Pagination is centralized in `api::pagination` because a partial snapshot is
+worse than none: a key that pagination missed reads as a key that is not there,
+and the plan that follows would propose creating a second one. So a listing
+stops on an empty page, advances by the records actually returned, deduplicates
+by immutable identity, and refuses — with a diagnostic naming the offset and
+the page — a non-empty page that repeats only identities already seen. A
+documented `total_count` tightens the bound on how much will be read but never
+ends the listing, so a wrong total cannot truncate a snapshot. Page and record
+caps stop a listing that would otherwise never end.
+
+Unknown response fields are ignored, so a field OpenRouter adds tomorrow does
+not stop a plan today; a record with no usable identity is a typed
+invalid-response error instead.
+
 ## Output and exit codes
 
 Stdout carries requested results only — human-readable text, or exactly one

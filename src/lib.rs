@@ -17,6 +17,7 @@ compile_error!(
      are implemented for Unix"
 );
 
+pub mod api;
 pub mod app;
 pub mod cli;
 pub mod client;

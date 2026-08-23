@@ -15,8 +15,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use support::clock::FakeClock;
 use support::fixtures::{
-    self, FAKE_INFERENCE_KEY, FAKE_MANAGEMENT_KEY, api_error, api_key, empty_page, guardrail,
-    key_pages, page,
+    self, FAKE_GUARDRAIL_ID, FAKE_INFERENCE_KEY, FAKE_MANAGEMENT_KEY, api_error, api_key,
+    empty_page, guardrail, key_pages, page,
 };
 use support::http::{
     RemoteCollection, Scripted, TestServer, body_json, connection_lost, delayed, describe_request,
@@ -182,8 +182,8 @@ fn the_server_normalizes_collections_so_ordering_is_not_drift() {
     let server = TestServer::start();
     let remote = RemoteCollection::new();
     remote.put(
-        "guardrail-1",
-        guardrail("guardrail-1", "cheap", &["z/model", "a/model"]),
+        FAKE_GUARDRAIL_ID,
+        guardrail(FAKE_GUARDRAIL_ID, "cheap", &["z/model", "a/model"]),
     );
     server.mount(
         Mock::given(method("GET"))
