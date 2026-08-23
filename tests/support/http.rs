@@ -8,10 +8,17 @@
 //! `wiremock` is async and Keymaster's client is blocking, so [`TestServer`]
 //! owns a runtime and exposes a synchronous surface. Tests never write
 //! `async`.
+//!
+//! [`RawServer`] is the exception to all of that: a few failures live below the
+//! level `wiremock` models — a response whose body stops before its declared
+//! length — so that one writes bytes onto a socket directly.
 
 use std::collections::BTreeMap;
-use std::io;
+use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -264,6 +271,182 @@ impl Respond for Scripted {
             .cloned()
             .unwrap_or_else(|| panic!("scripted response {index} is missing"))
     }
+}
+
+/// A response whose declared length is longer than the bytes that follow.
+///
+/// The client reads a good status line and good headers, starts reading the
+/// body, and the connection closes underneath it. That is what a reset in the
+/// middle of a large page looks like, and it is not the same failure as a
+/// request that never arrived: the read is safe to repeat, and a client that
+/// gives up here returns a partial snapshot.
+#[must_use]
+pub fn truncated_body(body: &str) -> Vec<u8> {
+    truncated_body_with_status(200, body)
+}
+
+/// A truncated body under a status of the caller's choosing.
+///
+/// Separate from [`truncated_body`] because the status is the whole point of
+/// some cases: a rejection and a redirect mean what they mean whether or not
+/// their body arrives.
+#[must_use]
+pub fn truncated_body_with_status(status: u16, body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 {status} STATUS\r\nContent-Type: application/json\r\n\
+         Content-Length: {declared}\r\n\r\n{body}",
+        // Twice what is actually written, so the body always stops early.
+        declared = body.len() * 2 + 16,
+    )
+    .into_bytes()
+}
+
+/// A complete raw response carrying `body`.
+#[must_use]
+pub fn whole_body(body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {length}\r\n\
+         Connection: close\r\n\r\n{body}",
+        length = body.len(),
+    )
+    .into_bytes()
+}
+
+/// A server that writes raw bytes, for responses `wiremock` cannot express.
+///
+/// One scripted response per connection, the last one repeating. It reads the
+/// whole request first — headers and any declared body — so the client is never
+/// answered before it has finished asking.
+pub struct RawServer {
+    address: SocketAddr,
+    requests: Arc<AtomicUsize>,
+    stopped: Arc<AtomicBool>,
+}
+
+impl RawServer {
+    /// Starts a server on an unused local port.
+    #[must_use]
+    pub fn scripted(responses: Vec<Vec<u8>>) -> Self {
+        Self::holding(responses, Duration::ZERO)
+    }
+
+    /// As [`RawServer::scripted`], but the connection stays open for `hold`
+    /// after the bytes are written instead of closing.
+    ///
+    /// With a body that stops short of its declared length, this is a stall
+    /// rather than a reset: the client is left waiting for bytes that never
+    /// come, which is what expires a whole-request timeout partway through a
+    /// response.
+    #[must_use]
+    pub fn holding(responses: Vec<Vec<u8>>, hold: Duration) -> Self {
+        assert!(!responses.is_empty(), "a raw server needs a response");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let address = listener.local_addr().expect("the bound address");
+        listener
+            .set_nonblocking(true)
+            .expect("a pollable listener, so the server can be stopped");
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let served = Self {
+            address,
+            requests: Arc::clone(&requests),
+            stopped: Arc::clone(&stopped),
+        };
+
+        thread::spawn(move || {
+            let mut answered = 0_usize;
+            while !stopped.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        requests.fetch_add(1, Ordering::Relaxed);
+                        let response = responses
+                            .get(answered.min(responses.len() - 1))
+                            .cloned()
+                            .expect("a scripted response");
+                        answered += 1;
+                        // Each connection is answered on its own thread. A
+                        // server that held the accept loop while stalling one
+                        // response would leave a retried request waiting in the
+                        // kernel's backlog — arriving, but never counted — and
+                        // a test asserting "exactly one request" would pass
+                        // whether or not the client retried.
+                        thread::spawn(move || answer(&stream, &response, hold));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        served
+    }
+
+    /// The server's root URL with OpenRouter's API prefix.
+    #[must_use]
+    pub fn api_base_url(&self) -> String {
+        format!("http://{}/api/v1", self.address)
+    }
+
+    /// The server's origin, with no path — the shape a proxy is named in.
+    #[must_use]
+    pub fn origin(&self) -> String {
+        format!("http://{}", self.address)
+    }
+
+    /// How many connections the server has answered.
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        self.requests.load(Ordering::Relaxed)
+    }
+
+    /// Fails unless exactly `expected` requests arrived.
+    pub fn assert_request_count(&self, expected: usize) {
+        assert_eq!(
+            self.request_count(),
+            expected,
+            "the raw server answered a different number of requests than expected"
+        );
+    }
+}
+
+impl Drop for RawServer {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Reads one whole request, writes `response`, waits `hold`, then closes.
+fn answer(stream: &TcpStream, response: &[u8], hold: Duration) {
+    stream
+        .set_nonblocking(false)
+        .expect("a blocking accepted socket");
+    let mut reader = BufReader::new(stream);
+    let mut length = 0_usize;
+
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            length = value.trim().parse().unwrap_or(0);
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+    // Draining the request body matters: answering before the client has
+    // finished writing turns the test's scripted response into a reset.
+    let mut body = vec![0_u8; length];
+    let _ = reader.read_exact(&mut body);
+
+    let mut stream = stream;
+    let _ = stream.write_all(response);
+    let _ = stream.flush();
+    thread::sleep(hold);
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 /// Mutable remote state, for drift tests.

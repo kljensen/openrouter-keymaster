@@ -10,6 +10,13 @@ publish = false
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+# URL path segments and query values are percent-encoded before they reach the
+# wire, so a name or hash cannot change which resource a request addresses.
+percent-encoding = "2.3"
+# `rustls` rather than the platform's OpenSSL: one TLS stack, built the same way
+# everywhere. `system-proxy` is left off deliberately — a management credential
+# should not start flowing through a proxy because of an OS-wide setting.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "charset", "http2", "json", "rustls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # Receiver fingerprints are a digest, so a changed delivery destination is
@@ -17,16 +24,16 @@ serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
 # `serde-well-known` brings the RFC 3339 parser and serializer used for every
-# timestamp in the configuration and in state.
-time = { version = "0.3", features = ["serde-well-known"] }
+# timestamp in the configuration and in state; `macros` builds the HTTP-date
+# formats `Retry-After` is parsed with at compile time.
+time = { version = "0.3", features = ["macros", "serde-well-known"] }
 toml = "1.1"
+# The management credential's buffer is cleared when its wrapper is dropped.
+zeroize = "1.8"
 
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
-# The test harness drives the blocking client the production code will use,
-# over plain HTTP to a local server, so it needs no TLS backend of its own.
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }
 tempfile = "3.23"
 # `wiremock` is async; the harness owns the runtime so tests stay synchronous.
 tokio = { version = "1", features = ["rt-multi-thread"] }
@@ -37,6 +44,9 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 dbg_macro = "deny"
+# The list lives in clippy.toml; it keeps unbounded HTTP clients out of the
+# codebase so every request goes through the one approved constructor.
+disallowed_methods = "deny"
 todo = "deny"
 unimplemented = "deny"
 unwrap_used = "deny"

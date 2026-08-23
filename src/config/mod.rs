@@ -313,7 +313,11 @@ impl Usd {
     }
 
     /// Builds an amount from whole dollars.
-    fn from_dollars(dollars: f64) -> Result<Self, UsdProblem> {
+    ///
+    /// Also used to read a budget back from the API, which reports one as a
+    /// JSON number: an observed amount and a desired one have to normalize the
+    /// same way, or every plan would show a difference that is not there.
+    pub(crate) fn from_dollars(dollars: f64) -> Result<Self, UsdProblem> {
         if !dollars.is_finite() {
             return Err(UsdProblem::NotFinite);
         }
@@ -345,7 +349,7 @@ impl fmt::Display for Usd {
 
 /// Why an amount of money was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UsdProblem {
+pub(crate) enum UsdProblem {
     NotFinite,
     Negative,
     TooLarge,
@@ -354,7 +358,7 @@ enum UsdProblem {
 
 impl UsdProblem {
     /// A message that describes the rule without quoting the value.
-    const fn message(self) -> &'static str {
+    pub(crate) const fn message(self) -> &'static str {
         match self {
             Self::NotFinite => "expected a number of US dollars, not an infinity or a NaN",
             Self::Negative => "a USD amount must not be negative",

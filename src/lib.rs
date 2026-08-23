@@ -19,6 +19,7 @@ compile_error!(
 
 pub mod app;
 pub mod cli;
+pub mod client;
 pub mod config;
 pub mod error;
 pub mod ids;

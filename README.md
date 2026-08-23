@@ -45,6 +45,8 @@ one is true.
 The management credential is read from the `OPENROUTER_MANAGEMENT_KEY`
 environment variable only. There is deliberately no command-line option for
 it, so it cannot appear in a process argument list, and no command echoes it.
+In memory it is a `client::ManagementKey`, which cannot be serialized, prints
+as `[redacted]`, and clears its buffer when dropped.
 
 ## Configuration
 
@@ -103,6 +105,54 @@ Operating notes:
 - **Unix only.** These durability and permission guarantees are implemented
   with Unix primitives, so v0.1 fails to build on other platforms rather than
   offering a weaker version of them.
+
+## OpenRouter client
+
+`src/client/` is a small blocking client for the OpenRouter management API. It
+is deliberately not a generated SDK: Keymaster touches a handful of endpoints,
+sequentially, and a hand-written client is what makes the safety properties
+below inspectable.
+
+- **One client, built one way.** Every request goes through the client built by
+  `client::build_http`, which sets a connect timeout, a whole-request timeout, a
+  Keymaster user agent, `Accept: application/json`, and a redirect policy that
+  refuses to follow anything — the request carries the management credential,
+  and the redirect target is chosen by whatever answered. `clippy.toml` refuses
+  `reqwest::blocking::Client::new` so a client without those cannot be created
+  elsewhere; `tests/lints.rs` fails if that ban is removed.
+- **Management traffic goes direct.** Proxies are disabled outright, because
+  `reqwest` otherwise honours `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` and a proxy
+  named there terminates TLS to inspect what passes through it — the
+  `Authorization` header included. Ambient environment must not be able to
+  redirect a credential.
+- **Where a request goes is decided by a parser, not a prefix check.** A base
+  URL is validated with the same URL parser that will resolve the request, and
+  refused unless it is already written the way it will be requested: `https:///api`
+  looks absolute and silently resolves to the host `api`.
+- **The credential cannot be printed or serialized.** `ManagementKey` is read
+  only from `OPENROUTER_MANAGEMENT_KEY`, has no `Serialize` and no accessor, is
+  cleared when dropped, and reaches the wire once, as a header marked sensitive.
+- **Responses are bounded.** Bodies are read up to a cap and refused past it;
+  path segments and query values are percent-encoded.
+- **Errors are Keymaster's own.** `ApiError` distinguishes transport, timeout,
+  HTTP status, redirect, authentication, invalid-response, oversized-response,
+  and invariant failures. It exposes no `reqwest` type, and every string in one
+  is redacted and truncated. A status that is definitive on its own — a redirect
+  or a rejection — keeps its status even when the body underneath it cannot be
+  read, so a create refused with a 400 stays a refusal rather than becoming an
+  ambiguous failure that sends an operator to `recover`.
+- **Retries belong to the operation.** A safe read is retried a bounded number
+  of times on a lost connection, a body that stops partway through an otherwise
+  good response, a 429, or a transient 5xx; `Retry-After` is
+  honoured as a signal but clamped to the policy. A write has no retry loop at
+  all, and the transport's own HTTP/2 retry policy is turned off underneath it:
+  a replayed `POST /keys` can create a live credential nobody knows about, so an
+  ambiguous write is resolved by refreshing state (ADR-0002).
+- **A secret that arrives once is typed as such.** `POST /keys` returns a
+  `CreatedKey`, whose plaintext has no `Serialize`, prints redacted, and is
+  cleared when dropped. No public method returns unrestricted JSON from a write,
+  so no caller can route that plaintext into `Debug` or `Serialize` by choosing
+  its own response type.
 
 ## Output and exit codes
 
@@ -170,7 +220,9 @@ scanning proves it reached neither diagnostics nor any written artifact.
 `unimplemented!`, and `unwrap()`. Complexity tripwires live in `clippy.toml`:
 cognitive complexity 20, function length 80, argument count 7, type complexity
 200. Tests may add narrowly scoped `#[allow(...)]` with a reason; production
-code may not disable the policy wholesale.
+code may not disable the policy wholesale. `clippy.toml` also lists disallowed
+methods, currently the two `reqwest` client constructors that would produce an
+HTTP client with no timeout, redirect policy, or credential.
 
 ## Dependency policy
 

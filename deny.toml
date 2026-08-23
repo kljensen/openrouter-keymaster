@@ -17,6 +17,14 @@ allow = [
     "Zlib",
 ]
 
+# The rustls trust anchors are Mozilla's CA bundle, published as *data* under
+# the Community Data License Agreement rather than as code under a software
+# licence. CDLA-Permissive-2.0 imposes no conditions on use or redistribution,
+# so it is allowed for that one crate rather than for the whole graph.
+[[licenses.exceptions]]
+name = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

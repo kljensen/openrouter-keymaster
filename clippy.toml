@@ -1,3 +1,14 @@
+# An HTTP client built anywhere but `client::build_http` has no timeout, no
+# redirect policy, no user agent, and no `Authorization` header. A request made
+# with one would hang forever or follow a redirect carrying the management
+# credential to another host. `Client::new` is the only way to get such a client
+# without going through `Client::builder`, so it is refused outright.
+# tests/lints.rs fails if this list stops naming them.
+disallowed-methods = [
+    { path = "reqwest::blocking::Client::new", reason = "build the client with keymaster::client::Client, which sets timeouts, the user agent, and the redirect policy" },
+    { path = "reqwest::Client::new", reason = "Keymaster is a blocking CLI; use keymaster::client::Client" },
+]
+
 # Complexity tripwires. The matching lints are denied in Cargo.toml [lints].
 cognitive-complexity-threshold = 20
 too-many-lines-threshold = 80
