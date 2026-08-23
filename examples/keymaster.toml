@@ -1,0 +1,62 @@
+# An example Keymaster desired-state configuration.
+#
+# Every value here is fake. Copy this file to `keymaster.toml`, replace the
+# names, paths, and identifiers, and run `keymaster plan`.
+#
+# Keymaster never reads a credential from this file. The management key comes
+# from the `OPENROUTER_MANAGEMENT_KEY` environment variable, and a new
+# inference key's plaintext is delivered to a receiver — never written here,
+# never printed. A field whose value looks like an OpenRouter credential is
+# rejected, and so is any field this schema does not define.
+
+version = 1
+
+[defaults]
+# Whether spend on your own provider keys counts against a USD limit.
+# Individual guardrails and keys may override this.
+include_byok_in_limit = false
+
+# A guardrail holds the model, provider, and budget policy. A key is assigned
+# at most one guardrail.
+[guardrails.cheap_summarization]
+name = "cheap-summarization"
+description = "Small, cheap models for background summarization."
+allowed_models = ["google/gemini-2.5-flash", "openai/gpt-4o-mini"]
+denied_providers = ["example-untrusted-provider"]
+limit_usd = 10
+reset_interval = "monthly"
+require_zdr = true
+
+[keys.golf_jobfeed]
+name = "golf-jobfeed"
+limit_usd = 5
+limit_reset = "monthly"
+expires_at = "2027-01-01T00:00:00Z"
+disabled = false
+workspace_id = "6c7f5f5a-4f1b-4e2d-9a3c-1b2d3e4f5a6b"
+guardrail = "cheap_summarization"
+receiver = "jobfeed_vault"
+# Raise this to ask for a replacement key. It only ever moves upward.
+generation = 1
+
+# TOML has no null, so clearing a remote field is spelled by naming it here.
+# Omitting a field means "leave the remote value alone"; naming it in `clear`
+# means "set the remote value to nothing". Uncomment to drop the expiry:
+# clear = ["expires_at"]
+
+# A receiver is where a newly created key's plaintext goes. Nothing is
+# implicit: a key with no receiver can be managed and imported, but never
+# created.
+
+# The file receiver writes one 0600 file. It is meant for local development
+# and tests.
+[receivers.laptop_file]
+type = "file"
+path = "/var/lib/keymaster/laptop-pi.key"
+
+# The command receiver runs a program with no shell and hands it a JSON
+# envelope on stdin. Arguments are a vector and never carry secret material.
+[receivers.jobfeed_vault]
+type = "command"
+program = "/usr/local/bin/keymaster-vault-receiver"
+args = ["add-file", "jobfeed_openrouter_api_key"]

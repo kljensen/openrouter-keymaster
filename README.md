@@ -4,8 +4,9 @@ A declarative OpenRouter management CLI, written in Rust.
 
 Keymaster is an early work in progress. The command-line surface below is
 final for v0.1, but no command does its work yet: the OpenRouter API client,
-desired-state configuration, planning, and apply behavior are not implemented,
-so every command fails with a "not implemented yet" error and exits 1.
+planning, and apply behavior are not implemented, so every command fails with
+a "not implemented yet" error and exits 1. The desired-state configuration
+model is implemented but not yet reached by any command.
 
 ## Build, run, and test
 
@@ -44,6 +45,28 @@ one is true.
 The management credential is read from the `OPENROUTER_MANAGEMENT_KEY`
 environment variable only. There is deliberately no command-line option for
 it, so it cannot appear in a process argument list, and no command echoes it.
+
+## Configuration
+
+Desired state is one TOML file. [`examples/keymaster.toml`](examples/keymaster.toml)
+is a complete, commented example with fake values; copy it to `keymaster.toml`
+and edit. It declares `guardrails` (model, provider, and budget policy), `keys`
+(the inference keys Keymaster manages), and `receivers` (where a newly created
+key's plaintext is delivered), each addressed by a stable local name that is
+never sent to OpenRouter.
+
+Three properties are worth knowing before editing one:
+
+- **Omitted is not empty.** A field you leave out is not managed: Keymaster
+  reads the remote value and leaves it alone. TOML has no null, so clearing a
+  remote field is spelled by naming it in the block's `clear` list.
+- **No credential ever goes in this file.** The management key comes from the
+  environment, and a new key's plaintext goes to a receiver. Any unrecognized
+  field is a hard error, and so is any value shaped like an OpenRouter
+  credential.
+- **Validation runs before anything else.** Parsing and validation read one
+  file and nothing else — no credential, no network, no write — and report
+  every problem in one pass, each named by its configuration path.
 
 ## Output and exit codes
 
