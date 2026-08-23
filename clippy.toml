@@ -1,0 +1,5 @@
+# Complexity tripwires. The matching lints are denied in Cargo.toml [lints].
+cognitive-complexity-threshold = 20
+too-many-lines-threshold = 80
+too-many-arguments-threshold = 7
+type-complexity-threshold = 200

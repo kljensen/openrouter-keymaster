@@ -2,5 +2,24 @@
 name = "keymaster"
 version = "0.1.0"
 edition = "2024"
+# Must equal `toolchain.channel` in rust-toolchain.toml.
+# tests/toolchain_pin.rs fails if the two ever disagree.
+rust-version = "1.92.0"
+# Keymaster is an application, not a crates.io library.
+publish = false
 
 [dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+# Thresholds live in clippy.toml.
+cognitive_complexity = "deny"
+too_many_lines = "deny"
+too_many_arguments = "deny"
+type_complexity = "deny"

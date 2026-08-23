@@ -1,0 +1,5 @@
+# `channel` must equal `package.rust-version` in Cargo.toml.
+# tests/toolchain_pin.rs fails if the two ever disagree.
+[toolchain]
+channel = "1.92.0"
+components = ["rustfmt", "clippy"]
