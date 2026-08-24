@@ -1,5 +1,5 @@
-//! The three explicit end-of-life commands: `retire`, `delete key`, and
-//! `state forget`.
+//! The four explicit end-of-life commands: `retire`, `decommission`,
+//! `delete key`, and `state forget`.
 //!
 //! Nothing here is ever planned, proposed, or performed as a side effect of
 //! something else. A predecessor left behind by a rotation stays untouched
@@ -12,6 +12,10 @@
 //!
 //! - **`retire NAME --hash HASH`** makes a tracked key unusable and keeps it.
 //!   The hash stays in state, visible to an audit and to a later `delete`.
+//! - **`decommission NAME --hash HASH [--delete]`** does the same to the key an
+//!   address is *using*, which is the one thing `retire` refuses. It exists
+//!   because rotation replaces a credential and nothing else ended one: after
+//!   it the address is bound and owns no key.
 //! - **`delete key --hash HASH`** removes the remote key permanently, and only
 //!   then stops tracking it. The order is not negotiable: state is what makes a
 //!   spending credential findable, so it is the last thing to go.
@@ -21,12 +25,15 @@
 //!
 //! # Immutable identity, always
 //!
-//! Both remote mutations take a hash, never a name. A display name is mutable
-//! and not unique (ADR-0001), and these are the two operations where addressing
-//! the wrong key is unrecoverable. `delete key` takes no address either: the
-//! hash alone identifies the key, and the address it belongs to is looked up
-//! rather than asserted, so an operator cannot delete one address's key by
-//! typing another address's name.
+//! Every remote mutation takes a hash, never a name. A display name is mutable
+//! and not unique (ADR-0001), and these are the operations where addressing the
+//! wrong key is unrecoverable. `delete key` takes no address either: the hash
+//! alone identifies the key, and the address it belongs to is looked up rather
+//! than asserted, so an operator cannot delete one address's key by typing
+//! another address's name. `decommission` is the strictest of the three: the
+//! hash it is given has to be the address's current one, because a hash that
+//! merely belongs to the address is not evidence that the operator knows which
+//! credential they are switching off.
 //!
 //! # Only a key Keymaster tracks
 //!
@@ -45,13 +52,16 @@ use crate::client::{ApiError, Client};
 use crate::error::Error;
 use crate::ids::{Address, IdError, KeyHash};
 use crate::output::Renderer;
-use crate::report::{DeleteOutcome, DeleteReport, ForgetReport, Released, RetireReport};
+use crate::report::{
+    DecommissionReport, DeleteAttempt, DeleteOutcome, DeleteReport, Ending, ForgetReport, Released,
+    RetireReport,
+};
 use crate::state::{
     KeyBinding, Phase, RetainedKey, RetainedStatus, State, StateFile, StateLock, TransitionError,
 };
 
 use super::Resolution;
-use super::issuance::disable_and_confirm;
+use super::issuance::{Disabled, disable_and_confirm};
 
 // --- retire ------------------------------------------------------------------
 
@@ -120,17 +130,13 @@ fn retire_hash(cli: &Cli, name: &str, hash: &str) -> Result<Retirement, Error> {
     // a repeated `retire` cost one read and change nothing. The answer comes
     // from a fresh read either way: this branch and the one below establish the
     // same fact by the same means.
-    let (confirmed, detail) = if observed.disabled {
-        (
-            true,
-            "OpenRouter already has this key disabled; a read confirmed it and nothing was sent."
-                .to_owned(),
-        )
+    let outcome = if observed.disabled {
+        Disabled::already_disabled()
     } else {
         disable_and_confirm(&reader, &writer, &hash)
     };
 
-    let status = if confirmed {
+    let status = if outcome.confirmed {
         RetainedStatus::Retired
     } else {
         RetainedStatus::RetirementFailed
@@ -143,8 +149,8 @@ fn retire_hash(cli: &Cli, name: &str, hash: &str) -> Result<Retirement, Error> {
             &hash,
             retained.generation,
             status,
-            confirmed,
-            detail,
+            outcome.confirmed,
+            outcome.detail,
         ),
         address,
         hash,
@@ -355,6 +361,252 @@ fn attempt_delete(
     }
 }
 
+// --- decommission ------------------------------------------------------------
+
+/// Runs `decommission`.
+///
+/// # Errors
+///
+/// Returns [`LifecycleError`] for a value this command cannot use, a hash that
+/// is not the address's working key, an operation in progress anywhere, a
+/// disable that could not be confirmed, or a deletion that could not be
+/// confirmed; and the state and API errors of the steps it performs.
+pub(super) fn decommission<O: Write, E: Write>(
+    cli: &Cli,
+    name: &str,
+    hash: &str,
+    delete: bool,
+    renderer: &mut Renderer<O, E>,
+) -> Result<(), Error> {
+    let attempt = decommission_key(cli, name, hash, delete)?;
+    super::write(renderer, &attempt.report, attempt.report.warnings())?;
+    if attempt.report.settled() {
+        return Ok(());
+    }
+    Err(attempt.failure().into())
+}
+
+/// One decommission's result document and what it would take to finish.
+struct Decommissioning {
+    report: DecommissionReport,
+    address: Address,
+    hash: KeyHash,
+    /// Whether a read proved the key is out of service.
+    disabled: bool,
+    /// Whether `--delete` asked for the removal too.
+    delete: bool,
+}
+
+impl Decommissioning {
+    /// The error a run that could not prove a step exits with.
+    ///
+    /// Which step it stopped at decides the command an operator runs next, and
+    /// they are different commands: a disable that did not take leaves the key
+    /// current, so the whole decommission is repeated, while a delete that did
+    /// not take leaves a retained hash that `delete key` alone can finish.
+    fn failure(&self) -> LifecycleError {
+        if self.disabled {
+            return LifecycleError::DecommissionDeleteUnconfirmed {
+                address: self.address.clone(),
+                hash: self.hash.clone(),
+            };
+        }
+        LifecycleError::DecommissionUnconfirmed {
+            address: self.address.clone(),
+            hash: self.hash.clone(),
+            retry: retry_command(&self.address, &self.hash, self.delete),
+        }
+    }
+}
+
+/// Takes an address's working key out of service, and optionally deletes it.
+///
+/// The configuration is deliberately not loaded, as in `retire`: this ends a
+/// key, and an address whose block someone already removed is exactly the case
+/// that needs it most.
+///
+/// State moves once and only on evidence. A disable nothing proved leaves the
+/// binding byte for byte as it was — the address goes on using the key it was
+/// using, which is the truth — and the hash becomes retained only after a read
+/// says the key cannot be used.
+fn decommission_key(
+    cli: &Cli,
+    name: &str,
+    hash: &str,
+    delete: bool,
+) -> Result<Decommissioning, Error> {
+    let address = Address::parse(name).map_err(|error| argument("NAME", &error))?;
+    let hash = KeyHash::parse(hash).map_err(|error| argument("--hash", &error))?;
+
+    let file = StateFile::new(&cli.state);
+    let lock = file.lock()?;
+    let mut state = lock.read()?;
+
+    check_nothing_pending(&state)?;
+    let generation = in_service(&state, &address, &hash)?;
+
+    let client = Client::from_env()?;
+    let (reader, writer) = (Reader::new(&client), Writer::new(&client));
+    let service = take_out_of_service(&reader, &writer, &hash)?;
+
+    let deletion = if service.confirmed {
+        let retained = state
+            .decommission_current(&address, &hash, RetainedStatus::Retired, now())
+            .map_err(LifecycleError::Refused)?;
+        lock.write(&mut state)?;
+        delete
+            .then(|| {
+                let attempt = delete_result(&reader, &writer, &hash, service.absent);
+                record_deletion(&lock, &mut state, &address, &retained, attempt)
+            })
+            .transpose()?
+    } else {
+        None
+    };
+
+    Ok(Decommissioning {
+        report: DecommissionReport::new(
+            &address,
+            &hash,
+            generation,
+            Ending {
+                disabled: service.confirmed,
+                disable_detail: service.detail,
+                deletion,
+                retry: retry_command(&address, &hash, delete),
+            },
+        ),
+        address,
+        hash,
+        disabled: service.confirmed,
+        delete,
+    })
+}
+
+/// The generation of the key the address is using, or why this may not act.
+///
+/// The hash has to be the current one exactly. Decommission switches off a
+/// working credential, so it never searches and never infers: an operator who
+/// names a hash the address does not use is told which one it does, and nothing
+/// is sent.
+fn in_service(state: &State, address: &Address, hash: &KeyHash) -> Result<u32, LifecycleError> {
+    let Some(current) = state.key(address).and_then(KeyBinding::current) else {
+        return Err(LifecycleError::DecommissionNoCurrentKey {
+            address: address.clone(),
+        });
+    };
+    if &current.hash != hash {
+        return Err(LifecycleError::DecommissionNotCurrent {
+            address: address.clone(),
+            hash: hash.clone(),
+            current: current.hash.clone(),
+        });
+    }
+    Ok(current.generation)
+}
+
+/// Refuses a decommission while any address has an operation in progress.
+///
+/// Global, like the rule it protects: an unresolved attempt may have made a live
+/// key nobody can name, and a rotation halfway through would promote its
+/// successor into the slot this command empties. The phase is read through
+/// [`Resolution`], so this refusal names the same command as every other one.
+fn check_nothing_pending(state: &State) -> Result<(), LifecycleError> {
+    let Some((blocking, pending)) = state.pending_operation() else {
+        return Ok(());
+    };
+    Err(LifecycleError::DecommissionPending {
+        blocking: blocking.clone(),
+        phase: pending.phase,
+        resolution: Resolution::of(pending.phase).instruction(blocking),
+    })
+}
+
+/// Establishes that the key cannot be used, sending a disable only if one is
+/// needed.
+///
+/// Three answers count, and a read establishes each: OpenRouter already has the
+/// key disabled, Keymaster disabled it and the read that followed said so, or
+/// OpenRouter has no such key at all. The last is the same evidence
+/// `delete key` requires before it drops a hash — a confirmed 404 is the only
+/// thing that proves absence — so a current key someone already removed in the
+/// dashboard can be finished here rather than leaving the address stuck.
+fn take_out_of_service(
+    reader: &Reader<'_>,
+    writer: &Writer<'_>,
+    hash: &KeyHash,
+) -> Result<Disabled, ApiError> {
+    match reader.get_key(hash) {
+        Ok(observed) if observed.disabled => Ok(Disabled::already_disabled()),
+        Ok(_) => Ok(disable_and_confirm(reader, writer, hash)),
+        Err(error) if error.status() == Some(404) => Ok(Disabled::absent(
+            "OpenRouter has no such key, which is what proves it cannot be used; nothing was sent."
+                .to_owned(),
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+/// What deleting a key already out of service establishes.
+///
+/// A run whose read already returned 404 sends nothing at all. A `DELETE` is
+/// sent to establish that OpenRouter does not have the key, and that answer is
+/// already in hand; sending one anyway could only lose it, because a refusal or
+/// a timeout on a request nothing needed would turn a key known to be gone into
+/// one that may still exist and has to stay tracked.
+fn delete_result(
+    reader: &Reader<'_>,
+    writer: &Writer<'_>,
+    hash: &KeyHash,
+    known_absent: bool,
+) -> (DeleteOutcome, String) {
+    if known_absent {
+        return (
+            DeleteOutcome::AlreadyAbsent,
+            "OpenRouter had no such key when this run read it, so there was nothing to delete and \
+             no request was sent; the hash is no longer tracked."
+                .to_owned(),
+        );
+    }
+    attempt_delete(reader, writer, hash)
+}
+
+/// Records what became of the key, and stops tracking it only once OpenRouter
+/// is known not to have it.
+///
+/// The same order `delete key` keeps, for the same reason: a hash that may
+/// still name a live spending credential stays in state, here as
+/// `retirement_failed`, which is exactly the shape `delete key --hash` picks up.
+fn record_deletion(
+    lock: &StateLock<'_>,
+    state: &mut State,
+    address: &Address,
+    retained: &RetainedKey,
+    (outcome, detail): (DeleteOutcome, String),
+) -> Result<DeleteAttempt, Error> {
+    if outcome.is_gone() {
+        state
+            .drop_retained(address, &retained.hash)
+            .map_err(LifecycleError::Refused)?;
+        lock.write(state)?;
+    } else {
+        record_status(
+            lock,
+            state,
+            address,
+            retained,
+            RetainedStatus::RetirementFailed,
+        )?;
+    }
+    Ok(DeleteAttempt { outcome, detail })
+}
+
+/// The exact command that repeats a decommission this run could not prove.
+fn retry_command(address: &Address, hash: &KeyHash, delete: bool) -> String {
+    let flag = if delete { " --delete" } else { "" };
+    format!("openrouter-keymaster decommission {address} --hash {hash}{flag}")
+}
+
 // --- state forget ----------------------------------------------------------------
 
 /// Runs `state forget`.
@@ -561,11 +813,13 @@ pub enum LifecycleError {
 
     /// The hash named is the address's working key.
     #[error(
-        "key {hash} is what `{address}` currently uses, and Keymaster will not disable or delete a \
-         working credential: it cannot know that nothing is still using it. Rotate first with \
-         `openrouter-keymaster rotate {address}`, which stages a successor and leaves this key \
-         enabled as the predecessor, then retire the predecessor once every consumer holds the new \
-         key."
+        "key {hash} is what `{address}` currently uses, and neither `retire` nor `delete key` will \
+         touch a working credential: neither can know that nothing is still using it. Rotate first \
+         with `openrouter-keymaster rotate {address}`, which stages a successor and leaves this \
+         key enabled as the predecessor, then retire the predecessor once every consumer holds the \
+         new key. If this key is meant to end with no successor, say so explicitly: \
+         `openrouter-keymaster decommission {address} --hash {hash}`, which leaves the address \
+         owning no key."
     )]
     KeyInUse {
         /// The local address.
@@ -650,6 +904,79 @@ pub enum LifecycleError {
         hash: KeyHash,
     },
 
+    /// The address is using no key, so there is nothing to decommission.
+    #[error(
+        "`{address}` is using no key, so there is nothing to decommission; \
+         `openrouter-keymaster status` lists what it holds. A key it merely retains is ended with \
+         `openrouter-keymaster retire {address} --hash HASH` and `openrouter-keymaster delete key \
+         --hash HASH`."
+    )]
+    DecommissionNoCurrentKey {
+        /// The local address.
+        address: Address,
+    },
+
+    /// The hash named is not the address's working key.
+    #[error(
+        "`{address}` is not using key {hash}; the key it uses is {current}. Decommission switches \
+         off a working credential, so it acts on the exact immutable identity you name and never \
+         searches for one. If {hash} is a hash this address retains, `openrouter-keymaster retire \
+         {address} --hash {hash}` disables it."
+    )]
+    DecommissionNotCurrent {
+        /// The local address.
+        address: Address,
+        /// The hash that was named.
+        hash: KeyHash,
+        /// The hash the address is actually using.
+        current: KeyHash,
+    },
+
+    /// An unfinished operation stands, so no key may be taken out of service.
+    #[error(
+        "`{blocking}` has an operation in progress, in phase `{phase}`, and decommissioning \
+         beside one would switch off a credential while another is being created. Close it first: \
+         {resolution}. Nothing was disabled and nothing was deleted."
+    )]
+    DecommissionPending {
+        /// The address that holds the unfinished operation.
+        blocking: Address,
+        /// The phase it stopped in.
+        phase: Phase,
+        /// The command that clears it, from [`Resolution`].
+        resolution: String,
+    },
+
+    /// The disable did not take, or could not be proved to have taken.
+    #[error(
+        "key {hash} is not confirmed out of service, so `{address}` still uses it and no state \
+         was written; the disable was sent at most once and is never retried automatically. Run \
+         `{retry}` again, or disable the key yourself. The result document says what the attempt \
+         established."
+    )]
+    DecommissionUnconfirmed {
+        /// The local address.
+        address: Address,
+        /// The hash that was named.
+        hash: KeyHash,
+        /// The exact command that repeats the attempt.
+        retry: String,
+    },
+
+    /// The key is out of service and the deletion asked for is not confirmed.
+    #[error(
+        "key {hash} is out of service and `{address}` no longer uses it, but it is not confirmed \
+         deleted, so the hash stays tracked as `retirement_failed`; the request was sent exactly \
+         once and is never resent automatically. Finish it with `openrouter-keymaster delete key \
+         --hash {hash}`."
+    )]
+    DecommissionDeleteUnconfirmed {
+        /// The local address.
+        address: Address,
+        /// The hash that was named.
+        hash: KeyHash,
+    },
+
     /// A bare address is bound as both a key and a guardrail.
     #[error(
         "`{address}` is bound as both a key and a guardrail, so it is not clear which to forget; \
@@ -694,6 +1021,11 @@ impl LifecycleError {
             Self::Absent { .. } => "retire_absent",
             Self::RetireUnconfirmed { .. } => "retire_unconfirmed",
             Self::DeleteUnconfirmed { .. } => "delete_unconfirmed",
+            Self::DecommissionNoCurrentKey { .. } => "decommission_no_current_key",
+            Self::DecommissionNotCurrent { .. } => "decommission_not_current",
+            Self::DecommissionPending { .. } => "decommission_pending",
+            Self::DecommissionUnconfirmed { .. } => "decommission_unconfirmed",
+            Self::DecommissionDeleteUnconfirmed { .. } => "decommission_delete_unconfirmed",
             Self::ForgetAmbiguous { .. } => "forget_ambiguous",
             Self::ForgetPending { .. } => "forget_pending",
             Self::Refused(_) => "lifecycle_refused",

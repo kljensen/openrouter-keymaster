@@ -1074,6 +1074,13 @@ fn retiring_the_current_hash_is_refused() {
         "the refusal names the command that makes retirement possible: {}",
         streams.err
     );
+    assert!(
+        streams.err.contains(&format!(
+            "openrouter-keymaster decommission jobfeed --hash {NEW_HASH}"
+        )),
+        "and the one that ends a key with no successor: {}",
+        streams.err
+    );
     world.project.server.assert_request_count(0);
     assert_eq!(world.current(), Some(NEW_HASH.to_owned()));
 }
@@ -1103,6 +1110,50 @@ fn a_retirement_whose_disable_fails_keeps_the_hash_tracked_for_a_retry() {
     assert_eq!(
         world.retained(),
         vec![(OLD_HASH.to_owned(), RetainedStatus::RetirementFailed)]
+    );
+}
+
+/// A 404 on the read that confirms a disable is proof, not a failure.
+///
+/// The shared disable-and-confirm step is reached by `retire`, `decommission`,
+/// and both `recover` paths, and absence is absence in all of them: a key
+/// OpenRouter does not have is one nothing can spend against. Reporting it as
+/// "disable it yourself" would name a step nobody can take.
+#[test]
+fn a_disable_whose_confirming_read_returns_404_is_a_retirement_that_took() {
+    let world = after_a_rotation();
+    world.project.server.mount(
+        Mock::given(method("PATCH"))
+            .and(path(format!("/api/v1/keys/{OLD_HASH}")))
+            .respond_with(json_response(200, &json!({}))),
+    );
+    world.project.server.mount(
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/keys/{OLD_HASH}")))
+            .respond_with(Scripted::new([
+                // There when the run looks, gone when it checks.
+                json_response(200, &json!({ "data": api_key(OLD_HASH, "golf-jobfeed") })),
+                ResponseTemplate::new(404).set_body_json(json!({
+                    "error": { "code": 404, "message": "no such key" }
+                })),
+            ])),
+    );
+
+    let streams = world
+        .project
+        .succeed(&["--json", "retire", "jobfeed", "--hash", OLD_HASH]);
+    let document = streams.document();
+
+    assert_eq!(document["status"], "retired");
+    assert_eq!(document["confirmed"], Value::Bool(true));
+    assert!(
+        !streams.out.contains("may still be usable"),
+        "a key OpenRouter does not have cannot still be usable: {}",
+        streams.out
+    );
+    assert_eq!(
+        world.retained(),
+        vec![(OLD_HASH.to_owned(), RetainedStatus::Retired)]
     );
 }
 

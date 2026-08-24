@@ -643,7 +643,7 @@ impl Issuer<'_> {
     /// Disables a key that must not be usable, and says what became of the
     /// attempt.
     fn attempt_disable(&self, hash: &KeyHash) -> String {
-        disable_and_confirm(self.reader, self.writer, hash).1
+        disable_and_confirm(self.reader, self.writer, hash).detail
     }
 
     /// Applies one change to state and makes it durable, or leaves state
@@ -678,6 +678,58 @@ impl Issuer<'_> {
     }
 }
 
+/// What a run established about a key it needed to be unusable.
+///
+/// Absence is tracked separately from confirmation because it is stronger
+/// evidence and a different fact: a key OpenRouter does not have needs no
+/// disable, and — for the caller that goes on to delete — no `DELETE` either,
+/// since the answer such a request would be sent to establish is already in
+/// hand. Sending one anyway could only lose that: a timeout on a request
+/// nothing needed would turn a key known to be gone into one that may still
+/// exist.
+pub(super) struct Disabled {
+    /// Whether a read proved the key cannot be used.
+    pub(super) confirmed: bool,
+    /// Whether that proof is OpenRouter having no such key at all.
+    pub(super) absent: bool,
+    /// The sentence to show an operator. Never contains secret material.
+    pub(super) detail: String,
+}
+
+impl Disabled {
+    /// OpenRouter has no such key, which is the one answer that proves a key
+    /// cannot be used — the same evidence `delete key` requires before it stops
+    /// tracking a hash.
+    pub(super) const fn absent(detail: String) -> Self {
+        Self {
+            confirmed: true,
+            absent: true,
+            detail,
+        }
+    }
+
+    /// OpenRouter already had the key disabled when this run read it, so
+    /// nothing was sent.
+    pub(super) fn already_disabled() -> Self {
+        Self {
+            confirmed: true,
+            absent: false,
+            detail: "OpenRouter already has this key disabled; a read confirmed it and nothing \
+                     was sent."
+                .to_owned(),
+        }
+    }
+
+    /// Nothing established that the key is out of service.
+    const fn unproven(detail: String) -> Self {
+        Self {
+            confirmed: false,
+            absent: false,
+            detail,
+        }
+    }
+}
+
 /// Disables a key that must not be usable, and reports what that established.
 ///
 /// Shared by the transaction and by `openrouter-keymaster recover`, because both reach it
@@ -686,39 +738,51 @@ impl Issuer<'_> {
 /// tracked. Best effort by nature — every caller is already handling a failure
 /// — so it reports rather than propagates.
 ///
-/// Returns whether the disable is *confirmed*, which is decided by a fresh read
-/// and never by the PATCH's own response, and the sentence to show an operator.
-/// A key that could not be confirmed disabled stays tracked as a failed
-/// candidate so a later explicit `retire` or `delete` can finish the job.
+/// Confirmation is decided by a fresh read and never by the PATCH's own
+/// response. A key that could not be confirmed disabled stays tracked as a
+/// failed candidate so a later explicit `retire` or `delete` can finish the job.
+///
+/// A 404 from either request is confirmation of the strongest kind rather than
+/// a failure: OpenRouter has no such key, so there is nothing to disable and
+/// nothing that could be used. Reporting that as "disable it yourself" would
+/// name a step an operator cannot take, about a key that does not exist.
 pub(super) fn disable_and_confirm(
     reader: &Reader<'_>,
     writer: &Writer<'_>,
     hash: &KeyHash,
-) -> (bool, String) {
+) -> Disabled {
     if let Err(error) = writer.disable_key(hash) {
-        return (
-            false,
-            format!("Keymaster could not disable it ({error}), so disable it yourself."),
-        );
+        if error.status() == Some(404) {
+            return Disabled::absent(
+                "OpenRouter has no such key, so there was nothing to disable; the 404 is what \
+                 proves it cannot be used."
+                    .to_owned(),
+            );
+        }
+        return Disabled::unproven(format!(
+            "Keymaster could not disable it ({error}), so disable it yourself."
+        ));
     }
     match reader.get_key(hash) {
-        Ok(observed) if observed.disabled => (
-            true,
-            "Keymaster disabled it, and confirmed that by reading it back.".to_owned(),
-        ),
-        Ok(_) => (
-            false,
+        Ok(observed) if observed.disabled => Disabled {
+            confirmed: true,
+            absent: false,
+            detail: "Keymaster disabled it, and confirmed that by reading it back.".to_owned(),
+        },
+        Ok(_) => Disabled::unproven(
             "Keymaster asked OpenRouter to disable it and the read that followed still shows it \
              enabled, so disable it yourself."
                 .to_owned(),
         ),
-        Err(error) => (
-            false,
-            format!(
-                "Keymaster asked OpenRouter to disable it and could not confirm that ({error}), \
-                 so check it yourself."
-            ),
+        Err(error) if error.status() == Some(404) => Disabled::absent(
+            "Keymaster asked OpenRouter to disable it and the read that followed returned 404: \
+             OpenRouter has no such key, so there is nothing there to use."
+                .to_owned(),
         ),
+        Err(error) => Disabled::unproven(format!(
+            "Keymaster asked OpenRouter to disable it and could not confirm that ({error}), so \
+             check it yourself."
+        )),
     }
 }
 

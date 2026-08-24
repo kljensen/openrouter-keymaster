@@ -81,6 +81,7 @@ openrouter-keymaster recover inspect NAME          report an interrupted key ope
 openrouter-keymaster recover resolve NAME ...      attest what an ambiguous operation did
 openrouter-keymaster recover replace NAME          replace a key after resolving ambiguity
 openrouter-keymaster retire NAME --hash HASH       disable a tracked retained key
+openrouter-keymaster decommission NAME --hash HASH end the key an address is using
 openrouter-keymaster delete key --hash HASH        permanently delete a tracked key
 openrouter-keymaster state forget ADDRESS          relinquish local ownership of an address
 ```
@@ -392,14 +393,20 @@ rotate ──▶ successor current, predecessor `awaiting_retirement`  (never to
 retire ──────▶ predecessor disabled, confirmed by a read, still tracked
              │
 delete ──────▶ predecessor gone from OpenRouter, then dropped from state
+
+decommission ▶ the *current* key disabled and confirmed, address left owning
+               nothing; `--delete` continues into the same deletion
 ```
 
-`state forget` is the fifth door and leads out of the building: it relinquishes
-ownership without touching anything remote.
+`decommission` is the path for a key that is not being replaced — the one thing
+`rotate` plus `retire` cannot express, because rotation always issues a
+successor. `state forget` is the last door and leads out of the building: it
+relinquishes ownership without touching anything remote.
 
-All four stand aside for an operation in progress — `rotate` will not stage a
+All five stand aside for an operation in progress — `rotate` will not stage a
 successor beside one, `retire` and `delete key` will not touch the key one is
-about to produce, and `state forget` will not throw away the journal recording
+about to produce, `decommission` will not switch off a credential while another
+is being created, and `state forget` will not throw away the journal recording
 it — and every one of those refusals names the command that clears it. That is
 `openrouter-keymaster recover` for the phases only an operator can settle, and
 `openrouter-keymaster apply` for `delivered`, which needs no operator at all:
@@ -467,14 +474,50 @@ still tracked. Run `retire` when every consumer has the new credential — that 
 the judgement Keymaster cannot make.
 
 - **The current hash is refused.** Keymaster cannot know that nothing is still
-  using it. Rotate first; the predecessor is what you retire. v0.1 defines no
-  policy that permits the shortcut, so there is no flag for it.
+  using it. Rotate first; the predecessor is what you retire. There is no flag
+  that relaxes this — ending a working key is a different command, with a
+  different name and its own hash check: [`decommission`](#decommission).
 - **Already disabled is a success that sends nothing.** The key is read first,
   so a repeated `retire` costs one read, writes no state, and reports `retired`.
 - **A failed disable stays tracked.** The hash becomes `retirement_failed` so it
   can be retried, and the run exits 1 after writing its result document.
 - **A retired hash stays in state.** It is still visible to an audit and to a
   later `delete key`. Nothing prunes it.
+
+### decommission
+
+```sh
+openrouter-keymaster decommission jobfeed --hash <CURRENT-HASH>
+openrouter-keymaster decommission jobfeed --hash <CURRENT-HASH> --delete
+```
+
+Ends the key an address is *using*, which is the one thing `retire` and
+`delete key` refuse. Rotation replaces a credential; nothing else ended one, so
+before this command a managed key could only be finished off in the dashboard.
+
+`HASH` must be the address's **current** hash and is checked before anything is
+sent. There is no decommission-by-name: this switches off a working credential,
+so a mutable display name is not something it will act on.
+
+- **Only a confirmed disable moves state.** The key is read, disabled if it is
+  not already, and read back. A disable nothing proved leaves the address using
+  the key it had, writes no state at all, and exits 1 naming the exact command
+  to run again. A key OpenRouter already has disabled costs no write; one
+  OpenRouter no longer has is settled by the 404 that proves it, and nothing
+  further is sent — not even the `DELETE`, whose answer is already in hand.
+- **Then the hash is retained, not dropped.** It becomes `retained.retired`, so
+  an audit can still see it and `openrouter-keymaster delete key --hash HASH`
+  can finish the job whenever you choose.
+- **`--delete` continues into that deletion** in the same run: one `DELETE`,
+  confirmed by a 404, and only then does the hash stop being tracked. A delete
+  that is not confirmed leaves it tracked as `retirement_failed` and exits 1.
+- **The address is left bound and owning no key.** That is a shape nothing else
+  produces, and it has a consequence: if the configuration still describes the
+  key, the next `openrouter-keymaster apply` **creates a replacement** — a real
+  create at the next generation, delivered to the receiver. Remove the
+  `[keys.NAME]` block first if what you meant was to stop having this key.
+- **The generation is spent either way.** Deleting a key does not release its
+  number, so the replacement takes a higher one.
 
 ### delete key
 
@@ -535,8 +578,8 @@ Removing a `[keys.*]` block from the configuration performs no lifecycle action
 whatsoever. The binding becomes an `orphaned_binding`: reported by every `plan`
 and `apply`, tracked, and otherwise left alone. Nothing is retired, deleted, or
 forgotten because a block disappeared — Keymaster does not read a deletion in
-one file as authority to destroy a credential in another system. Use `retire`,
-`delete key`, and `state forget` explicitly.
+one file as authority to destroy a credential in another system. Use
+`decommission`, `retire`, `delete key`, and `state forget` explicitly.
 
 There is also no scheduled rotation, no automatic smoke test of a downstream
 application, no automatic retirement of a predecessor, no pruning, and no

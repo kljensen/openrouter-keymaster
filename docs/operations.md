@@ -14,6 +14,7 @@ organization you mean to change. See
 - [Creating a key](#creating-a-key)
 - [Rotating a key](#rotating-a-key)
 - [Ending a key's life](#ending-a-keys-life)
+- [Ending a key that is not being replaced](#ending-a-key-that-is-not-being-replaced)
 - [Giving up ownership](#giving-up-ownership)
 - [Recovering an interrupted operation](#recovering-an-interrupted-operation)
 - [Looking after state](#looking-after-state)
@@ -214,7 +215,9 @@ Then, once you are sure nothing needs it back:
 openrouter-keymaster delete key --hash <PREDECESSOR-HASH>     # permanent, confirmed by a 404
 ```
 
-- `retire` refuses the **current** hash. Rotate first.
+- `retire` refuses the **current** hash. Rotate first, or end it with
+  [`decommission`](#ending-a-key-that-is-not-being-replaced) if there is to be
+  no successor.
 - `retire` on an already-disabled key reads it, writes nothing, and reports
   `retired`.
 - `delete key` refuses a hash Keymaster does not track, the hash an address is
@@ -223,6 +226,50 @@ openrouter-keymaster delete key --hash <PREDECESSOR-HASH>     # permanent, confi
   exits 1, so you can retry it. State is never dropped ahead of the
   confirmation: the local record is the one thing that can still find a live
   spending credential.
+
+## Ending a key that is not being replaced
+
+`retire` and `delete key` refuse the key an address is *using*, and rotation
+always issues a successor, so a key you simply want to stop having needs its own
+command:
+
+```sh
+openrouter-keymaster status                                  # find the current hash
+openrouter-keymaster decommission jobfeed --hash <CURRENT-HASH>
+```
+
+That reads the key, disables it, reads it back to prove it, and moves the hash
+from `current` to `retained.retired`. The address is then bound and owns no key.
+Add `--delete` to continue into the deletion in the same run, or run
+`openrouter-keymaster delete key --hash <HASH>` later — the hash is retained
+now, so that command will take it.
+
+**Decide what happens to the configuration before you run it.** The address
+owning no key is exactly the shape `apply` treats as "not created yet":
+
+```sh
+openrouter-keymaster plan   # keys.jobfeed: create
+```
+
+- If you meant to stop having this key, remove the `[keys.jobfeed]` block. The
+  binding becomes an `orphaned_binding` — reported, tracked, left alone — and
+  `openrouter-keymaster state forget keys.jobfeed` relinquishes it once the hash
+  is deleted or you no longer care to track it.
+- If you meant to hand this address a fresh credential with no overlap, leave
+  the block. The next `apply` creates a real key at the next generation and
+  delivers it to the receiver. The old number is spent for good, deleted or not.
+
+Each step exits 1 if a read did not prove it, and nothing is retried
+automatically:
+
+- **A disable that is not confirmed changes nothing at all.** The address goes
+  on using the key, which is the truth while the key may still work. The
+  diagnostic names the exact command to run again.
+- **A delete that is not confirmed leaves the hash tracked** as
+  `retirement_failed`, and `openrouter-keymaster delete key --hash <HASH>`
+  retries it.
+- **An operation in progress anywhere refuses the run**, naming the command that
+  clears it. Nothing is disabled and nothing is deleted.
 
 ## Giving up ownership
 
@@ -341,8 +388,8 @@ by its hash or UUID, and re-discovering every hash from the dashboard.
 cp .openrouter-keymaster/state.json backups/state-$(date -u +%Y%m%dT%H%M%SZ).json
 ```
 
-Back it up after every `apply`, `rotate`, `retire`, `delete key`, `import`, and
-`recover`. It contains no secret, so it can go anywhere your configuration can.
+Back it up after every `apply`, `rotate`, `retire`, `decommission`,
+`delete key`, `import`, and `recover`. It contains no secret, so it can go anywhere your configuration can.
 
 ### Restoring state
 
@@ -389,17 +436,26 @@ one the backup missed unowned, which is the opposite of what you want.
      `state forget` performs no remote write, so the key keeps working
      throughout.
 
-     **The predecessor cannot be brought back under management.** Once the
+     **The predecessor cannot be brought back at that address.** Once the
      address is bound to the current hash, a second `import key` at it is
-     refused: one address, one key. Importing the predecessor at a spare
-     address does not help either — it would land there as *that* address's
-     current key, and both `retire` and `delete key` refuse a current hash.
-     This is a real v0.1 limitation, and it follows from where retained
-     entries come from: only a rotation's promotion ever creates one, by
-     moving the hash it just replaced. Nothing reconstructs that from the
-     outside. Disable and delete the old key in the OpenRouter dashboard
-     instead. `openrouter-keymaster plan` reports it as `unmanaged` until you
-     do, so it stays visible rather than forgotten.
+     refused: one address, one key. Nor can it become a retained entry there —
+     only a rotation's promotion ever creates one, by moving the hash it just
+     replaced, and nothing reconstructs that from the outside.
+
+     It can still be ended with Keymaster, at a spare address, where it lands
+     as that address's own current key:
+
+     ```sh
+     # A temporary [keys.jobfeed-old] block with no receiver, so that even a
+     # forgotten one can never cause a create.
+     openrouter-keymaster import key jobfeed-old --hash <PREDECESSOR-HASH>
+     openrouter-keymaster decommission jobfeed-old --hash <PREDECESSOR-HASH> --delete
+     openrouter-keymaster state forget keys.jobfeed-old
+     ```
+
+     Then remove the temporary block. `openrouter-keymaster plan` reports the
+     predecessor as `unmanaged` until something ends it, so it stays visible
+     rather than forgotten.
    - An address the backup never knew about is a plain import:
 
      ```sh

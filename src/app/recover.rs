@@ -63,7 +63,7 @@ use crate::state::{
     TransitionError,
 };
 
-use super::issuance::{Issuer, disable_and_confirm};
+use super::issuance::{Disabled, Issuer, disable_and_confirm};
 
 /// Runs one `recover` action.
 ///
@@ -394,7 +394,9 @@ fn clean_up(
     address: &Address,
     retained: &RetainedKey,
 ) -> Result<CleanedUp, Error> {
-    let (confirmed, detail) = disable_and_confirm(reader, writer, &retained.hash);
+    let Disabled {
+        confirmed, detail, ..
+    } = disable_and_confirm(reader, writer, &retained.hash);
     let mut status = retained.status;
 
     if confirmed {

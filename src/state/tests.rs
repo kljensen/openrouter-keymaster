@@ -416,6 +416,82 @@ fn a_deleted_generation_stays_spent_at_the_address() {
         .expect("the next free generation is 3");
 }
 
+/// Decommissioning is the one transition that empties a current slot without
+/// filling it, and what it leaves has to be a state a file can hold.
+#[test]
+fn a_decommissioned_address_keeps_its_hash_its_number_and_its_binding() {
+    let (mut state, jobfeed) = (State::new(), address("jobfeed"));
+    state
+        .bind_key(&jobfeed, hash("h1"), 1, at(0))
+        .expect("binding the working key");
+
+    let retained = state
+        .decommission_current(&jobfeed, &hash("h1"), RetainedStatus::Retired, at(1))
+        .expect("a read proved the key is out of service");
+
+    assert_eq!(retained.generation, 1);
+    let binding = state.key(&jobfeed).expect("the address is still bound");
+    assert_eq!(binding.current(), None);
+    assert_eq!(binding.retained().len(), 1);
+    assert_eq!(
+        binding.highest_generation(),
+        1,
+        "the number is still recorded, so a successor takes a higher one"
+    );
+
+    // And the shape survives a round trip, which is what proves no invariant
+    // refuses a binding that holds a retained hash and no current one.
+    let scratch = Scratch::new();
+    let file = scratch.file();
+    file.lock()
+        .expect("the lock")
+        .write(&mut state)
+        .expect("writing a decommissioned binding");
+    let reread = file.read().expect("reading it back");
+    assert_eq!(reread.key(&jobfeed).expect("the binding").current(), None);
+}
+
+/// The two things `decommission_current` refuses, both of which the command
+/// above it checks first: this is the floor under that check, not a duplicate
+/// of it.
+#[test]
+fn decommissioning_needs_the_current_hash_and_no_operation_in_progress() {
+    let (mut state, jobfeed) = (State::new(), address("jobfeed"));
+    state
+        .bind_key(&jobfeed, hash("h1"), 1, at(0))
+        .expect("binding the working key");
+
+    assert_eq!(
+        state.decommission_current(&jobfeed, &hash("h2"), RetainedStatus::Retired, at(1)),
+        Err(TransitionError::HashNotCurrent {
+            address: jobfeed.clone(),
+            hash: hash("h2"),
+        }),
+        "a hash the address does not use is not something to switch off"
+    );
+
+    state
+        .begin_create(&jobfeed, begin(2), at(2))
+        .expect("starting a rotation");
+    assert_eq!(
+        state.decommission_current(&jobfeed, &hash("h1"), RetainedStatus::Retired, at(3)),
+        Err(TransitionError::AlreadyPending {
+            address: jobfeed.clone(),
+            phase: Phase::CreateStarted,
+        }),
+        "the successor being created would be promoted into the emptied slot"
+    );
+    assert_eq!(
+        state
+            .key(&jobfeed)
+            .expect("the binding")
+            .current()
+            .map(|current| current.hash.clone()),
+        Some(hash("h1")),
+        "a refusal changes nothing"
+    );
+}
+
 #[test]
 fn a_generation_floor_survives_a_write_and_an_import_over_it() {
     let scratch = Scratch::new();

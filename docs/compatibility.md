@@ -21,8 +21,8 @@ hash or UUID ([ADR-0001](adr/0001-native-reconciliation.md)).
 
 **No destruction from a deletion.** Removing a block from the configuration
 retires nothing, deletes nothing, and forgets nothing. It becomes an orphaned
-binding. `retire`, `delete key`, and `state forget` are the only ways to end
-something, and each names an immutable identity.
+binding. `retire`, `decommission`, `delete key`, and `state forget` are the only
+ways to end something, and each names an immutable identity.
 
 **No automatic retirement.** Rotation stages a successor and stops. Keymaster
 cannot know when a downstream deployment has adopted a new credential.

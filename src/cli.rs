@@ -229,6 +229,58 @@ not; the result document on stdout says what the attempt established.")]
         hash: String,
     },
 
+    /// End the life of the key an address is currently using.
+    #[command(long_about = "\
+End the life of the key an address is currently using.
+
+Decommission is the ending for a key that is not being replaced. `rotate` \
+stages a successor and `retire` disables a predecessor; between them there is \
+no way to stop using a credential and stop nothing else, which is what this \
+command does.
+
+HASH must be the address's *current* hash, and it is checked before anything is \
+sent. There is no decommission-by-name: a display name is mutable and this \
+disables a working credential, so the immutable identity is the only thing it \
+will act on. Nothing plans it, and no rotation, apply, or configuration change \
+performs it.
+
+The key is read first; one OpenRouter already has disabled costs no write, and \
+one OpenRouter no longer has is settled by the 404 that proves it. Otherwise \
+the disable is sent once and confirmed by reading the key back. Only a \
+confirmed disable moves the hash out of `current`, where it becomes \
+`retained.retired` — so a disable that cannot be confirmed leaves the address \
+using the key it already had, changes no state at all, and exits 1.
+
+`--delete` continues into the same deletion `delete key` performs: one DELETE, \
+confirmed by a 404, and only then does the hash stop being tracked. Without it \
+the hash stays tracked as `retired`, and `openrouter-keymaster delete key \
+--hash HASH` can finish the job whenever you choose. The generation is spent \
+either way; a number never returns to the pool.
+
+Afterwards the address is bound and owns no key. If the configuration still \
+describes it, the next `openrouter-keymaster apply` creates a replacement at \
+the next generation and delivers it — remove the `[keys.NAME]` block first if \
+what you meant was to stop having this key at all.
+
+An operation in progress anywhere refuses the run, naming the command that \
+clears it.
+
+Exit code 0 means every step this run took was confirmed by a read. Exit code 1 \
+means one was not; the result document on stdout says which, and the diagnostic \
+names the exact command that finishes it.")]
+    Decommission {
+        /// Local key address, as written in the configuration.
+        name: String,
+
+        /// Immutable hash of the key the address is currently using.
+        #[arg(long, value_name = "HASH")]
+        hash: String,
+
+        /// Also delete the key from OpenRouter, confirmed by a 404.
+        #[arg(long)]
+        delete: bool,
+    },
+
     /// Permanently delete a tracked remote resource.
     #[command(long_about = "\
 Permanently delete a tracked remote resource.

@@ -16,8 +16,9 @@
 //! assignments, verifying what it wrote, and runs the journaled transaction for
 //! a planned key create or replace; [`rotate`] runs that same transaction on an
 //! operator's word; [`recover`] closes an operation whose outcome only an
-//! operator can establish; and [`lifecycle`] holds the three explicit endings —
-//! `retire`, `delete key`, and `state forget` — that nothing else ever performs.
+//! operator can establish; and [`lifecycle`] holds the four explicit endings —
+//! `retire`, `decommission`, `delete key`, and `state forget` — that nothing
+//! else ever performs.
 
 pub mod apply;
 pub mod import;
@@ -46,10 +47,11 @@ use crate::state::{Phase, State, StateFile};
 ///
 /// Several commands stand aside for an operation in progress — `rotate` will
 /// not stage a successor beside one, `retire` and `delete key` will not touch
-/// the key one is about to produce, and `state forget` will not throw away the
-/// journal that records it. Each of those refusals has to name the command that
-/// resolves it, and they must all name the same one, so the phase is read here
-/// and nowhere else.
+/// the key one is about to produce, `decommission` will not switch off a
+/// credential while another is being created, and `state forget` will not throw
+/// away the journal that records it. Each of those refusals has to name the
+/// command that resolves it, and they must all name the same one, so the phase
+/// is read here and nowhere else.
 ///
 /// The split is a single phase wide. `delivered` needs no operator at all: the
 /// key exists, its restrictions were verified, the receiver acknowledged the
@@ -115,6 +117,9 @@ pub fn run<O: Write, E: Write>(cli: &Cli, renderer: &mut Renderer<O, E>) -> Resu
         Command::Rotate { name } => rotate::run(cli, name, renderer),
         Command::Recover { action } => recover::run(cli, action, renderer),
         Command::Retire { name, hash } => lifecycle::retire(cli, name, hash, renderer),
+        Command::Decommission { name, hash, delete } => {
+            lifecycle::decommission(cli, name, hash, *delete, renderer)
+        }
         Command::Delete {
             resource: DeleteResource::Key { hash },
         } => lifecycle::delete_key(cli, hash, renderer),

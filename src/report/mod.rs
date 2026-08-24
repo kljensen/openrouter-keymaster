@@ -38,7 +38,8 @@ use crate::state::Phase;
 pub use apply::{ActionOutcome, ApplyReport};
 pub use import::ImportReport;
 pub use lifecycle::{
-    DeleteOutcome, DeleteReport, ForgetReport, Predecessor, Released, RetireReport, RotateReport,
+    DecommissionReport, DeleteAttempt, DeleteOutcome, DeleteReport, Ending, ForgetReport,
+    Predecessor, Released, RetireReport, RotateReport,
 };
 pub use plan::PlanReport;
 pub use recover::{

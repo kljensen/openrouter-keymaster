@@ -7,8 +7,27 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ## [Unreleased]
 
+### Added
+
+- `decommission NAME --hash HASH [--delete]` ends the key an address is using,
+  which `retire` and `delete key` refuse and rotation cannot express — it always
+  issues a successor. The hash must be the address's current one. The key is
+  disabled and the disable confirmed by a read before any state moves, so a
+  disable that cannot be proved leaves the address using the key it had and
+  writes nothing; `--delete` continues into the same confirmed-by-404 deletion
+  `delete key` performs. Afterwards the address is bound and owns no key, and if
+  the configuration still describes it the next `apply` creates a replacement at
+  the next generation. New error kinds: `decommission_no_current_key`,
+  `decommission_not_current`, `decommission_pending`, `decommission_unconfirmed`,
+  and `decommission_delete_unconfirmed`.
+
 ### Fixed
 
+- A 404 from either request of a disable — the `PATCH` or the read that
+  confirms it — is now treated as proof the key is gone rather than as a failure
+  to disable it. `retire`, `decommission`, and both `recover` paths share that
+  step, and all of them used to report a key OpenRouter does not have as one to
+  "disable yourself", leaving it tracked as `retirement_failed`.
 - Documentation no longer claims management keys carry a distinct
   `sk-or-mgmt-` prefix. A management key is the one OpenRouter's Management API
   Keys page issues, carries the same `sk-or-v1-` shape an inference key does,

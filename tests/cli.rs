@@ -37,6 +37,7 @@ fn help_lists_the_whole_command_tree_and_exits_zero() {
         .stdout(predicate::str::contains("rotate"))
         .stdout(predicate::str::contains("recover"))
         .stdout(predicate::str::contains("retire"))
+        .stdout(predicate::str::contains("decommission"))
         .stdout(predicate::str::contains("delete"))
         .stdout(predicate::str::contains("state"))
         .stdout(predicate::str::contains("--config"))
@@ -168,8 +169,9 @@ fn a_parsed_command_fails_with_an_application_error_on_stderr() {
 ///
 /// The configuration path does not exist, which stops the commands that read
 /// one before any client is built and therefore before any network call. The
-/// three that do not read a configuration — retire, delete, and forget act on
-/// the state file's own record — get as far as looking for the hash.
+/// four that do not read a configuration — retire, decommission, delete, and
+/// forget act on the state file's own record — get as far as looking for the
+/// hash.
 #[test]
 fn every_command_reaches_its_own_handler_before_any_network_call() {
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -179,7 +181,7 @@ fn every_command_reaches_its_own_handler_before_any_network_call() {
     // default one, relative to wherever the test runner happens to be.
     let state = directory.path().join("state.json");
 
-    let cases: [(&[&str], &str); 9] = [
+    let cases: [(&[&str], &str); 10] = [
         (&["plan"], "config_read"),
         (&["status"], "config_read"),
         (&["apply"], "config_read"),
@@ -206,6 +208,10 @@ fn every_command_reaches_its_own_handler_before_any_network_call() {
         (
             &["delete", "key", "--hash", "sha256:aaaa"],
             "delete_untracked",
+        ),
+        (
+            &["decommission", "jobfeed", "--hash", "sha256:aaaa"],
+            "decommission_no_current_key",
         ),
     ];
 

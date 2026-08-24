@@ -1,5 +1,5 @@
-//! The result documents of the four lifecycle commands: `rotate`, `retire`,
-//! `delete key`, and `state forget`.
+//! The result documents of the five lifecycle commands: `rotate`, `retire`,
+//! `decommission`, `delete key`, and `state forget`.
 //!
 //! Every one of them is about a credential, and none of them can print one.
 //! There is nowhere here to put a plaintext: each field is a hash, a UUID, an
@@ -415,6 +415,217 @@ impl fmt::Display for DeleteReport {
             String::new(),
             self.summary.clone(),
         ];
+        f.write_str(&lines.join("\n"))
+    }
+}
+
+/// What a `decommission` run established, step by step.
+///
+/// The two findings travel together because the second is conditional on the
+/// first: nothing is deleted until a read has proved the key is out of service,
+/// so a `deletion` beside `disabled: false` is a shape this command cannot
+/// produce.
+#[derive(Debug, Clone)]
+pub struct Ending {
+    /// Whether a fresh read proved the key is out of service.
+    pub disabled: bool,
+    /// How that was established. Never contains secret material.
+    pub disable_detail: String,
+    /// The deletion that followed, when `--delete` asked for one.
+    pub deletion: Option<DeleteAttempt>,
+    /// The exact command that repeats this run, `--delete` and all.
+    ///
+    /// Built by the caller and carried here so that the summary an operator
+    /// reads and the diagnostic a script reads cannot name different commands.
+    pub retry: String,
+}
+
+/// What the one `DELETE` of a `decommission --delete` established.
+#[derive(Debug, Clone)]
+pub struct DeleteAttempt {
+    /// What the attempt established.
+    pub outcome: DeleteOutcome,
+    /// How. Never contains secret material.
+    pub detail: String,
+}
+
+/// The hash is no longer tracked at all, which only a confirmed deletion does.
+const UNTRACKED: &str = "untracked";
+
+/// What `decommission` did to the key an address was using.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecommissionReport {
+    command: &'static str,
+    /// The local address the key belonged to.
+    address: String,
+    /// The hash that was named, which had to be the current one.
+    hash: String,
+    /// The generation it was created as. Spent at this address for good.
+    generation: u32,
+    /// Whether a fresh read proved the key is out of service.
+    disabled: bool,
+    /// What the delete established, when `--delete` asked for one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deleted: Option<DeleteOutcome>,
+    /// What the address records for the hash now: `current` when the disable
+    /// was not confirmed and nothing moved, a retained status when it was, and
+    /// `untracked` once OpenRouter is known not to have the key.
+    status: &'static str,
+    /// Whether Keymaster still tracks the hash after this run.
+    tracked: bool,
+    /// How the disable was established. Never contains secret material.
+    disable_detail: String,
+    /// How the deletion was established, when one was attempted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delete_detail: Option<String>,
+    /// What this run established.
+    summary: String,
+    /// Diagnostics an operator should see.
+    warnings: Vec<String>,
+}
+
+impl DecommissionReport {
+    /// Describes one decommission.
+    #[must_use]
+    pub fn new(address: &Address, hash: &KeyHash, generation: u32, ending: Ending) -> Self {
+        let status = tracking(&ending);
+        Self {
+            command: "decommission",
+            address: format!("keys.{address}"),
+            hash: hash.as_str().to_owned(),
+            generation,
+            disabled: ending.disabled,
+            deleted: ending.deletion.as_ref().map(|attempt| attempt.outcome),
+            status,
+            tracked: status != UNTRACKED,
+            summary: ending_summary(address, hash, generation, &ending),
+            warnings: ending_warnings(address, hash, &ending),
+            disable_detail: ending.disable_detail,
+            delete_detail: ending.deletion.map(|attempt| attempt.detail),
+        }
+    }
+
+    /// Whether every step this run took was proved by a read.
+    #[must_use]
+    pub fn settled(&self) -> bool {
+        self.disabled
+            && self
+                .deleted
+                .is_none_or(|outcome: DeleteOutcome| outcome.is_gone())
+    }
+
+    /// The diagnostics that belong on stderr in a human run.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}
+
+/// What the address records for the hash after the run.
+fn tracking(ending: &Ending) -> &'static str {
+    if !ending.disabled {
+        // Nothing moved: a disable that was not proved leaves the address using
+        // the key it was already using.
+        return "current";
+    }
+    match &ending.deletion {
+        None => RetainedStatus::Retired.as_str(),
+        Some(attempt) if attempt.outcome.is_gone() => UNTRACKED,
+        Some(_) => RetainedStatus::RetirementFailed.as_str(),
+    }
+}
+
+/// What this run established, which is a different sentence at every step it
+/// could have stopped at.
+fn ending_summary(address: &Address, hash: &KeyHash, generation: u32, ending: &Ending) -> String {
+    if !ending.disabled {
+        return format!(
+            "key {hash} is not confirmed out of service, so `{address}` still uses it and no \
+             state was written. Nothing is retried automatically: run `{retry}` again, or disable \
+             the key yourself.",
+            retry = ending.retry
+        );
+    }
+    let replacement = replacement_note(address);
+    match &ending.deletion {
+        None => format!(
+            "`{address}` no longer uses key {hash}: a read proved it is out of service, and the \
+             address now owns no key. The hash stays tracked as `retired`, so an audit can still \
+             see it and `openrouter-keymaster delete key --hash {hash}` can remove it \
+             permanently. {replacement}"
+        ),
+        Some(attempt) if attempt.outcome.is_gone() => format!(
+            "OpenRouter has no key {hash}, `{address}` no longer tracks it, and the address now \
+             owns no key. Deletion is permanent and there is nothing left to recover. Generation \
+             {generation} stays spent at this address — a generation names one remote key for \
+             good, so the next one created here takes a higher number. {replacement}"
+        ),
+        Some(_) => format!(
+            "key {hash} is out of service and `{address}` no longer uses it, but it is not \
+             confirmed gone, so the hash stays tracked as `retirement_failed`. The delete was \
+             sent exactly once and is never resent automatically; `openrouter-keymaster delete \
+             key --hash {hash}` retries it. {replacement}"
+        ),
+    }
+}
+
+/// The consequence an operator has to be told about: the address is bound and
+/// owns nothing, which is a shape only this command produces.
+fn replacement_note(address: &Address) -> String {
+    format!(
+        "If `keys.{address}` is still in the configuration, the next `openrouter-keymaster apply` \
+         creates a replacement key there — a real create, at the next generation, delivered to \
+         the configured receiver. Remove the `[keys.{address}]` block first if what you meant was \
+         to stop having this key at all."
+    )
+}
+
+/// What an operator must be told about a decommission, whether it landed or not.
+fn ending_warnings(address: &Address, hash: &KeyHash, ending: &Ending) -> Vec<String> {
+    if !ending.disabled {
+        return vec![format!(
+            "key {hash} may still be usable: the disable was sent once and a read did not prove \
+             it took, so `{address}` still uses it"
+        )];
+    }
+
+    let mut warnings = vec![format!(
+        "`{address}` now owns no key; the next `openrouter-keymaster apply` creates a replacement \
+         there if the configuration still describes it"
+    )];
+    if ending
+        .deletion
+        .as_ref()
+        .is_some_and(|attempt| !attempt.outcome.is_gone())
+    {
+        warnings.push(format!(
+            "key {hash} may or may not still exist; the hash stays tracked as \
+             `retirement_failed` so the delete can be retried"
+        ));
+    }
+    warnings
+}
+
+impl fmt::Display for DecommissionReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut lines = vec![
+            format!("decommission {address}", address = self.address),
+            format!(
+                "  key:        {hash} at generation {generation}",
+                hash = self.hash,
+                generation = self.generation
+            ),
+            format!("  disabled:   {}", self.disabled),
+            format!("  disable:    {}", self.disable_detail),
+        ];
+        if let (Some(outcome), Some(detail)) = (self.deleted, &self.delete_detail) {
+            lines.push(format!("  deleted:    {outcome}"));
+            lines.push(format!("  delete:     {detail}"));
+        }
+        lines.push(format!("  status:     {}", self.status));
+        lines.push(format!("  tracked:    {}", self.tracked));
+        lines.push(String::new());
+        lines.push(self.summary.clone());
         f.write_str(&lines.join("\n"))
     }
 }

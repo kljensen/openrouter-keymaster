@@ -1148,6 +1148,65 @@ impl State {
         Ok(())
     }
 
+    /// Takes the key an address uses out of service, keeping the hash tracked.
+    ///
+    /// The one transition that empties a binding's current slot without putting
+    /// another key in it, and the whole of what `openrouter-keymaster
+    /// decommission` writes: rotation *replaces* a credential, and this *ends*
+    /// one. The address stays bound and keeps everything else it holds — its
+    /// other retained hashes and its generation floor — so a key created here
+    /// later still takes a higher number than this one had.
+    ///
+    /// `status` is the caller's finding about the remote key, established by a
+    /// read: [`RetainedStatus::Retired`] once one proved the key is out of
+    /// service. Nothing here talks to OpenRouter, so nothing here can establish
+    /// that.
+    ///
+    /// Returns the retained entry it recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransitionError::AlreadyPending`] while an operation is in
+    /// progress at the address, whose successor would otherwise be promoted
+    /// into the slot this empties; and [`TransitionError::HashNotCurrent`] when
+    /// the hash named is not the one the address is using. The hash is required
+    /// rather than implied because this is the one ending that acts on a
+    /// working credential.
+    pub fn decommission_current(
+        &mut self,
+        address: &Address,
+        hash: &KeyHash,
+        status: RetainedStatus,
+        at: OffsetDateTime,
+    ) -> Result<RetainedKey, TransitionError> {
+        let not_current = || TransitionError::HashNotCurrent {
+            address: address.clone(),
+            hash: hash.clone(),
+        };
+
+        let Some(binding) = self.keys.get_mut(address) else {
+            return Err(not_current());
+        };
+        if let Some(pending) = &binding.pending {
+            return Err(TransitionError::AlreadyPending {
+                address: address.clone(),
+                phase: pending.phase,
+            });
+        }
+        let Some(current) = binding.current.take_if(|current| &current.hash == hash) else {
+            return Err(not_current());
+        };
+
+        let retained = RetainedKey {
+            hash: current.hash,
+            generation: current.generation,
+            status,
+            recorded_at: at,
+        };
+        binding.retained.push(retained.clone());
+        Ok(retained)
+    }
+
     /// Stops tracking a retained hash, after its remote key is confirmed gone.
     ///
     /// The last step of `openrouter-keymaster delete key`, and only ever that. A hash
@@ -1861,6 +1920,15 @@ pub enum TransitionError {
     DeliveryRefused {
         /// The local address.
         address: Address,
+    },
+
+    /// A hash was named as an address's working key when it is not one.
+    #[error("`{address}` is not using key {hash}")]
+    HashNotCurrent {
+        /// The local address.
+        address: Address,
+        /// The hash that was named.
+        hash: KeyHash,
     },
 
     /// A retained hash was named that the address does not hold.

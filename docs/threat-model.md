@@ -51,7 +51,8 @@ Note that Keymaster cannot run unattended anyway — an ambiguous operation stop
 and waits for a person — so a unit like this belongs on a `systemd` timer only
 if someone reads its result.
 
-`plan`, `status`, `apply`, `import`, `rotate`, `retire`, `delete key`, and some
+`plan`, `status`, `apply`, `import`, `rotate`, `retire`, `decommission`,
+`delete key`, and some
 `recover` invocations need it. `state forget` and an inspection of an operation
 whose hash is already on disk do not, and will run without it.
 
@@ -146,4 +147,5 @@ wrongly leaves a live key nothing tracks.
 Keymaster is not part of the answer. Revoke the management credential in
 OpenRouter, issue a new one, and export it. Then use Keymaster for what follows:
 `openrouter-keymaster status` lists every key it tracks, and `rotate`,
-`retire`, and `delete key` replace and end them one identity at a time.
+`retire`, `decommission`, and `delete key` replace and end them one identity at
+a time.
