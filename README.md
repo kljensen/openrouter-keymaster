@@ -431,8 +431,8 @@ new expiry, workspace, or creator. A `PATCH` body never carries one.
 
 Whichever triggered it, the predecessor is not touched: not disabled, not
 deleted, not unassigned, not even read. Only the promotion that follows a
-*confirmed* delivery moves it to `retained.awaiting_retirement`, and it stays
-enabled there. A rotation that fails at any phase — an ambiguous create,
+*confirmed* delivery moves it to `retained.awaiting_retirement`, and whatever
+state it was in — enabled or not — it keeps there. A rotation that fails at any phase — an ambiguous create,
 restrictions that do not verify, a receiver that refuses — leaves the working
 credential working and its consumers untouched.
 

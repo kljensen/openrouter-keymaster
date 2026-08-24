@@ -55,7 +55,7 @@ silently would tell you the API had been checked when it had not.
 | Test | Covers |
 | --- | --- |
 | `live_guardrail_create_read_import_update` | Guardrail create through `apply`; a one-record-per-page listing that must still return every guardrail exactly once; exact `GET` by UUID; `state forget` then `import guardrail --id`, which must report the description **OpenRouter** holds rather than the edited one on disk; the update that follows, verified by reading it back. |
-| `live_key_create_rotate_retire_delete` | Key create with the hash captured immediately; the update-only `disabled` policy, which `POST /keys` cannot set; guardrail assignment verified through the assignment endpoint; file-receiver delivery at `0600`; non-disclosure of the delivered plaintext; `rotate`, after which the predecessor must still be **enabled** and tracked; `retire`, after which it must be disabled; `delete key`, after which reading it must give 404. Key listing across both generations. |
+| `live_key_create_rotate_retire_delete` | Key create with the hash captured immediately; the update-only `disabled` policy, which `POST /keys` cannot set; guardrail assignment verified through the assignment endpoint; file-receiver delivery at `0600`; non-disclosure of the delivered plaintext; `rotate`, after which the predecessor — enabled by the test beforehand, so the check means something — must still be **enabled** and tracked; `retire`, after which it must be disabled; `delete key`, after which reading it must give 404. Key listing across both generations. |
 | `live_sweep_named_prefix` | Not a test. The cleanup tool described below. |
 
 The guardrail listing is the one that really pages: `GET /guardrails` accepts a

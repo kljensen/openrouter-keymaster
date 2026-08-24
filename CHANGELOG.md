@@ -47,7 +47,8 @@ assignments between them from a checked-in description of what should exist.
 - `import key --hash` and `import guardrail --id`: bind an existing remote
   object to a local address by its immutable identity. No name lookup, no remote
   write.
-- `rotate`: stage a replacement key. The predecessor stays enabled and tracked.
+- `rotate`: stage a replacement key. The predecessor is left unchanged and
+  tracked.
 - `recover inspect | resolve | replace`: close an interrupted create or delivery.
 - `retire --hash`, `delete key --hash`, `state forget ADDRESS`: the three
   explicit endings. Nothing else performs them.
