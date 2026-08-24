@@ -1,4 +1,4 @@
-//! The `keymaster plan` result document.
+//! The `openrouter-keymaster plan` result document.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -598,7 +598,7 @@ impl ReasonReport {
             ),
             Self::NameMatches { candidates } => format!(
                 "unbound, and a remote resource carries the configured name; bind one with \
-                 `keymaster import`: {}",
+                 `openrouter-keymaster import`: {}",
                 candidates.join(", ")
             ),
             Self::GenerationRaised { from, to } => {

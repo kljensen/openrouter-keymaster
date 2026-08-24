@@ -22,8 +22,8 @@ mod support;
 use std::fs;
 use std::path::Path;
 
-use keymaster::ids::{OperationId, ReceiverFingerprint, RemoteName};
-use keymaster::state::{BeginCreate, Origin, Phase, Transition};
+use openrouter_keymaster::ids::{OperationId, ReceiverFingerprint, RemoteName};
+use openrouter_keymaster::state::{BeginCreate, Origin, Phase, Transition};
 use serde_json::{Value, json};
 use support::fixtures::{FAKE_GUARDRAIL_ID, api_key, assignment, created_key, guardrail};
 use support::http::{
@@ -86,7 +86,7 @@ impl Creation {
     /// replace a key that is perfectly good.
     fn receiver_fingerprint(&self) -> ReceiverFingerprint {
         let source = fs::read_to_string(self.project.config_path()).expect("the configuration");
-        keymaster::config::Config::parse(&source)
+        openrouter_keymaster::config::Config::parse(&source)
             .expect("a valid test configuration")
             .receivers
             .values()
@@ -136,7 +136,7 @@ disabled = true
 receiver = "vault"
 {extra}
 "#,
-        program = env!("CARGO_BIN_EXE_keymaster-test-receiver"),
+        program = env!("CARGO_BIN_EXE_openrouter-keymaster-test-receiver"),
         vault = vault.display(),
     )
 }
@@ -890,7 +890,7 @@ fn apply_completes_a_delivered_operation_before_it_plans_anything() {
 #[cfg(feature = "fault-injection")]
 #[test]
 fn a_crash_at_every_durable_phase_leaves_the_phase_adr_0002_promises() {
-    use keymaster::state::STATE_FAULT_VAR;
+    use openrouter_keymaster::state::STATE_FAULT_VAR;
 
     // Each row: the fault, the phase the state file must then hold, how many
     // `POST /keys` requests were sent, and how many times the receiver ran.
@@ -959,7 +959,7 @@ fn a_crash_at_every_durable_phase_leaves_the_phase_adr_0002_promises() {
 #[cfg(feature = "fault-injection")]
 #[test]
 fn a_hash_that_could_not_be_journaled_is_never_touched_again() {
-    use keymaster::state::STATE_FAULT_VAR;
+    use openrouter_keymaster::state::STATE_FAULT_VAR;
 
     let world = Creation::new("record");
     serve_create(&world.project, NEW_HASH);
@@ -1008,7 +1008,7 @@ fn a_hash_that_could_not_be_journaled_is_never_touched_again() {
 #[cfg(feature = "fault-injection")]
 #[test]
 fn a_crash_never_leaves_a_state_file_keymaster_cannot_read() {
-    use keymaster::state::STATE_FAULT_VAR;
+    use openrouter_keymaster::state::STATE_FAULT_VAR;
 
     for stage in [
         "before_temp",

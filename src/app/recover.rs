@@ -1,4 +1,4 @@
-//! `keymaster recover`: looking at an unfinished operation, and closing it.
+//! `openrouter-keymaster recover`: looking at an unfinished operation, and closing it.
 //!
 //! An operation reaches these commands because something Keymaster did had no
 //! answer. A create request whose response was lost, a receiver that never
@@ -466,8 +466,8 @@ pub enum RecoverError {
     /// A leaked hash was offered for an operation that already records one.
     #[error(
         "`{address}` is in phase `{phase}`, where the create response already recorded the key's \
-         hash, so there is no leaked key to bind. Replace it with `keymaster recover replace \
-         {address}`."
+         hash, so there is no leaked key to bind. Replace it with `openrouter-keymaster recover \
+         replace {address}`."
     )]
     HashAlreadyKnown {
         /// The local address.
@@ -488,8 +488,8 @@ pub enum RecoverError {
 
     /// There is no operation to replace.
     #[error(
-        "`{address}` has no operation in progress, so there is nothing to replace. `keymaster \
-         rotate {address}` stages a successor for a key that is working."
+        "`{address}` has no operation in progress, so there is nothing to replace. \
+         `openrouter-keymaster rotate {address}` stages a successor for a key that is working."
     )]
     NothingToReplace {
         /// The local address.
@@ -501,8 +501,8 @@ pub enum RecoverError {
     #[error(
         "`{address}` is in phase `{phase}`, so it is not yet known whether the attempt created a \
          key. Creating a successor now could leave a live credential nothing tracks. Run \
-         `keymaster recover inspect {address}`, then resolve it with `keymaster recover resolve \
-         {address}` before replacing."
+         `openrouter-keymaster recover inspect {address}`, then resolve it with \
+         `openrouter-keymaster recover resolve {address}` before replacing."
     )]
     AmbiguityUnresolved {
         /// The local address.
@@ -514,7 +514,7 @@ pub enum RecoverError {
     /// A replacement was asked for after a successful delivery.
     #[error(
         "`{address}`'s key was delivered; only its local promotion is outstanding, and the next \
-         `keymaster apply` completes that. There is nothing here to replace."
+         `openrouter-keymaster apply` completes that. There is nothing here to replace."
     )]
     AlreadyDelivered {
         /// The local address.

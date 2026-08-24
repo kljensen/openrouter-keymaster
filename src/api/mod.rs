@@ -383,7 +383,7 @@ impl<'client> Writer<'client> {
     ///
     /// The one irreversible write Keymaster makes, and the only one it will
     /// never send on its own initiative: nothing plans a delete, and no
-    /// convergence performs one. It exists for `keymaster delete key`, where an
+    /// convergence performs one. It exists for `openrouter-keymaster delete key`, where an
     /// operator names a hash Keymaster already tracks.
     ///
     /// Sent once, like every write here, and its success is established by

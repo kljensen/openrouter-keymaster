@@ -12,11 +12,11 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use keymaster::client::retry::{backoff, is_retryable_status, next_delay, retry_after};
-use keymaster::client::{
+use openrouter_keymaster::client::retry::{backoff, is_retryable_status, next_delay, retry_after};
+use openrouter_keymaster::client::{
     ApiError, Client, CreateKeyRequest, ManagementKey, Options, PRODUCTION_BASE_URL, RetryPolicy,
 };
-use keymaster::ids::RemoteName;
+use openrouter_keymaster::ids::RemoteName;
 use serde_json::{Value, json};
 use support::clock::FakeClock;
 use support::fixtures::{api_error, api_key, created_key, page};
@@ -130,7 +130,10 @@ fn the_request_announces_keymaster_and_asks_for_json() {
     assert_eq!(header(&sent, "accept").as_deref(), Some("application/json"));
     let agent = header(&sent, "user-agent").expect("a user agent");
     assert!(
-        agent.starts_with(&format!("keymaster/{}", env!("CARGO_PKG_VERSION"))),
+        agent.starts_with(&format!(
+            "openrouter-keymaster/{}",
+            env!("CARGO_PKG_VERSION")
+        )),
         "{agent}"
     );
 }

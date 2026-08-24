@@ -5,10 +5,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use clap::error::ErrorKind;
-use keymaster::app;
-use keymaster::cli::Cli;
-use keymaster::error::Error;
-use keymaster::output::{Format, Renderer};
+use openrouter_keymaster::app;
+use openrouter_keymaster::cli::Cli;
+use openrouter_keymaster::error::Error;
+use openrouter_keymaster::output::{Format, Renderer};
 
 /// Exit code for an application error.
 const FAILURE: u8 = 1;

@@ -7,7 +7,7 @@
 //! ends in whatever way the test asked for, including badly.
 //!
 //! It is a real `[[bin]]` because that is the only way a test gets a path to a
-//! program it can trust: `CARGO_BIN_EXE_keymaster-test-receiver` is set by
+//! program it can trust: `CARGO_BIN_EXE_openrouter-keymaster-test-receiver` is set by
 //! Cargo for binaries of this package. A shell script written from a string
 //! literal would be testing the shell, and a script on disk would not be
 //! compiled, linted, or reviewed with everything else here.
@@ -37,7 +37,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
 
-use keymaster::receiver::command::REJECTED_EXIT_CODE;
+use openrouter_keymaster::receiver::command::REJECTED_EXIT_CODE;
 
 fn main() -> ExitCode {
     let argv: Vec<String> = env::args().collect();

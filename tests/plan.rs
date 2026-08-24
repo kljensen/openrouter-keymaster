@@ -1,6 +1,6 @@
 //! Binary-level tests for the two read-only commands.
 //!
-//! Every case runs the compiled `keymaster` against the local API harness, so
+//! Every case runs the compiled `openrouter-keymaster` against the local API harness, so
 //! what is asserted is the contract an operator and a script actually see: the
 //! exit code, the stdout/stderr split, the JSON document, and — for the whole
 //! run — that nothing was written anywhere.
@@ -12,8 +12,8 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt as _;
 
 use assert_cmd::Command;
-use keymaster::ids::{OperationId, ReceiverFingerprint, RemoteName};
-use keymaster::state::{BeginCreate, Origin, State, Transition};
+use openrouter_keymaster::ids::{OperationId, ReceiverFingerprint, RemoteName};
+use openrouter_keymaster::state::{BeginCreate, Origin, State, Transition};
 use serde_json::{Value, json};
 use support::fixtures::{
     FAKE_GUARDRAIL_ID, OTHER_FAKE_GUARDRAIL_ID, api_error, api_key, guardrail,
@@ -169,7 +169,7 @@ fn a_name_collision_asks_for_an_import_rather_than_adopting_it() {
 
     let human = project.succeed(&["plan"]).out;
     assert!(human.contains("adoption_required"), "{human}");
-    assert!(human.contains("keymaster import"), "{human}");
+    assert!(human.contains("openrouter-keymaster import"), "{human}");
 }
 
 #[test]
@@ -289,7 +289,7 @@ fn an_unfinished_operation_blocks_the_plan_and_reports_how_to_resolve_it() {
         .as_str()
         .unwrap_or_default();
     assert!(
-        remediation.contains("keymaster recover replace jobfeed"),
+        remediation.contains("openrouter-keymaster recover replace jobfeed"),
         "{remediation}"
     );
     assert!(
@@ -380,7 +380,7 @@ fn a_missing_credential_is_its_own_category() {
     let project = Project::new(BASE_CONFIG);
     project.observe(Vec::new(), Vec::new(), Vec::new());
 
-    let output = Command::cargo_bin("keymaster")
+    let output = Command::cargo_bin("openrouter-keymaster")
         .expect("the binary builds")
         .env_remove(CREDENTIAL_VAR)
         .env(BASE_URL_VAR, project.server.api_base_url())
@@ -429,7 +429,7 @@ fn a_base_url_that_is_not_unicode_stops_the_run_rather_than_falling_back() {
     let project = Project::new(BASE_CONFIG);
     project.observe(Vec::new(), Vec::new(), Vec::new());
 
-    let output = Command::cargo_bin("keymaster")
+    let output = Command::cargo_bin("openrouter-keymaster")
         .expect("the binary builds")
         .env(CREDENTIAL_VAR, SECRET_SENTINEL_KEY)
         .env(BASE_URL_VAR, OsStr::from_bytes(b"http://\xff\xfe/api/v1"))
@@ -583,7 +583,7 @@ fn status_reports_an_incomplete_operation_with_non_secret_remediation() {
     assert!(
         operation["remediation"]
             .as_str()
-            .is_some_and(|text| text.contains("keymaster recover"))
+            .is_some_and(|text| text.contains("openrouter-keymaster recover"))
     );
 
     let human = project.succeed(&["status"]);

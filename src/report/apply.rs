@@ -1,4 +1,4 @@
-//! The `keymaster apply` result document.
+//! The `openrouter-keymaster apply` result document.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -355,14 +355,14 @@ impl ApplyReport {
         if self.blocked {
             warnings.push(
                 "an operation of unknown outcome stops this run; nothing was applied, and \
-                 `keymaster recover` resolves it"
+                 `openrouter-keymaster recover` resolves it"
                     .to_owned(),
             );
         }
         if self.skipped > 0 {
             warnings.push(format!(
-                "{} not made; `keymaster apply` does not replace an inference key yet, so the \
-                 configuration is not fully converged",
+                "{} not made; `openrouter-keymaster apply` does not replace an inference key yet, \
+                 so the configuration is not fully converged",
                 plural(self.skipped, "planned write was")
             ));
         }
@@ -554,7 +554,7 @@ impl Outcome {
     /// Classifies an apply from what became of every action in its plan.
     ///
     /// `converged` is the strict one, and deliberately so: it means the plan
-    /// held nothing but no-ops, which is the same thing `keymaster plan` calls
+    /// held nothing but no-ops, which is the same thing `openrouter-keymaster plan` calls
     /// converged. An apply that wrote nothing because everything it wanted to
     /// write was held back behind an adoption, a missing resource, or an
     /// unfinished operation has *not* converged anything, and saying so would
@@ -610,7 +610,7 @@ struct ActionReport {
     privilege_expansion: PrivilegeExpansion,
     /// Every way it widens one, when it was attempted. Empty for an action
     /// nothing executed: the ways a write *would* widen a credential belong to
-    /// `keymaster plan`, and repeating them here would read as a fact.
+    /// `openrouter-keymaster plan`, and repeating them here would read as a fact.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     expansions: Vec<ExpansionReport>,
     /// Whether a fresh read confirmed the result. Absent for an action apply

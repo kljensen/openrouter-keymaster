@@ -653,7 +653,7 @@ fn a_recovery_required_action_reports_the_five_facts() {
     // will actually run.
     let remediation = recovery["remediation"].as_str().unwrap_or_default();
     assert!(
-        remediation.contains("keymaster recover replace jobfeed"),
+        remediation.contains("openrouter-keymaster recover replace jobfeed"),
         "{remediation}"
     );
     assert!(
@@ -885,7 +885,7 @@ fn status_reports_an_unfinished_operation_with_its_remediation() {
     assert!(
         operation["remediation"]
             .as_str()
-            .is_some_and(|text| text.contains("keymaster recover")),
+            .is_some_and(|text| text.contains("openrouter-keymaster recover")),
     );
 
     let human = report.to_string();
@@ -1221,8 +1221,9 @@ fn a_promoted_rotation_says_the_address_now_uses_the_successor() {
         "{summary}"
     );
     assert!(
-        summary.contains(&format!("keymaster retire keys.jobfeed --hash {OLD_HASH}"))
-            || summary.contains(&format!("--hash {OLD_HASH}")),
+        summary.contains(&format!(
+            "openrouter-keymaster retire keys.jobfeed --hash {OLD_HASH}"
+        )) || summary.contains(&format!("--hash {OLD_HASH}")),
         "the summary names the command that ends the predecessor: {summary}"
     );
     assert!(rotated.warnings().is_empty(), "{:?}", rotated.warnings());

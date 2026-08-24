@@ -46,7 +46,7 @@
 //! - **Printing the plaintext.** There is no fallback destination. A key whose
 //!   delivery failed is disabled where possible, kept tracked, and replaced.
 //! - **Adopting a key by name.** An ambiguous create is resolved by an
-//!   operator through `keymaster recover`, never by looking for something that
+//!   operator through `openrouter-keymaster recover`, never by looking for something that
 //!   carries the right display name.
 //!
 //! # The plaintext's lifetime
@@ -182,7 +182,7 @@ impl Issuer<'_> {
     /// journal entry, no `POST /keys`, and nothing for an operator to resolve.
     ///
     /// It is separate from [`Issuer::issue_prepared`] because one caller needs
-    /// the two apart. `keymaster recover replace` closes a dead operation and
+    /// the two apart. `openrouter-keymaster recover replace` closes a dead operation and
     /// disables its key before staging the successor; discovering only then
     /// that the successor cannot be created — no receiver configured, a
     /// guardrail that has drifted — would leave the address with a disabled key
@@ -234,7 +234,7 @@ impl Issuer<'_> {
         let binding = state.guardrail(address).ok_or_else(|| {
             format!(
                 "the guardrail `{address}` is not bound, so this key cannot be secured by it; \
-                 run `keymaster apply` to create or import it first"
+                 run `openrouter-keymaster apply` to create or import it first"
             )
         })?;
         let id = &binding.id;
@@ -249,7 +249,7 @@ impl Issuer<'_> {
             return Err(format!(
                 "guardrail {id} has not converged ({fields}), so a key secured by it would be \
                  restricted by something other than what the configuration asks for; run \
-                 `keymaster apply` first",
+                 `openrouter-keymaster apply` first",
                 fields = fields.join(", ")
             ));
         }
@@ -306,8 +306,8 @@ impl Issuer<'_> {
                 }
                 Err(why) => format!(
                     "OpenRouter refused to create the key ({error}), and clearing the journalled \
-                     attempt failed: {why}. No key exists; resolve the attempt with `keymaster \
-                     recover resolve {address} --no-resource-created`."
+                     attempt failed: {why}. No key exists; resolve the attempt with \
+                     `openrouter-keymaster recover resolve {address} --no-resource-created`."
                 ),
             };
         }
@@ -325,8 +325,8 @@ impl Issuer<'_> {
         format!(
             "the create request's outcome is unknown, so a key may or may not exist: {error}. The \
              request was sent exactly once and is never repeated. Inspect OpenRouter with \
-             `keymaster recover inspect {address}` — operation {operation} — and attest what you \
-             find.{note}"
+             `openrouter-keymaster recover inspect {address}` — operation {operation} — and attest \
+             what you find.{note}"
         )
     }
 
@@ -372,8 +372,8 @@ impl Issuer<'_> {
         Err(format!(
             "a key was created and its identity could not be recorded: {why}. The key is {hash}, \
              and Keymaster has sent nothing further about it: nothing may touch a key whose hash \
-             is not durable. Bind it with `keymaster recover resolve {address} --leaked-hash \
-             {hash}`, which tracks it and then disables it.{note}"
+             is not durable. Bind it with `openrouter-keymaster recover resolve {address} \
+             --leaked-hash {hash}`, which tracks it and then disables it.{note}"
         ))
     }
 
@@ -550,8 +550,8 @@ impl Issuer<'_> {
         let note = match promoted {
             Ok(()) => String::new(),
             Err(why) => format!(
-                " The key was not promoted to current ({why}); the next `keymaster apply` \
-                 completes that under its lock, and nothing remote is outstanding."
+                " The key was not promoted to current ({why}); the next `openrouter-keymaster \
+                 apply` completes that under its lock, and nothing remote is outstanding."
             ),
         };
         Ok(Issued {
@@ -593,7 +593,7 @@ impl Issuer<'_> {
         format!(
             "the receiver refused the plaintext, which committed nothing and no longer exists: \
              {delivery}. Key {hash} is tracked and can never be delivered; {disable}{note} \
-             Replace it with `keymaster recover replace {address}`."
+             Replace it with `openrouter-keymaster recover replace {address}`."
         )
     }
 
@@ -625,7 +625,7 @@ impl Issuer<'_> {
             "the receiver's acknowledgement was lost, so key {hash} may or may not have reached \
              its destination: {delivery}. The receiver is never invoked again, and the plaintext \
              no longer exists. Establish what the destination holds, then replace the key with \
-             `keymaster recover replace {address}`.{note}"
+             `openrouter-keymaster recover replace {address}`.{note}"
         )
     }
 
@@ -635,8 +635,8 @@ impl Issuer<'_> {
         let disable = self.attempt_disable(hash);
         format!(
             "{why}. Key {hash} exists and its plaintext no longer does, so it can never be \
-             delivered; {disable} It stays tracked. Replace it with `keymaster recover replace \
-             {address}`."
+             delivered; {disable} It stays tracked. Replace it with `openrouter-keymaster recover \
+             replace {address}`."
         )
     }
 
@@ -680,7 +680,7 @@ impl Issuer<'_> {
 
 /// Disables a key that must not be usable, and reports what that established.
 ///
-/// Shared by the transaction and by `keymaster recover`, because both reach it
+/// Shared by the transaction and by `openrouter-keymaster recover`, because both reach it
 /// for the same reason: a key exists whose plaintext is gone or was never
 /// received, and the safe thing is to make it unusable while keeping it
 /// tracked. Best effort by nature — every caller is already handling a failure
@@ -739,7 +739,7 @@ fn next_generation(address: &Address, state: &State, desired: &Key) -> Result<u3
 
     // Checked, not saturating. Saturating would hand back a number the address
     // has already used, which `begin_create` then refuses — but only after the
-    // caller has acted on the preflight's answer. For `keymaster recover
+    // caller has acted on the preflight's answer. For `openrouter-keymaster recover
     // replace` that is the dead end the preflight exists to prevent: the old
     // key retired and disabled, and no successor possible.
     let next = recorded.checked_add(1).ok_or_else(|| {

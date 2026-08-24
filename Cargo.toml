@@ -1,5 +1,5 @@
 [package]
-name = "keymaster"
+name = "openrouter-keymaster"
 version = "0.1.0"
 edition = "2024"
 # Must equal `toolchain.channel` in rust-toolchain.toml.
@@ -7,21 +7,22 @@ edition = "2024"
 rust-version = "1.92.0"
 # Keymaster is an application, not a crates.io library.
 publish = false
-# `src/bin/keymaster-test-receiver.rs` is a second binary, so `cargo run` needs
-# to be told which one is the program.
-default-run = "keymaster"
+# `src/bin/openrouter-keymaster-test-receiver.rs` is a second binary, so
+# `cargo run` needs to be told which one is the program.
+default-run = "openrouter-keymaster"
 
 [features]
-# Lets a test interrupt a real `keymaster` run at a named durable phase, by
-# setting `KEYMASTER_STATE_FAULT`. ADR-0002 requires crash coverage immediately
-# before and after every journal entry, and the only faithful way to get it is
-# to stop the production write path at that exact point rather than to
-# reimplement the transaction in a test.
+# Lets a test interrupt a real `openrouter-keymaster` run at a named durable
+# phase, by setting `KEYMASTER_STATE_FAULT`. ADR-0002 requires crash coverage
+# immediately before and after every journal entry, and the only faithful way
+# to get it is to stop the production write path at that exact point rather
+# than to reimplement the transaction in a test.
 #
 # Off by default and never in a release build: `just check` runs
 # `cargo check --locked --all-targets` with no features, which is the shape
 # shipped, and `cargo test --all-features`, which is the shape tested. The
-# `keymaster` binary reads the variable only when this feature is compiled in.
+# `openrouter-keymaster` binary reads the variable only when this feature is
+# compiled in.
 fault-injection = []
 
 [dependencies]

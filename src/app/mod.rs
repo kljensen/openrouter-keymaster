@@ -89,12 +89,12 @@ impl Resolution {
         match self {
             Self::Promotion => format!(
                 "no operator has to establish anything and nothing remote is outstanding — \
-                 `keymaster apply` records that key as `{address}`'s current key, under its own \
-                 lock"
+                 `openrouter-keymaster apply` records that key as `{address}`'s current key, under \
+                 its own lock"
             ),
             Self::Recovery => format!(
-                "only an operator can establish what happened — `keymaster recover inspect \
-                 {address}` names the one command this phase takes"
+                "only an operator can establish what happened — `openrouter-keymaster recover \
+                 inspect {address}` names the one command this phase takes"
             ),
         }
     }
@@ -225,9 +225,9 @@ mod tests {
     fn forget_needs_no_configuration_and_makes_no_remote_call() {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let cli = Cli::parse_from([
-            "keymaster",
+            "openrouter-keymaster",
             "--config",
-            "/nonexistent/keymaster.toml",
+            "/nonexistent/openrouter-keymaster.toml",
             "--state",
             &directory.path().join("state.json").display().to_string(),
             "state",
@@ -246,9 +246,9 @@ mod tests {
     #[test]
     fn a_missing_configuration_stops_plan_before_any_client_exists() {
         let cli = Cli::parse_from([
-            "keymaster",
+            "openrouter-keymaster",
             "--config",
-            "/nonexistent/keymaster.toml",
+            "/nonexistent/openrouter-keymaster.toml",
             "--state",
             "/nonexistent/state.json",
             "plan",

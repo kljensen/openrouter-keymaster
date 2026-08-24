@@ -1,4 +1,4 @@
-//! `keymaster rotate`: staging a replacement for a key that works.
+//! `openrouter-keymaster rotate`: staging a replacement for a key that works.
 //!
 //! Rotation is the one lifecycle operation an operator asks for directly rather
 //! than describing in the configuration. `apply` rotates too — when a
@@ -13,7 +13,7 @@
 //! guardrailed, verified, and delivered first; only the promotion that follows
 //! a *confirmed* delivery moves the old hash to
 //! `retained.awaiting_retirement`, where it stays enabled until an operator
-//! runs `keymaster retire`.
+//! runs `openrouter-keymaster retire`.
 //!
 //! That ordering is the whole value of the command. Keymaster cannot know when
 //! a downstream deployment has read the new secret out of wherever the receiver
@@ -215,8 +215,9 @@ pub enum RotateError {
 
     /// The address owns no key, so there is nothing to replace.
     #[error(
-        "`{address}` owns no key, so there is nothing to rotate; `keymaster apply` creates the \
-         first one, and `keymaster import key {address} --hash HASH` binds one that already exists"
+        "`{address}` owns no key, so there is nothing to rotate; `openrouter-keymaster apply` \
+         creates the first one, and `openrouter-keymaster import key {address} --hash HASH` binds \
+         one that already exists"
     )]
     NoCurrentKey {
         /// The local address.

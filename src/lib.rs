@@ -13,8 +13,8 @@
 // directory fsync and the permission bits would look like a supported port.
 #[cfg(not(unix))]
 compile_error!(
-    "keymaster v0.1 supports Unix platforms only; state durability and permission guarantees \
-     are implemented for Unix"
+    "openrouter-keymaster v0.1 supports Unix platforms only; state durability and permission \
+     guarantees are implemented for Unix"
 );
 
 pub mod api;

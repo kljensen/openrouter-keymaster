@@ -561,10 +561,11 @@ pub enum LifecycleError {
 
     /// The hash named is the address's working key.
     #[error(
-        "key {hash} is what `{address}` currently uses, and Keymaster will not disable or delete \
-         a working credential: it cannot know that nothing is still using it. Rotate first with \
-         `keymaster rotate {address}`, which stages a successor and leaves this key enabled as \
-         the predecessor, then retire the predecessor once every consumer holds the new key."
+        "key {hash} is what `{address}` currently uses, and Keymaster will not disable or delete a \
+         working credential: it cannot know that nothing is still using it. Rotate first with \
+         `openrouter-keymaster rotate {address}`, which stages a successor and leaves this key \
+         enabled as the predecessor, then retire the predecessor once every consumer holds the new \
+         key."
     )]
     KeyInUse {
         /// The local address.
@@ -591,8 +592,9 @@ pub enum LifecycleError {
 
     /// The address does not retain the hash named.
     #[error(
-        "`{address}` does not retain key {hash}; `keymaster status` lists the hashes it holds. A \
-         retirement names an exact immutable identity, and Keymaster will not search for one."
+        "`{address}` does not retain key {hash}; `openrouter-keymaster status` lists the hashes it \
+         holds. A retirement names an exact immutable identity, and Keymaster will not search for \
+         one."
     )]
     NotRetained {
         /// The local address.
@@ -604,8 +606,9 @@ pub enum LifecycleError {
     /// No local address owns the hash named.
     #[error(
         "no local address tracks key {hash}, so Keymaster will not delete it. A key it does not \
-         own belongs to whoever made it; `keymaster plan` reports such keys as unmanaged, and \
-         `keymaster import key NAME --hash {hash}` is how one becomes Keymaster's."
+         own belongs to whoever made it; `openrouter-keymaster plan` reports such keys as \
+         unmanaged, and `openrouter-keymaster import key NAME --hash {hash}` is how one becomes \
+         Keymaster's."
     )]
     Untracked {
         /// The hash that was named.
@@ -615,8 +618,8 @@ pub enum LifecycleError {
     /// OpenRouter has no such key, so there is nothing to disable.
     #[error(
         "OpenRouter has no key {hash}, so there is nothing to disable and state is unchanged. If \
-         the key is genuinely gone, `keymaster delete key --hash {hash}` confirms that and stops \
-         tracking it."
+         the key is genuinely gone, `openrouter-keymaster delete key --hash {hash}` confirms that \
+         and stops tracking it."
     )]
     Absent {
         /// The hash that was looked up.

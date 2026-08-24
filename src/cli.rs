@@ -1,4 +1,4 @@
-//! The `keymaster` command tree.
+//! The `openrouter-keymaster` command tree.
 //!
 //! This module only describes the command-line surface. It performs no
 //! validation beyond parsing, reads no environment variable, and prints
@@ -17,14 +17,14 @@ pub const DEFAULT_STATE_PATH: &str = ".openrouter-keymaster/state.json";
 
 /// Declarative OpenRouter key and guardrail management.
 #[derive(Debug, Parser)]
-#[command(name = "keymaster", version, about, long_about = None)]
+#[command(name = "openrouter-keymaster", version, about, long_about = None)]
 pub struct Cli {
     /// Desired-state configuration file.
     #[arg(
         long,
         global = true,
         value_name = "PATH",
-        default_value = "keymaster.toml"
+        default_value = "openrouter-keymaster.toml"
     )]
     pub config: PathBuf,
 
@@ -45,7 +45,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// A top-level `keymaster` command.
+/// A top-level `openrouter-keymaster` command.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Show the changes an apply would make. Makes no remote or local write.
@@ -69,7 +69,7 @@ Converge OpenRouter with the desired configuration.
 
 Apply takes the exclusive state lock, reloads the configuration and state under \
 it, reads a complete snapshot of OpenRouter, and computes the plan again — so \
-what runs is never the plan an earlier `keymaster plan` printed. It then \
+what runs is never the plan an earlier `openrouter-keymaster plan` printed. It then \
 executes that plan in three fixed phases: guardrail creates and updates, \
 updates to keys that already exist, and assignment changes. A created \
 guardrail's UUID is recorded before anything else happens. Finally it reads \
@@ -83,13 +83,13 @@ journal entry before and after every non-idempotent step, exactly one \
 `POST /keys` with retries disabled, restrictions and the guardrail applied and \
 verified before the plaintext goes anywhere, and the configured receiver \
 invoked exactly once. Any outcome other than a delivered key stops the whole \
-run and is resolved with `keymaster recover`, never by trying again.
+run and is resolved with `openrouter-keymaster recover`, never by trying again.
 
 A planned replacement — a raised generation, a moved receiver, a changed \
 immutable field — runs that same transaction. The key the address already holds \
 is not disabled, deleted, or unassigned: promotion moves it to \
 `retained.awaiting_retirement`, where it stays enabled until an explicit \
-`keymaster retire`.
+`openrouter-keymaster retire`.
 
 Exit code 0 means nothing went wrong, which is not the same as converged: a \
 write apply cannot make yet, or one the plan holds back until an operator \
@@ -130,7 +130,7 @@ current only after a confirmed delivery.
 The key the address already holds is never touched. It is not disabled, not \
 deleted, not unassigned, and not read. Promotion moves it to \
 `retained.awaiting_retirement`, where it stays enabled until you run \
-`keymaster retire`, because Keymaster cannot know when the consumers of a \
+`openrouter-keymaster retire`, because Keymaster cannot know when the consumers of a \
 credential have adopted its successor. A rotation that fails at any phase \
 therefore leaves the working credential working.
 
@@ -138,8 +138,8 @@ Everything the successor needs is checked before anything is sent: the address \
 owns a key, no operation is in progress anywhere, the configuration still \
 describes the key and names a receiver, and its guardrail is bound and \
 converged. A failure there costs a read and changes nothing, and each refusal \
-names the one command that clears it: an unresolved attempt goes to `keymaster \
-recover`, and a delivered one goes to `keymaster apply`, which completes the \
+names the one command that clears it: an unresolved attempt goes to `openrouter-keymaster \
+recover`, and a delivered one goes to `openrouter-keymaster apply`, which completes the \
 outstanding local promotion.
 
 The successor takes the higher of the configured generation and the next free \
@@ -216,7 +216,7 @@ A disable that cannot be confirmed leaves the hash tracked as \
 `retirement_failed` so it can be retried.
 
 The hash stays in state either way: a retired key is still visible to an audit \
-and to a later `keymaster delete key`.
+and to a later `openrouter-keymaster delete key`.
 
 Exit code 0 means a read proved the key is disabled. Exit code 1 means it did \
 not; the result document on stdout says what the attempt established.")]
@@ -270,7 +270,7 @@ configuration, because it exists to correct state that is wrong — which is whe
 those may all be unavailable.
 
 The result lists every identity being released, so you can see what you are \
-letting go of. Afterwards `keymaster plan` reports them as unmanaged, and no \
+letting go of. Afterwards `openrouter-keymaster plan` reports them as unmanaged, and no \
 Keymaster command will touch them again.
 
 ADDRESS is `keys.NAME` or `guardrails.NAME`. A bare NAME is accepted when only \
@@ -279,8 +279,8 @@ one of the two is bound, and refused when both are.
 Forgetting an address with an operation in progress is refused: the journal is \
 the only record that the attempt happened, and in the create phases the only \
 evidence that a live key may exist. Close it first — the refusal names the one \
-command that does, which is `keymaster recover` for the phases only an operator \
-can settle and `keymaster apply` for a delivered key whose promotion is still \
+command that does, which is `openrouter-keymaster recover` for the phases only an operator \
+can settle and `openrouter-keymaster apply` for a delivered key whose promotion is still \
 outstanding.
 
 Forgetting an address that is bound to nothing is a clean no-op that writes no \
@@ -389,15 +389,21 @@ mod tests {
 
     #[test]
     fn paths_have_documented_defaults() {
-        let cli = Cli::parse_from(["keymaster", "plan"]);
-        assert_eq!(cli.config, PathBuf::from("keymaster.toml"));
+        let cli = Cli::parse_from(["openrouter-keymaster", "plan"]);
+        assert_eq!(cli.config, PathBuf::from("openrouter-keymaster.toml"));
         assert_eq!(cli.state, PathBuf::from(DEFAULT_STATE_PATH));
         assert!(!cli.json);
     }
 
     #[test]
     fn global_options_are_accepted_after_the_subcommand() {
-        let cli = Cli::parse_from(["keymaster", "plan", "--json", "--state", "/tmp/s.json"]);
+        let cli = Cli::parse_from([
+            "openrouter-keymaster",
+            "plan",
+            "--json",
+            "--state",
+            "/tmp/s.json",
+        ]);
         assert!(cli.json);
         assert_eq!(cli.state, PathBuf::from("/tmp/s.json"));
     }

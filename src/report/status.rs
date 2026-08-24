@@ -1,4 +1,4 @@
-//! The `keymaster status` result document.
+//! The `openrouter-keymaster status` result document.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

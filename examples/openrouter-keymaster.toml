@@ -1,7 +1,7 @@
 # An example Keymaster desired-state configuration.
 #
-# Every value here is fake. Copy this file to `keymaster.toml`, replace the
-# names, paths, and identifiers, and run `keymaster plan`.
+# Every value here is fake. Copy this file to `openrouter-keymaster.toml`,
+# replace the names, paths, and identifiers, and run `openrouter-keymaster plan`.
 #
 # Keymaster never reads a credential from this file. The management key comes
 # from the `OPENROUTER_MANAGEMENT_KEY` environment variable, and a new

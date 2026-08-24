@@ -117,31 +117,33 @@ fn remediation(phase: Phase, address: Option<&Address>) -> String {
     let name = address.map_or("NAME", Address::as_str);
     match phase {
         Phase::CreateStarted | Phase::CreateAmbiguous => format!(
-            "the create request may or may not have created a key. Run `keymaster recover \
-             inspect {name}` to see the remote keys that could be the one it made, then attest \
-             what you found: `keymaster recover resolve {name} --no-resource-created`, or \
-             `keymaster recover resolve {name} --leaked-hash HASH`."
+            "the create request may or may not have created a key. Run `openrouter-keymaster \
+             recover inspect {name}` to see the remote keys that could be the one it made, then \
+             attest what you found: `openrouter-keymaster recover resolve {name} \
+             --no-resource-created`, or `openrouter-keymaster recover resolve {name} --leaked-hash \
+             HASH`."
         ),
         Phase::Created => format!(
-            "a key exists — its hash is journaled — but its restrictions were never verified, \
-             so it may be an unrestricted live credential, and its plaintext is gone either \
-             way. There is nothing left to attest: `keymaster recover replace {name}` disables \
-             it, keeps it tracked, and creates a successor."
+            "a key exists — its hash is journaled — but its restrictions were never verified, so \
+             it may be an unrestricted live credential, and its plaintext is gone either way. \
+             There is nothing left to attest: `openrouter-keymaster recover replace {name}` \
+             disables it, keeps it tracked, and creates a successor."
         ),
         Phase::Secured => format!(
-            "the key exists and is restricted, and its plaintext no longer exists anywhere, so \
-             it can never be delivered. Create a successor with `keymaster recover replace \
+            "the key exists and is restricted, and its plaintext no longer exists anywhere, so it \
+             can never be delivered. Create a successor with `openrouter-keymaster recover replace \
              {name}`."
         ),
         Phase::DeliveryStarted | Phase::DeliveryAmbiguous => format!(
             "the receiver may or may not hold the plaintext, and the key can never be delivered \
              again. v0.1 has no receiver query contract, so there is nothing to attest: \
-             `keymaster recover replace {name}` retires this key and creates a successor. Check \
-             the destination yourself before you retire what may be working."
+             `openrouter-keymaster recover replace {name}` retires this key and creates a \
+             successor. Check the destination yourself before you retire what may be working."
         ),
         Phase::Delivered => format!(
-            "the delivery finished and only local promotion is left; the next `keymaster apply` \
-             completes it under its lock. Nothing remote is outstanding for `{name}`."
+            "the delivery finished and only local promotion is left; the next \
+             `openrouter-keymaster apply` completes it under its lock. Nothing remote is \
+             outstanding for `{name}`."
         ),
     }
 }

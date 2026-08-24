@@ -18,8 +18,8 @@ mod support;
 use std::fs;
 use std::path::Path;
 
-use keymaster::ids::{OperationId, ReceiverFingerprint, RemoteName};
-use keymaster::state::{BeginCreate, Origin, RetainedStatus, State, Transition};
+use openrouter_keymaster::ids::{OperationId, ReceiverFingerprint, RemoteName};
+use openrouter_keymaster::state::{BeginCreate, Origin, RetainedStatus, State, Transition};
 use serde_json::{Value, json};
 use support::fixtures::{FAKE_GUARDRAIL_ID, api_key, assignment, created_key, guardrail};
 use support::http::{Scripted, json_response};
@@ -73,7 +73,7 @@ impl World {
     /// as "the receiver moved" and asks to replace a key that is perfectly good.
     fn receiver_fingerprint(&self) -> ReceiverFingerprint {
         let source = fs::read_to_string(self.project.config_path()).expect("the configuration");
-        keymaster::config::Config::parse(&source)
+        openrouter_keymaster::config::Config::parse(&source)
             .expect("a valid test configuration")
             .receivers
             .values()
@@ -95,7 +95,7 @@ impl World {
     }
 
     /// The key binding as the state file now holds it.
-    fn binding(&self) -> keymaster::state::KeyBinding {
+    fn binding(&self) -> openrouter_keymaster::state::KeyBinding {
         self.project
             .read_state()
             .key(&address("jobfeed"))
@@ -139,7 +139,7 @@ disabled = true
 receiver = "vault"
 {extra}
 "#,
-        program = env!("CARGO_BIN_EXE_keymaster-test-receiver"),
+        program = env!("CARGO_BIN_EXE_openrouter-keymaster-test-receiver"),
         vault = vault.display(),
     )
 }
@@ -442,7 +442,7 @@ fn rotate_is_refused_while_an_operation_is_pending() {
     );
     assert!(streams.err.contains("op-0007"), "{}", streams.err);
     assert!(
-        streams.err.contains("keymaster recover"),
+        streams.err.contains("openrouter-keymaster recover"),
         "an unresolved attempt is an operator's to close: {}",
         streams.err
     );
@@ -476,7 +476,7 @@ fn the_command_a_delivered_refusal_names_does_clear_it() {
         "rotate_promotion_pending"
     );
     assert!(
-        streams.err.contains("keymaster apply"),
+        streams.err.contains("openrouter-keymaster apply"),
         "the refusal names the command that clears this phase: {}",
         streams.err
     );
@@ -537,7 +537,7 @@ fn a_successor_never_reuses_a_generation_the_address_records() {
 #[cfg(feature = "fault-injection")]
 #[test]
 fn current_and_retained_identities_survive_a_crash_before_the_promotion() {
-    use keymaster::state::{Phase, STATE_FAULT_VAR};
+    use openrouter_keymaster::state::{Phase, STATE_FAULT_VAR};
 
     let world = World::new("record");
     world.owning_a_working_key();
@@ -783,7 +783,7 @@ fn a_changed_creator_replaces_the_key_and_the_create_body_carries_the_new_one() 
 #[cfg(feature = "fault-injection")]
 #[test]
 fn a_replacement_whose_promotion_failed_does_not_call_the_predecessor_retired() {
-    use keymaster::state::{Phase, STATE_FAULT_VAR};
+    use openrouter_keymaster::state::{Phase, STATE_FAULT_VAR};
 
     let world = a_guardrailed_rotation();
 
@@ -805,7 +805,7 @@ fn a_replacement_whose_promotion_failed_does_not_call_the_predecessor_retired() 
         "the outcome must say the predecessor is still in use: {detail}"
     );
     assert!(
-        !detail.contains("now tracked as") && !detail.contains("keymaster retire "),
+        !detail.contains("now tracked as") && !detail.contains("openrouter-keymaster retire "),
         "and must not call it retired or name the command that would disable it: {detail}"
     );
 
@@ -1040,7 +1040,7 @@ fn retiring_the_current_hash_is_refused() {
         "lifecycle_key_in_use"
     );
     assert!(
-        streams.err.contains("keymaster rotate jobfeed"),
+        streams.err.contains("openrouter-keymaster rotate jobfeed"),
         "the refusal names the command that makes retirement possible: {}",
         streams.err
     );
@@ -1082,7 +1082,7 @@ fn a_retirement_whose_disable_fails_keeps_the_hash_tracked_for_a_retry() {
 /// Three sites read the phase — `rotate` refuses to stage beside an operation,
 /// `retire` and `delete key` refuse to touch the key one is producing, and
 /// `state forget` refuses to throw the journal away — and all three used to
-/// send an operator to `keymaster recover`, which refuses `delivered` outright.
+/// send an operator to `openrouter-keymaster recover`, which refuses `delivered` outright.
 /// They share one reading of the phase now, so this checks all of them at once.
 #[test]
 fn every_refusal_for_a_delivered_operation_names_apply_and_not_recover() {
@@ -1111,12 +1111,12 @@ fn every_refusal_for_a_delivered_operation_names_apply_and_not_recover() {
             streams.err
         );
         assert!(
-            streams.err.contains("keymaster apply"),
+            streams.err.contains("openrouter-keymaster apply"),
             "{command:?} must name the command that clears `delivered`: {}",
             streams.err
         );
         assert!(
-            !streams.err.contains("keymaster recover"),
+            !streams.err.contains("openrouter-keymaster recover"),
             "{command:?} must not name a command that refuses this phase: {}",
             streams.err
         );
@@ -1156,12 +1156,14 @@ fn the_same_refusals_name_recover_while_an_outcome_is_still_unknown() {
             streams.err
         );
         assert!(
-            streams.err.contains("keymaster recover inspect jobfeed"),
+            streams
+                .err
+                .contains("openrouter-keymaster recover inspect jobfeed"),
             "{command:?} must name the command that reads the journal: {}",
             streams.err
         );
         assert!(
-            !streams.err.contains("keymaster apply"),
+            !streams.err.contains("openrouter-keymaster apply"),
             "{command:?} must not promise apply can clear an unresolved attempt: {}",
             streams.err
         );
@@ -1505,7 +1507,11 @@ fn forget_refuses_an_address_with_an_operation_in_progress() {
         .fail(&["--json", "state", "forget", "keys.jobfeed"]);
 
     assert_eq!(streams.diagnostic()["error"]["kind"], "forget_pending");
-    assert!(streams.err.contains("keymaster recover"), "{}", streams.err);
+    assert!(
+        streams.err.contains("openrouter-keymaster recover"),
+        "{}",
+        streams.err
+    );
     assert_eq!(
         before,
         fs::read(world.project.state_path()).expect("the state file")

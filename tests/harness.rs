@@ -12,8 +12,10 @@ use std::io::Read;
 use std::panic::{self, AssertUnwindSafe};
 use std::time::Duration;
 
-use keymaster::ids::{Address, OperationId};
-use keymaster::receiver::{Acknowledgement, DeliveryMetadata, Outcome, SecretReceiver as _};
+use openrouter_keymaster::ids::{Address, OperationId};
+use openrouter_keymaster::receiver::{
+    Acknowledgement, DeliveryMetadata, Outcome, SecretReceiver as _,
+};
 use serde_json::{Value, json};
 use support::clock::FakeClock;
 use support::fixtures::{
@@ -36,7 +38,7 @@ fn client(timeout: Duration) -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
-        .user_agent("keymaster-tests")
+        .user_agent("openrouter-keymaster-tests")
         .build()
         .expect("a blocking client")
 }

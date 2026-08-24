@@ -74,7 +74,7 @@ pub const BASE_URL_VAR: &str = "OPENROUTER_BASE_URL";
 /// Identifies Keymaster and its version to OpenRouter, so a problem caused by
 /// one release is attributable.
 const USER_AGENT: &str = concat!(
-    "keymaster/",
+    "openrouter-keymaster/",
     env!("CARGO_PKG_VERSION"),
     " (+https://github.com/kljensen/openrouter-keymaster)"
 );

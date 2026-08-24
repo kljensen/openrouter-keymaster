@@ -16,7 +16,7 @@ filter is only survivable if there is nothing else there to hit.
 
 **A management credential for that organization**, exported as
 `OPENROUTER_MANAGEMENT_KEY`. The suite never reads it into a test variable; the
-child `keymaster` process inherits it from the environment.
+child `openrouter-keymaster` process inherits it from the environment.
 
 ## Running it
 

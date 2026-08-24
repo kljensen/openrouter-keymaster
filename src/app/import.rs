@@ -1,4 +1,4 @@
-//! `keymaster import`: binding an existing remote object to a local address.
+//! `openrouter-keymaster import`: binding an existing remote object to a local address.
 //!
 //! Import is the operator's authority to say "this remote object is the one
 //! that address means". Keymaster never decides that for itself: a display
@@ -9,7 +9,7 @@
 //!
 //! **It makes no remote write.** It reads one object and records one binding.
 //! Whatever the configuration asks for that the remote object does not already
-//! have is reported as the difference a later `keymaster apply` would
+//! have is reported as the difference a later `openrouter-keymaster apply` would
 //! reconcile; nothing is reconciled here.
 //!
 //! The order below is the whole safety argument, and each step exists because
@@ -291,8 +291,8 @@ pub enum ImportError {
     /// Another local address already owns the remote object.
     #[error(
         "cannot bind {identity} to `{address}`: `{owner}` already owns it. One remote object \
-         belongs to exactly one local address; release it with `keymaster state forget {owner}` \
-         if the binding is wrong."
+         belongs to exactly one local address; release it with `openrouter-keymaster state forget \
+         {owner}` if the binding is wrong."
     )]
     OwnedElsewhere {
         /// The remote object, as it is addressed.

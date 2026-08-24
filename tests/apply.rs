@@ -1,4 +1,4 @@
-//! Binary-level tests for `keymaster apply`.
+//! Binary-level tests for `openrouter-keymaster apply`.
 //!
 //! Apply is the only command that writes to OpenRouter, so most of what these
 //! cases assert is *which requests were sent, in what order, carrying what* —
@@ -10,8 +10,8 @@ mod support;
 
 use std::fs;
 
-use keymaster::ids::{OperationId, ReceiverFingerprint, RemoteName};
-use keymaster::state::{BeginCreate, Origin, Transition};
+use openrouter_keymaster::ids::{OperationId, ReceiverFingerprint, RemoteName};
+use openrouter_keymaster::state::{BeginCreate, Origin, Transition};
 use serde_json::{Value, json};
 use support::fixtures::{
     FAKE_GUARDRAIL_ID, OTHER_FAKE_GUARDRAIL_ID, api_key, assignment, guardrail,
@@ -724,7 +724,7 @@ fn a_write_the_plan_holds_back_is_never_reported_as_convergence() {
 fn a_replacement_an_unfinished_operation_holds_back_is_not_convergence_either() {
     // A `secured` operation: the key exists and is restricted, and its
     // plaintext is gone, so the planner proposes a replacement — which only
-    // `keymaster recover replace` can perform. Apply must report that, not
+    // `openrouter-keymaster recover replace` can perform. Apply must report that, not
     // report a converged project.
     let project = Project::new(
         "version = 1\n\n[receivers.vault]\ntype = \"file\"\n\
@@ -798,7 +798,7 @@ fn another_writer_holding_the_lock_stops_apply_before_it_reads_anything() {
     serve_writes(&project);
     fs::write(
         project.directory.path().join("state.json.lock"),
-        "keymaster pid 1\n",
+        "openrouter-keymaster pid 1\n",
     )
     .expect("taking the lock");
 
@@ -818,7 +818,7 @@ fn the_lock_is_taken_before_the_configuration_is_read() {
     serve_writes(&project);
     fs::write(
         project.directory.path().join("state.json.lock"),
-        "keymaster pid 1\n",
+        "openrouter-keymaster pid 1\n",
     )
     .expect("taking the lock");
 

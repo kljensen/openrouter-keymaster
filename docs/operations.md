@@ -24,14 +24,14 @@ organization you mean to change. See
 
    ```sh
    cargo build --release
-   ./target/release/keymaster --version
+   ./target/release/openrouter-keymaster --version
    ```
 
 2. **Write a configuration.** Copy the example and edit it. Nothing here is
    sent anywhere yet.
 
    ```sh
-   cp examples/keymaster.toml keymaster.toml
+   cp examples/openrouter-keymaster.toml openrouter-keymaster.toml
    ```
 
    [The configuration reference](configuration.md) is the field list. Start with
@@ -41,7 +41,7 @@ organization you mean to change. See
    makes no network call, so a broken configuration costs nothing:
 
    ```sh
-   keymaster plan
+   openrouter-keymaster plan
    ```
 
    Without a credential this fails with `missing_credential` *after* reporting
@@ -51,7 +51,7 @@ organization you mean to change. See
 
    ```sh
    export OPENROUTER_MANAGEMENT_KEY="$(pass show openrouter/management)"
-   keymaster plan
+   openrouter-keymaster plan
    ```
 
    Read the outcome on the last line. `converged` means OpenRouter already
@@ -78,15 +78,15 @@ name is mutable and not unique — a plan reports a name match as
 3. **Bind it.**
 
    ```sh
-   keymaster import guardrail cheap --id 6c7f5f5a-4f1b-4e2d-9a3c-1b2d3e4f5a6b
-   keymaster import key jobfeed --hash <HASH>
+   openrouter-keymaster import guardrail cheap --id 6c7f5f5a-4f1b-4e2d-9a3c-1b2d3e4f5a6b
+   openrouter-keymaster import key jobfeed --hash <HASH>
    ```
 
 4. **Read the difference it reports.** Import makes no remote write; it tells
    you what a later apply would reconcile. If that list is a surprise, the file
    is wrong or the identity is.
 
-5. **Converge when you agree with it:** `keymaster apply`.
+5. **Converge when you agree with it:** `openrouter-keymaster apply`.
 
 Repeating an import that changes nothing writes nothing and says `unchanged`.
 
@@ -96,15 +96,15 @@ to hold. To put a Keymaster-delivered key at that address, raise the key's
 
 ## Making a change
 
-1. Edit `keymaster.toml`.
-2. `keymaster plan` — read every action, and read the `! privilege expansions`
-   section if there is one.
-3. `keymaster apply`.
+1. Edit `openrouter-keymaster.toml`.
+2. `openrouter-keymaster plan` — read every action, and read the
+   `! privilege expansions` section if there is one.
+3. `openrouter-keymaster apply`.
 4. Check the outcome: `applied` means every write was made **and verified by a
    re-read**. `converged` means there was nothing to do. `incomplete` or
    `held_back` means work remains and the report says what is waiting on what.
    `failed` and `blocked` exit 1.
-5. `keymaster plan` again. A successful apply's successor is a no-op.
+5. `openrouter-keymaster plan` again. A successful apply's successor is a no-op.
 
 The plan you read in step 2 is never the plan that runs. Apply takes the lock,
 reloads, refreshes OpenRouter, and computes the plan again — so nothing goes
@@ -129,14 +129,14 @@ deliberately. [ADR-0002](adr/0002-journaled-key-creation.md) is the protocol.
 3. **Plan.** The action is classified `issuing`, the loudest safety class.
 
    ```sh
-   keymaster plan
+   openrouter-keymaster plan
    ```
 
 4. **Apply.** Do it interactively, on a machine you are watching, with the
    receiver's destination reachable.
 
    ```sh
-   keymaster apply
+   openrouter-keymaster apply
    ```
 
 5. **Confirm the destination.** Keymaster verified the key's budget and
@@ -152,7 +152,7 @@ point.
 ## Rotating a key
 
 ```sh
-keymaster rotate jobfeed
+openrouter-keymaster rotate jobfeed
 ```
 
 Rotation stages a successor and stops. **The predecessor is not touched**: not
@@ -166,7 +166,7 @@ receiver or its fingerprint changes, or when an immutable field changes
 Afterwards:
 
 ```sh
-keymaster status          # the address now holds a current hash and a retained one
+openrouter-keymaster status          # the address now holds a current hash and a retained one
 ```
 
 A rotation that fails at any phase leaves the working credential working. What
@@ -182,7 +182,7 @@ a rotation that began the journaled transaction leaves an operation behind, and
   address that holds it and the phase. Ask what that phase accepts:
 
   ```sh
-  keymaster recover inspect jobfeed
+  openrouter-keymaster recover inspect jobfeed
   ```
 
   Its last line names the one command for that phase — that is the mechanism,
@@ -190,7 +190,7 @@ a rotation that began the journaled transaction leaves an operation behind, and
   needs `recover resolve` and then `recover replace`; a create that succeeded
   but whose delivery did not needs `recover replace`; and `delivered` needs no
   operator at all, because only a local promotion is left and the next
-  `keymaster apply` records it.
+  `openrouter-keymaster apply` records it.
 
 Either way the predecessor is untouched and still serving.
 [Recovering an interrupted operation](#recovering-an-interrupted-operation) is
@@ -202,14 +202,14 @@ Only after every consumer has the new credential. That judgement is yours;
 Keymaster has no way to make it.
 
 ```sh
-keymaster status                                   # find the retained hash
-keymaster retire jobfeed --hash <PREDECESSOR-HASH> # disable, confirmed by a read
+openrouter-keymaster status                                   # find the retained hash
+openrouter-keymaster retire jobfeed --hash <PREDECESSOR-HASH> # disable, confirmed by a read
 ```
 
 Then, once you are sure nothing needs it back:
 
 ```sh
-keymaster delete key --hash <PREDECESSOR-HASH>     # permanent, confirmed by a 404
+openrouter-keymaster delete key --hash <PREDECESSOR-HASH>     # permanent, confirmed by a 404
 ```
 
 - `retire` refuses the **current** hash. Rotate first.
@@ -225,8 +225,8 @@ keymaster delete key --hash <PREDECESSOR-HASH>     # permanent, confirmed by a 4
 ## Giving up ownership
 
 ```sh
-keymaster state forget keys.jobfeed
-keymaster state forget guardrails.cheap
+openrouter-keymaster state forget keys.jobfeed
+openrouter-keymaster state forget guardrails.cheap
 ```
 
 Zero HTTP requests, zero receiver invocations, no configuration and no
@@ -249,7 +249,7 @@ by name, or invoke a receiver twice.
 ### 1. Inspect
 
 ```sh
-keymaster recover inspect jobfeed
+openrouter-keymaster recover inspect jobfeed
 ```
 
 You get the operation ID, the phase it stopped in, its timestamp, the intended
@@ -266,7 +266,7 @@ no API call at all, so it works with no credential.
 | `create_started`, `create_ambiguous` | A key may or may not exist. Nobody knows. | [Resolve the ambiguity](#3-resolve-a-create-ambiguity), then replace. |
 | `created`, `secured` | The key exists and its plaintext is gone for good. | [Replace it](#4-replace). |
 | `delivery_started`, `delivery_ambiguous` | The receiver may or may not have committed. The plaintext is gone either way. | [Replace it](#4-replace). |
-| `delivered` | The transaction finished; only the local promotion is outstanding. | Run `keymaster apply`. It completes the promotion under its own lock and says so. |
+| `delivered` | The transaction finished; only the local promotion is outstanding. | Run `openrouter-keymaster apply`. It completes the promotion under its own lock and says so. |
 
 ### 3. Resolve a create ambiguity
 
@@ -281,10 +281,10 @@ Then tell it exactly one of two things:
 
 ```sh
 # You looked, and nothing was created.
-keymaster recover resolve jobfeed --no-resource-created
+openrouter-keymaster recover resolve jobfeed --no-resource-created
 
 # You looked, and this is the key it made.
-keymaster recover resolve jobfeed --leaked-hash <HASH>
+openrouter-keymaster recover resolve jobfeed --leaked-hash <HASH>
 ```
 
 `--no-resource-created` clears the operation **on your word**. Keymaster cannot
@@ -302,7 +302,7 @@ Repeating a resolution that already succeeded is a no-op, not an error.
 ### 4. Replace
 
 ```sh
-keymaster recover replace jobfeed
+openrouter-keymaster recover replace jobfeed
 ```
 
 Under one lock it checks everything the successor needs first — the key is
@@ -354,16 +354,16 @@ one the backup missed unowned, which is the opposite of what you want.
 
    ```sh
    cp backups/state-20260824T120000Z.json .openrouter-keymaster/state.json
-   keymaster status --json > /tmp/claimed.json
+   openrouter-keymaster status --json > /tmp/claimed.json
    ```
 
-2. **Inventory what actually exists.** `keymaster plan` lists every remote key
-   and guardrail no local address owns as `unmanaged`, with its hash or UUID —
-   that listing is the inventory, and the OpenRouter dashboard is the
+2. **Inventory what actually exists.** `openrouter-keymaster plan` lists every
+   remote key and guardrail no local address owns as `unmanaged`, with its hash
+   or UUID — that listing is the inventory, and the OpenRouter dashboard is the
    cross-check for anything the credential cannot see.
 
    ```sh
-   keymaster plan --json > /tmp/observed.json
+   openrouter-keymaster plan --json > /tmp/observed.json
    ```
 
 3. **Reconcile the two, address by address.** For each address, decide which
@@ -379,8 +379,8 @@ one the backup missed unowned, which is the opposite of what you want.
      the right one:
 
      ```sh
-     keymaster state forget keys.jobfeed
-     keymaster import key jobfeed --hash <CURRENT-HASH>
+     openrouter-keymaster state forget keys.jobfeed
+     openrouter-keymaster import key jobfeed --hash <CURRENT-HASH>
      ```
 
      `state forget` performs no remote write, so the key keeps working
@@ -395,17 +395,18 @@ one the backup missed unowned, which is the opposite of what you want.
      entries come from: only a rotation's promotion ever creates one, by
      moving the hash it just replaced. Nothing reconstructs that from the
      outside. Disable and delete the old key in the OpenRouter dashboard
-     instead. `keymaster plan` reports it as `unmanaged` until you do, so it
-     stays visible rather than forgotten.
+     instead. `openrouter-keymaster plan` reports it as `unmanaged` until you
+     do, so it stays visible rather than forgotten.
    - An address the backup never knew about is a plain import:
 
      ```sh
-     keymaster import guardrail cheap --id <UUID>
-     keymaster import key newer --hash <HASH>
+     openrouter-keymaster import guardrail cheap --id <UUID>
+     openrouter-keymaster import key newer --hash <HASH>
      ```
 
-5. **Reconcile.** `keymaster plan` until nothing is `unmanaged` that should be
-   owned and nothing is `adoption_required`, then `keymaster apply`.
+5. **Reconcile.** `openrouter-keymaster plan` until nothing is `unmanaged` that
+   should be owned and nothing is `adoption_required`, then
+   `openrouter-keymaster apply`.
 
 **Rotate only when identity genuinely cannot be established** — when you cannot
 tell which of several keys an address holds, or the key it held is gone. Then
@@ -420,7 +421,7 @@ immediately if it is already there, naming the file, rather than waiting. A
 killed run leaves it behind; deleting it is safe once no Keymaster is running:
 
 ```sh
-pgrep -f 'keymaster' || rm .openrouter-keymaster/state.json.lock
+pgrep -f 'openrouter-keymaster' || rm .openrouter-keymaster/state.json.lock
 ```
 
 The lock is a local file. It does not coordinate two machines — nothing stops

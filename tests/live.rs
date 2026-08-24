@@ -44,10 +44,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use assert_cmd::Command;
-use keymaster::api::pagination::PageLimits;
-use keymaster::api::{Reader, Writer};
-use keymaster::client::Client;
-use keymaster::ids::{KeyHash, Uuid};
+use openrouter_keymaster::api::pagination::PageLimits;
+use openrouter_keymaster::api::{Reader, Writer};
+use openrouter_keymaster::client::Client;
+use openrouter_keymaster::ids::{KeyHash, Uuid};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use support::project::Streams;
@@ -533,11 +533,11 @@ impl Live {
         self.record("key-deleted", hash.as_str(), "verified 404");
     }
 
-    fn key(&self, hash: &KeyHash) -> keymaster::api::ObservedKey {
+    fn key(&self, hash: &KeyHash) -> openrouter_keymaster::api::ObservedKey {
         self.reader().get_key(hash).expect("reading a key by hash")
     }
 
-    fn guardrail(&self, id: &Uuid) -> keymaster::api::ObservedGuardrail {
+    fn guardrail(&self, id: &Uuid) -> openrouter_keymaster::api::ObservedGuardrail {
         self.reader()
             .get_guardrail(id)
             .expect("reading a guardrail by UUID")
@@ -620,7 +620,7 @@ impl Live {
             "`POST /keys` has no disabled field, so the update-only policy has to have landed"
         );
         assert_eq!(
-            key.limit.map(keymaster::config::Usd::micros),
+            key.limit.map(openrouter_keymaster::config::Usd::micros),
             Some(0),
             "a live test key must not be able to spend"
         );
@@ -717,7 +717,7 @@ impl Live {
     /// Deletes one key and reads it back until OpenRouter answers 404.
     ///
     /// A 2xx on the delete is not the proof; the absence of the immutable
-    /// identity is, which is the same rule `keymaster delete key` follows.
+    /// identity is, which is the same rule `openrouter-keymaster delete key` follows.
     fn delete_and_verify(&self, hash: &KeyHash) -> Result<(), String> {
         let writer = Writer::new(&self.client);
         match writer.delete_key(hash) {
@@ -817,7 +817,7 @@ impl Workspace {
     }
 
     fn config_path(&self) -> PathBuf {
-        self.directory.path().join("keymaster.toml")
+        self.directory.path().join("openrouter-keymaster.toml")
     }
 
     fn write_config(&self, contents: &str) {
@@ -832,7 +832,8 @@ impl Workspace {
     /// variable is removed because a live run must never be interrupted at a
     /// journal phase on purpose.
     fn run(&self, arguments: &[&str]) -> Output {
-        let mut command = Command::cargo_bin("keymaster").expect("the keymaster binary");
+        let mut command =
+            Command::cargo_bin("openrouter-keymaster").expect("the openrouter-keymaster binary");
         command
             .env_remove("KEYMASTER_STATE_FAULT")
             .arg("--config")
@@ -840,7 +841,7 @@ impl Workspace {
             .arg("--state")
             .arg(self.directory.path().join("state.json"))
             .args(arguments);
-        let output = command.output().expect("running keymaster");
+        let output = command.output().expect("running openrouter-keymaster");
         let streams = Streams::of(&output);
         self.transcript.borrow_mut().push(streams.out);
         self.transcript.borrow_mut().push(streams.err);
@@ -852,7 +853,7 @@ impl Workspace {
         let streams = Streams::of(&output);
         assert!(
             output.status.success(),
-            "keymaster {arguments:?} failed: {err}",
+            "openrouter-keymaster {arguments:?} failed: {err}",
             err = streams.err
         );
         streams

@@ -152,7 +152,7 @@ impl Faults {
 /// `<stage>@<nth>` — for example `before_rename@2`.
 ///
 /// Only read when the `fault-injection` feature is compiled in, which the
-/// production build does not do. Tests use it to stop a real `keymaster` run
+/// production build does not do. Tests use it to stop a real `openrouter-keymaster` run
 /// immediately before or immediately after one journal entry lands.
 #[cfg(any(test, feature = "fault-injection"))]
 pub const STATE_FAULT_VAR: &str = "KEYMASTER_STATE_FAULT";
@@ -224,7 +224,7 @@ impl StateFile {
                 // Not load-bearing: a hint for whoever finds a stale lock.
                 let _ = io::Write::write_all(
                     &mut &file,
-                    format!("keymaster pid {}\n", std::process::id()).as_bytes(),
+                    format!("openrouter-keymaster pid {}\n", std::process::id()).as_bytes(),
                 );
                 Ok(StateLock {
                     file: self,

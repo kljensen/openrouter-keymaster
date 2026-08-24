@@ -2,7 +2,7 @@
 //!
 //! Every binary-level test needs the same four things: a configuration file, a
 //! state file, a server answering the three listings a snapshot reads, and a
-//! way to run `keymaster` against them with a sentinel credential instead of a
+//! way to run `openrouter-keymaster` against them with a sentinel credential instead of a
 //! real one. This is that, so `tests/plan.rs`, `tests/import.rs`, and
 //! `tests/apply.rs` differ only in what they assert.
 //!
@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use assert_cmd::Command;
-use keymaster::ids::{Address, KeyHash, Uuid};
-use keymaster::state::{State, StateFile};
+use openrouter_keymaster::ids::{Address, KeyHash, Uuid};
+use openrouter_keymaster::state::{State, StateFile};
 use serde_json::Value;
 use tempfile::TempDir;
 use time::OffsetDateTime;
@@ -52,7 +52,7 @@ impl Project {
 
     #[must_use]
     pub fn config_path(&self) -> PathBuf {
-        self.directory.path().join("keymaster.toml")
+        self.directory.path().join("openrouter-keymaster.toml")
     }
 
     #[must_use]
@@ -167,7 +167,7 @@ impl Project {
     /// project's; only where the requests go differs.
     #[must_use]
     pub fn run_against(&self, base_url: &str, arguments: &[&str]) -> Output {
-        let mut command = Command::cargo_bin("keymaster").expect("the binary builds");
+        let mut command = Command::cargo_bin("openrouter-keymaster").expect("the binary builds");
         command
             .env_remove(CREDENTIAL_VAR)
             .env_remove(BASE_URL_VAR)
@@ -189,7 +189,7 @@ impl Project {
     /// call" an assertion rather than a hope.
     #[must_use]
     pub fn run_without_credential(&self, arguments: &[&str]) -> Output {
-        let mut command = Command::cargo_bin("keymaster").expect("the binary builds");
+        let mut command = Command::cargo_bin("openrouter-keymaster").expect("the binary builds");
         command
             .env_remove(CREDENTIAL_VAR)
             .env_remove(BASE_URL_VAR)
@@ -218,7 +218,7 @@ impl Project {
         arguments: &[&str],
         environment: &[(&str, &str)],
     ) -> Output {
-        let mut command = Command::cargo_bin("keymaster").expect("the binary builds");
+        let mut command = Command::cargo_bin("openrouter-keymaster").expect("the binary builds");
         command
             .env_remove(CREDENTIAL_VAR)
             .env_remove(BASE_URL_VAR)

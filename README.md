@@ -9,6 +9,23 @@ inference keys through the journaled transaction of ADR-0002; `rotate`,
 `retire`, `delete key`, and `state forget` are the explicit lifecycle
 operations nothing else ever performs.
 
+## Naming
+
+The tool's full name is `openrouter-keymaster`, and that is the name used
+wherever a machine or a shell has to identify it: the Cargo package and library
+crate (`openrouter_keymaster`), the binary and its test-receiver companion
+(`openrouter-keymaster-test-receiver`), the command name in `--help`, the HTTP
+user agent, the default configuration file (`openrouter-keymaster.toml`), and
+the state directory (`.openrouter-keymaster/`).
+
+"Keymaster" is the short name, and it is what running prose in this README, the
+docs, and the ADRs calls the project.
+
+Environment variables use the short name as their prefix —
+`KEYMASTER_LIVE_TESTS`, `KEYMASTER_LIVE_SWEEP`, and `KEYMASTER_STATE_FAULT`.
+The credential and endpoint variables are named for the service instead:
+`OPENROUTER_MANAGEMENT_KEY` and `OPENROUTER_BASE_URL`.
+
 ## Install and build
 
 Keymaster is built from source. It needs the Rust toolchain pinned in
@@ -21,7 +38,7 @@ than offering a weaker version of them.
 git clone https://github.com/kljensen/openrouter-keymaster
 cd openrouter-keymaster
 cargo build --release
-./target/release/keymaster --version
+./target/release/openrouter-keymaster --version
 ```
 
 Put the binary somewhere on your `PATH`, or run it from `target/release`. There
@@ -54,22 +71,22 @@ This README is the reference for what each command does and why. The pages under
 ## Commands
 
 ```text
-keymaster plan                          show the changes an apply would make
-keymaster status                        report bindings and incomplete operations
-keymaster apply                         converge OpenRouter with the configuration
-keymaster import key NAME --hash HASH   bind an existing key by its hash
-keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID
-keymaster rotate NAME                   stage a replacement key
-keymaster recover inspect NAME          report an interrupted key operation
-keymaster recover resolve NAME ...      attest what an ambiguous operation did
-keymaster recover replace NAME          replace a key after resolving ambiguity
-keymaster retire NAME --hash HASH       disable a tracked retained key
-keymaster delete key --hash HASH        permanently delete a tracked key
-keymaster state forget ADDRESS          relinquish local ownership of an address
+openrouter-keymaster plan                          show the changes an apply would make
+openrouter-keymaster status                        report bindings and incomplete operations
+openrouter-keymaster apply                         converge OpenRouter with the configuration
+openrouter-keymaster import key NAME --hash HASH   bind an existing key by its hash
+openrouter-keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID
+openrouter-keymaster rotate NAME                   stage a replacement key
+openrouter-keymaster recover inspect NAME          report an interrupted key operation
+openrouter-keymaster recover resolve NAME ...      attest what an ambiguous operation did
+openrouter-keymaster recover replace NAME          replace a key after resolving ambiguity
+openrouter-keymaster retire NAME --hash HASH       disable a tracked retained key
+openrouter-keymaster delete key --hash HASH        permanently delete a tracked key
+openrouter-keymaster state forget ADDRESS          relinquish local ownership of an address
 ```
 
-Global options: `--config PATH` (default `keymaster.toml`), `--state PATH`
-(default `.openrouter-keymaster/state.json`), and `--json`.
+Global options: `--config PATH` (default `openrouter-keymaster.toml`),
+`--state PATH` (default `.openrouter-keymaster/state.json`), and `--json`.
 
 `recover resolve` requires exactly one attested finding, either
 `--no-resource-created` or `--leaked-hash HASH`. Keymaster never guesses which
@@ -109,10 +126,10 @@ field it applies to.
 **An unfinished operation is reported with everything needed to resolve it**:
 the operation identifier, the phase it stopped in, the timestamp of that phase,
 the created key's hash when the journal recorded one, and a remediation
-sentence naming the exact `keymaster recover` command for that phase. None of
-those is secret; a key's plaintext is exactly what is never recorded anywhere.
-While an operation of unknown outcome stands, the plan is `blocked` and nothing
-is executable.
+sentence naming the exact `openrouter-keymaster recover` command for that
+phase. None of those is secret; a key's plaintext is exactly what is never
+recorded anywhere. While an operation of unknown outcome stands, the plan is
+`blocked` and nothing is executable.
 
 **"Nothing to apply" has two causes and they are not the same**, so a plan ends
 in one of three outcomes: `converged` (every action is a no-op — OpenRouter
@@ -153,12 +170,12 @@ actionable category — `config_invalid`, `config_read`, `config_syntax`,
 
 ## Import
 
-`keymaster import key NAME --hash HASH` and
-`keymaster import guardrail NAME --id UUID` bind an existing remote object to a
-local address. **Import is the operator's authority to make that binding**;
-Keymaster never makes it on its own, because a display name is mutable and not
-unique. A remote object whose name matches an unbound address is reported by
-`plan` as `adoption_required` — a candidate, never an adoption.
+`openrouter-keymaster import key NAME --hash HASH` and
+`openrouter-keymaster import guardrail NAME --id UUID` bind an existing remote
+object to a local address. **Import is the operator's authority to make that
+binding**; Keymaster never makes it on its own, because a display name is
+mutable and not unique. A remote object whose name matches an unbound address
+is reported by `plan` as `adoption_required` — a candidate, never an adoption.
 
 The command reads one object and writes one binding, in this order:
 
@@ -175,7 +192,8 @@ The command reads one object and writes one binding, in this order:
    untouched.
 5. Refuse an address already bound to a different object, and refuse an object
    another address already owns. Either refusal names both addresses.
-6. Report the managed fields a later `keymaster apply` would reconcile.
+6. Report the managed fields a later `openrouter-keymaster apply` would
+   reconcile.
 7. Record the binding with `origin = imported` and write state atomically.
 
 **It makes no remote write.** Whatever the configuration asks for that the
@@ -196,7 +214,7 @@ they found it: `import_argument`, `import_not_configured`, `import_absent`,
 
 ## Apply
 
-`keymaster apply` is the only command that writes to OpenRouter. It:
+`openrouter-keymaster apply` is the only command that writes to OpenRouter. It:
 
 1. takes the exclusive state lock;
 2. reloads the configuration and state under it;
@@ -240,7 +258,8 @@ What apply will not do:
 - **Retire, disable, or delete a predecessor.** A planned replacement runs the
   journaled transaction and stops at the promotion. The key the address held
   stays enabled, tracked as `awaiting_retirement`, until an explicit
-  `keymaster retire`. See [Rotation and retirement](#rotation-and-retirement).
+  `openrouter-keymaster retire`. See
+  [Rotation and retirement](#rotation-and-retirement).
 - **Touch anything unmanaged.** Only actions the planner produced are executed,
   and the planner never proposes a write to a remote object no local address
   owns.
@@ -263,7 +282,8 @@ never a guardrail's whole key list — a guardrail can carry keys no local
 address owns.
 
 An apply's outcome is one of six, and `converged` is the strict one — it means
-the plan held nothing but no-ops, exactly what `keymaster plan` calls converged:
+the plan held nothing but no-ops, exactly what `openrouter-keymaster plan`
+calls converged:
 
 | Outcome | Meaning | Exit |
 | ------- | ------- | ---- |
@@ -292,8 +312,8 @@ repeatable. OpenRouter returns the plaintext in the create response and nowhere
 else, and documents no idempotency token, so a request whose response is lost
 can never be told apart from one that was never applied. ADR-0002 answers that
 with a journal, and it is the one path that issues secret material: `apply` runs
-it for every planned key `create` and `replace`, and so do `keymaster rotate`
-and `keymaster recover replace`.
+it for every planned key `create` and `replace`, and so do
+`openrouter-keymaster rotate` and `openrouter-keymaster recover replace`.
 
 ```text
 validate ─▶ create_started ─▶ POST /keys ─▶ created ─▶ PATCH + assign
@@ -345,7 +365,7 @@ is known. The rules that follow from that:
 Creations run one at a time, and the whole apply stops at the first unresolved
 operation — the state API enforces the same rule from below, refusing to start a
 second operation while one stands. Everything an unresolved one leaves behind is
-handled by `keymaster recover`.
+handled by `openrouter-keymaster recover`.
 
 One phase needs no operator: `delivered`. The transaction is over and only the
 local promotion is outstanding, so `apply` completes it under its lock before it
@@ -374,16 +394,16 @@ All four stand aside for an operation in progress — `rotate` will not stage a
 successor beside one, `retire` and `delete key` will not touch the key one is
 about to produce, and `state forget` will not throw away the journal recording
 it — and every one of those refusals names the command that clears it. That is
-`keymaster recover` for the phases only an operator can settle, and `keymaster
-apply` for `delivered`, which needs no operator at all: the transaction is over
-and the outstanding promotion is local. `recover replace` refuses `delivered`
-outright, so being sent there would be being sent to a command that turns you
-away.
+`openrouter-keymaster recover` for the phases only an operator can settle, and
+`openrouter-keymaster apply` for `delivered`, which needs no operator at all:
+the transaction is over and the outstanding promotion is local.
+`recover replace` refuses `delivered` outright, so being sent there would be
+being sent to a command that turns you away.
 
 ### rotate
 
 ```sh
-keymaster rotate jobfeed
+openrouter-keymaster rotate jobfeed
 ```
 
 A rotation is the journaled transaction of ADR-0002 with a different trigger.
@@ -429,15 +449,15 @@ different remote key, right after the evidence of the first one was destroyed.
 ### retire
 
 ```sh
-keymaster retire jobfeed --hash <PREDECESSOR-HASH>
+openrouter-keymaster retire jobfeed --hash <PREDECESSOR-HASH>
 ```
 
 Disables one hash the address retains, and proves it by reading the key back.
 The hash is an immutable identity: there is no retire-by-name, and no search.
 
-`keymaster status` lists the hashes an address holds and why each is still
-tracked. Run `retire` when every consumer has the new credential — that is the
-judgement Keymaster cannot make.
+`openrouter-keymaster status` lists the hashes an address holds and why each is
+still tracked. Run `retire` when every consumer has the new credential — that is
+the judgement Keymaster cannot make.
 
 - **The current hash is refused.** Keymaster cannot know that nothing is still
   using it. Rotate first; the predecessor is what you retire. v0.1 defines no
@@ -452,7 +472,7 @@ judgement Keymaster cannot make.
 ### delete key
 
 ```sh
-keymaster delete key --hash <HASH>
+openrouter-keymaster delete key --hash <HASH>
 ```
 
 Permanent, irreversible, and never planned. There is no address argument: the
@@ -474,8 +494,8 @@ asserted, so you cannot delete one address's key by typing another's name.
 ### state forget
 
 ```sh
-keymaster state forget keys.jobfeed
-keymaster state forget guardrails.cheap
+openrouter-keymaster state forget keys.jobfeed
+openrouter-keymaster state forget guardrails.cheap
 ```
 
 Relinquishes local ownership. **Zero HTTP requests and zero receiver
@@ -487,8 +507,8 @@ which is precisely when those may be unavailable.
 Forgetting a key address releases every hash it held: the current key *and*
 every retained one, because relinquishing ownership means relinquishing all of
 it. The result document lists each identity and its role, so you can see what
-you are letting go of before it stops being yours. Afterwards `keymaster plan`
-reports them as unmanaged.
+you are letting go of before it stops being yours. Afterwards
+`openrouter-keymaster plan` reports them as unmanaged.
 
 `ADDRESS` is `keys.NAME` or `guardrails.NAME`. A bare `NAME` is accepted when
 only one of the two is bound and refused when both are — the same word can name
@@ -496,7 +516,8 @@ a key and a guardrail.
 
 - **An address with an operation in progress is refused.** The journal is the
   only record that the attempt happened, and in the create phases the only
-  evidence that a live key may exist. Resolve it with `keymaster recover` first.
+  evidence that a live key may exist. Resolve it with
+  `openrouter-keymaster recover` first.
 - **An address bound to nothing is a clean no-op.** It writes no state and exits
   0, so repeating the command is safe.
 
@@ -519,9 +540,9 @@ configuration schema.
 ## Recovering an interrupted operation
 
 Any create or delivery that ends without an answer leaves a journal entry and
-stops the whole apply. `keymaster recover` is the only way to close one, and it
-never guesses: it does not retry a create, adopt a remote key because its
-display name matches, or invoke a receiver a second time.
+stops the whole apply. `openrouter-keymaster recover` is the only way to close
+one, and it never guesses: it does not retry a create, adopt a remote key
+because its display name matches, or invoke a receiver a second time.
 
 What follows is why each step is shaped the way it is.
 [`docs/operations.md`](docs/operations.md#recovering-an-interrupted-operation)
@@ -531,7 +552,7 @@ command it accepts.
 Start by reading the journal:
 
 ```sh
-keymaster recover inspect jobfeed
+openrouter-keymaster recover inspect jobfeed
 ```
 
 It reports the operation's identifier, phase, timestamp, generation, the
@@ -557,10 +578,10 @@ Then look at OpenRouter yourself, and tell Keymaster what you found:
 
 ```sh
 # Nothing was created.
-keymaster recover resolve jobfeed --no-resource-created
+openrouter-keymaster recover resolve jobfeed --no-resource-created
 
 # A key was created, and this is its hash.
-keymaster recover resolve jobfeed --leaked-hash <HASH>
+openrouter-keymaster recover resolve jobfeed --leaked-hash <HASH>
 ```
 
 Exactly one of the two is required, and giving both is a usage error.
@@ -578,7 +599,7 @@ Repeating a resolution that already succeeded is a clear no-op, not an error.
 Finally, get the address a working key:
 
 ```sh
-keymaster recover replace jobfeed
+openrouter-keymaster recover replace jobfeed
 ```
 
 `replace` handles the phases where the outcome is already known and the
@@ -631,12 +652,13 @@ design does and does not defend against.
 
 ## Configuration
 
-Desired state is one TOML file. [`examples/keymaster.toml`](examples/keymaster.toml)
-is a complete, commented example with fake values; copy it to `keymaster.toml`
-and edit. It declares `guardrails` (model, provider, and budget policy), `keys`
-(the inference keys Keymaster manages), and `receivers` (where a newly created
-key's plaintext is delivered), each addressed by a stable local name that is
-never sent to OpenRouter.
+Desired state is one TOML file.
+[`examples/openrouter-keymaster.toml`](examples/openrouter-keymaster.toml) is a
+complete, commented example with fake values; copy it to
+`openrouter-keymaster.toml` and edit. It declares `guardrails` (model,
+provider, and budget policy), `keys` (the inference keys Keymaster manages),
+and `receivers` (where a newly created key's plaintext is delivered), each
+addressed by a stable local name that is never sent to OpenRouter.
 
 Three properties are worth knowing before editing one:
 
@@ -715,7 +737,7 @@ Operating notes:
   version; a file written by a later Keymaster stops this one with an error.
 - **One operation at a time.** At most one key creation or delivery may be
   incomplete across the whole file; an apply stops at the first unresolved one
-  until an operator resolves it with `keymaster recover`.
+  until an operator resolves it with `openrouter-keymaster recover`.
 - **Unix only.** These durability and permission guarantees are implemented
   with Unix primitives, so v0.1 fails to build on other platforms rather than
   offering a weaker version of them.
@@ -906,10 +928,11 @@ sentinel.
 response served by the local HTTP harness, because there is deliberately no
 other way to obtain a `KeyPlaintext` — to both receivers, and scans the
 outcome, the messages, and every file and filename left behind for the
-sentinel. The command cases run `src/bin/keymaster-test-receiver.rs`, a real
-compiled adapter rather than a shell string, which records its argument vector,
-the names of every environment variable it inherited, and the envelope it was
-given, and can end in every way the protocol describes: cleanly, with the
+sentinel. The command cases run
+`src/bin/openrouter-keymaster-test-receiver.rs`, a real compiled adapter rather
+than a shell string, which records its argument vector, the names of every
+environment variable it inherited, and the envelope it was given, and can end
+in every way the protocol describes: cleanly, with the
 refusal code, with an undefined code, by signal, by timeout, by shouting
 megabytes at both streams, and by echoing the key back.
 

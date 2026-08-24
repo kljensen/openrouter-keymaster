@@ -1,10 +1,10 @@
 # The desired-state file
 
-Keymaster reads one TOML file — `keymaster.toml` unless `--config` says
-otherwise — that describes what should exist in OpenRouter.
-[`examples/keymaster.toml`](../examples/keymaster.toml) is a working example
-with fake values. This page is the reference: every field, its type, and the
-rules that reject it.
+Keymaster reads one TOML file — `openrouter-keymaster.toml` unless `--config`
+says otherwise — that describes what should exist in OpenRouter.
+[`examples/openrouter-keymaster.toml`](../examples/openrouter-keymaster.toml)
+is a working example with fake values. This page is the reference: every field,
+its type, and the rules that reject it.
 
 ## Three rules that explain most of the surprises
 

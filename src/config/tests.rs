@@ -61,7 +61,7 @@ fn guardrail<'a>(config: &'a Config, name: &str) -> &'a Guardrail {
 
 #[test]
 fn the_example_configuration_is_valid() {
-    let config = parse(include_str!("../../examples/keymaster.toml"));
+    let config = parse(include_str!("../../examples/openrouter-keymaster.toml"));
     assert_eq!(config.guardrails.len(), 1);
     assert_eq!(config.keys.len(), 1);
     assert_eq!(config.receivers.len(), 2);
@@ -78,7 +78,7 @@ fn parsing_touches_no_other_file() {
         .expect("listing the directory")
         .count();
 
-    parse(include_str!("../../examples/keymaster.toml"));
+    parse(include_str!("../../examples/openrouter-keymaster.toml"));
 
     let after = std::fs::read_dir(directory.path())
         .expect("listing the directory")
@@ -98,7 +98,7 @@ fn loading_reports_a_missing_file_without_panicking() {
 #[test]
 fn loading_a_file_matches_parsing_its_text() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let path = directory.path().join("keymaster.toml");
+    let path = directory.path().join("openrouter-keymaster.toml");
     std::fs::write(&path, MINIMAL).expect("writing the configuration");
     assert_eq!(Config::load(&path).expect("a valid file"), parse(MINIMAL));
 }
@@ -849,7 +849,7 @@ limit_usd = 0.1
 
 #[test]
 fn parsing_the_same_text_twice_produces_the_same_configuration() {
-    let source = include_str!("../../examples/keymaster.toml");
+    let source = include_str!("../../examples/openrouter-keymaster.toml");
     assert_eq!(parse(source), parse(source));
 }
 

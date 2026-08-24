@@ -1,6 +1,6 @@
 //! Binary-level contract tests for the command-line surface.
 //!
-//! These run the compiled `keymaster` binary and assert its stable contract:
+//! These run the compiled `openrouter-keymaster` binary and assert its stable contract:
 //! the command tree, exit codes, and the stdout/stderr split. Every case
 //! removes `OPENROUTER_MANAGEMENT_KEY` from the environment unless it is
 //! testing what happens when the credential is present.
@@ -17,9 +17,9 @@ const USAGE_ERROR: i32 = 2;
 /// Exit code for an application error.
 const APPLICATION_ERROR: i32 = 1;
 
-/// A `keymaster` invocation isolated from the ambient credential.
+/// A `openrouter-keymaster` invocation isolated from the ambient credential.
 fn keymaster() -> Command {
-    let mut command = Command::cargo_bin("keymaster").expect("the binary builds");
+    let mut command = Command::cargo_bin("openrouter-keymaster").expect("the binary builds");
     command.env_remove(CREDENTIAL_VAR);
     command
 }
@@ -51,7 +51,7 @@ fn version_exits_zero_on_stdout() {
         .arg("--version")
         .assert()
         .code(0)
-        .stdout(predicate::str::starts_with("keymaster "))
+        .stdout(predicate::str::starts_with("openrouter-keymaster "))
         .stderr(predicate::str::is_empty());
 }
 
@@ -328,7 +328,7 @@ fn help_and_version_stay_on_the_success_path_under_json() {
 #[test]
 fn global_paths_are_accepted_from_any_position() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let config = directory.path().join("keymaster.toml");
+    let config = directory.path().join("openrouter-keymaster.toml");
     let state = directory.path().join("state.json");
 
     keymaster()
@@ -348,7 +348,7 @@ fn an_ambient_credential_does_not_change_behavior_or_appear_in_output() {
     const AMBIENT: &str = "sk-or-mgmt-FAKEAMBIENTCREDENTIAL";
 
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let output = Command::cargo_bin("keymaster")
+    let output = Command::cargo_bin("openrouter-keymaster")
         .expect("the binary builds")
         .env(CREDENTIAL_VAR, AMBIENT)
         .arg("--config")

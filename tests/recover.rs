@@ -1,4 +1,4 @@
-//! Binary-level tests for `keymaster recover`.
+//! Binary-level tests for `openrouter-keymaster recover`.
 //!
 //! Recovery exists because Keymaster refuses to guess. So most of what these
 //! cases assert is what *did not* happen: no candidate was selected, no second
@@ -16,8 +16,8 @@ mod support;
 use std::fs;
 use std::path::Path;
 
-use keymaster::ids::{OperationId, ReceiverFingerprint, RemoteName};
-use keymaster::state::{BeginCreate, Phase, RetainedStatus, State, Transition};
+use openrouter_keymaster::ids::{OperationId, ReceiverFingerprint, RemoteName};
+use openrouter_keymaster::state::{BeginCreate, Phase, RetainedStatus, State, Transition};
 use serde_json::{Value, json};
 use support::fixtures::{FAKE_WORKSPACE_ID, api_key, created_key};
 use support::http::{Scripted, json_response};
@@ -97,7 +97,7 @@ impl Recovery {
     /// cases ever plans against it.
     fn receiver_fingerprint(&self) -> ReceiverFingerprint {
         let source = fs::read_to_string(self.project.config_path()).expect("the configuration");
-        keymaster::config::Config::parse(&source)
+        openrouter_keymaster::config::Config::parse(&source)
             .expect("a valid test configuration")
             .receivers
             .values()
@@ -124,7 +124,8 @@ impl Recovery {
                         generation: 1,
                         name: RemoteName::parse("golf-jobfeed").expect("a remote name"),
                         workspace: workspace.then(|| {
-                            keymaster::ids::Uuid::parse(FAKE_WORKSPACE_ID).expect("a UUID")
+                            openrouter_keymaster::ids::Uuid::parse(FAKE_WORKSPACE_ID)
+                                .expect("a UUID")
                         }),
                         receiver: fingerprint.clone(),
                     },
@@ -184,7 +185,7 @@ limit_reset = "monthly"
 disabled = true
 receiver = "vault"
 "#,
-        program = env!("CARGO_BIN_EXE_keymaster-test-receiver"),
+        program = env!("CARGO_BIN_EXE_openrouter-keymaster-test-receiver"),
         vault = vault.display(),
     )
 }
@@ -589,8 +590,8 @@ fn every_phase_is_told_to_run_a_command_that_accepts_it() {
             .unwrap_or_default()
             .to_owned();
 
-        let names_resolve = remediation.contains("keymaster recover resolve jobfeed");
-        let names_replace = remediation.contains("keymaster recover replace jobfeed");
+        let names_resolve = remediation.contains("openrouter-keymaster recover resolve jobfeed");
+        let names_replace = remediation.contains("openrouter-keymaster recover replace jobfeed");
         assert!(
             !(names_resolve && names_replace),
             "{phase}: one command, not a menu: {remediation}"
@@ -625,7 +626,7 @@ fn every_phase_is_told_to_run_a_command_that_accepts_it() {
                 "{phase}: every unfinished phase names a `recover` command: {remediation}"
             );
             assert!(
-                remediation.contains("keymaster apply"),
+                remediation.contains("openrouter-keymaster apply"),
                 "{phase}: {remediation}"
             );
             // Apply completes the promotion locally, which is the whole of
@@ -729,7 +730,7 @@ fn another_writer_holding_the_lock_stops_a_resolution_before_it_reads_anything()
     world.journal(Phase::CreateAmbiguous, false);
     fs::write(
         world.project.directory.path().join("state.json.lock"),
-        "keymaster pid 1\n",
+        "openrouter-keymaster pid 1\n",
     )
     .expect("taking the lock");
     let before = fs::read(world.project.state_path()).expect("the state fixture");
@@ -1112,7 +1113,7 @@ fn replace_refuses_rather_than_creating_a_second_key_when_nothing_is_pending() {
         "recover_nothing_to_replace"
     );
     assert!(
-        streams.err.contains("keymaster rotate"),
+        streams.err.contains("openrouter-keymaster rotate"),
         "the error names the command for a working key: {}",
         streams.err
     );

@@ -906,28 +906,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "keymaster"
-version = "0.1.0"
-dependencies = [
- "assert_cmd",
- "clap",
- "percent-encoding",
- "predicates",
- "reqwest",
- "rustix",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "time",
- "tokio",
- "toml",
- "wiremock",
- "zeroize",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1028,6 +1006,28 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "openrouter-keymaster"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "percent-encoding",
+ "predicates",
+ "reqwest",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "toml",
+ "wiremock",
+ "zeroize",
+]
 
 [[package]]
 name = "openssl-probe"

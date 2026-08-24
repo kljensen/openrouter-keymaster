@@ -133,7 +133,7 @@ a live credential. ADR-0002 chooses the expensive-but-safe answer by default.
 
 - **delivered** — Keymaster marks the operation delivered, promotes the new key
   to current, and moves the previous key to `awaiting_retirement`. The
-  predecessor stays enabled until an explicit `keymaster retire`.
+  predecessor stays enabled until an explicit `openrouter-keymaster retire`.
 - **rejected** — the plaintext is discarded, the new key is disabled if
   possible and kept tracked, and the operator is told the address needs
   replacement. Your adapter is not called again for that key.
@@ -149,9 +149,9 @@ exists — see below.
 ## Idempotency, and the operation ID
 
 `operation_id` names one attempt. It is stable across everything Keymaster
-does with that attempt, and it appears in `keymaster status` and `keymaster
-recover inspect` output, so an operator can match a Keymaster journal entry to
-whatever your adapter recorded.
+does with that attempt, and it appears in `openrouter-keymaster status` and
+`openrouter-keymaster recover inspect` output, so an operator can match a
+Keymaster journal entry to whatever your adapter recorded.
 
 Use it:
 
@@ -251,8 +251,8 @@ anything that can read the file can spend the key.
 
 ## Testing an adapter
 
-`src/bin/keymaster-test-receiver.rs` is the adapter Keymaster's own tests run.
-It is small, it records exactly what it was given — its argument vector, the
-names of every environment variable it inherited, and the envelope — and it can
-end in every way this document describes, including badly. Read it as a worked
-example of the receiving half.
+`src/bin/openrouter-keymaster-test-receiver.rs` is the adapter Keymaster's own
+tests run. It is small, it records exactly what it was given — its argument
+vector, the names of every environment variable it inherited, and the envelope
+— and it can end in every way this document describes, including badly. Read it
+as a worked example of the receiving half.

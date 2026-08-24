@@ -9,11 +9,11 @@ mod support;
 
 use std::time::Duration;
 
-use keymaster::api::pagination::PageLimits;
-use keymaster::api::{ObservedKey, Reader, ResetPolicy, Writer};
-use keymaster::client::{Client, ManagementKey, Options, RetryPolicy};
-use keymaster::config::{ResetInterval, Usd};
-use keymaster::ids::{KeyHash, Uuid};
+use openrouter_keymaster::api::pagination::PageLimits;
+use openrouter_keymaster::api::{ObservedKey, Reader, ResetPolicy, Writer};
+use openrouter_keymaster::client::{Client, ManagementKey, Options, RetryPolicy};
+use openrouter_keymaster::config::{ResetInterval, Usd};
+use openrouter_keymaster::ids::{KeyHash, Uuid};
 use serde_json::{Value, json};
 use support::fixtures::{
     FAKE_GUARDRAIL_ID, FAKE_WORKSPACE_ID, OTHER_FAKE_GUARDRAIL_ID, api_error, api_key, assignment,

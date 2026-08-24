@@ -109,7 +109,7 @@ pub enum ApiError {
     },
 
     /// Keymaster asked itself to do something impossible.
-    #[error("keymaster cannot make this request: {message}")]
+    #[error("openrouter-keymaster cannot make this request: {message}")]
     Invariant {
         /// What was wrong, redacted.
         message: String,

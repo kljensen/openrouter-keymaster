@@ -1,4 +1,4 @@
-//! The `keymaster import` result document.
+//! The `openrouter-keymaster import` result document.
 
 use std::fmt;
 
@@ -129,8 +129,8 @@ impl ImportReport {
         let mut warnings = Vec::new();
         if !self.changes.is_empty() {
             warnings.push(format!(
-                "{} differ from the configuration; `keymaster apply` reconciles them, and \
-                 `keymaster plan` shows what it would do",
+                "{} differ from the configuration; `openrouter-keymaster apply` reconciles them, \
+                 and `openrouter-keymaster plan` shows what it would do",
                 plural(self.changes.len(), "managed field")
             ));
         }

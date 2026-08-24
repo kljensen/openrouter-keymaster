@@ -1150,7 +1150,7 @@ impl State {
 
     /// Stops tracking a retained hash, after its remote key is confirmed gone.
     ///
-    /// The last step of `keymaster delete key`, and only ever that. A hash
+    /// The last step of `openrouter-keymaster delete key`, and only ever that. A hash
     /// leaves state when OpenRouter no longer has the key and a read has said
     /// so; dropping it on the strength of a delete response would be how a live
     /// spending credential ends up with no local record naming it.
@@ -1191,7 +1191,7 @@ impl State {
 
     /// Relinquishes every key this address owns, recording nothing in its place.
     ///
-    /// This is `keymaster state forget`, and it is purely local: the remote keys
+    /// This is `openrouter-keymaster state forget`, and it is purely local: the remote keys
     /// go on existing, enabled, and are simply no longer Keymaster's. Returns
     /// the binding it removed so the caller can list what it released, or
     /// `None` when the address owned nothing.
@@ -1694,8 +1694,8 @@ pub enum BindError {
     /// journal, needs no credential once a hash is known, and reports the
     /// command that phase actually takes.
     #[error(
-        "`{address}` has an operation in progress; close it first, and `keymaster recover \
-         inspect {address}` names the one command that does"
+        "`{address}` has an operation in progress; close it first, and `openrouter-keymaster \
+         recover inspect {address}` names the one command that does"
     )]
     OperationInProgress {
         /// The local address.

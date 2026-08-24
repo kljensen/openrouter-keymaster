@@ -6,9 +6,9 @@ mod support;
 
 use std::thread;
 
-use keymaster::config::Receiver;
-use keymaster::ids::{Address, KeyHash, OperationId, ReceiverFingerprint, RemoteName};
-use keymaster::state::{BeginCreate, Phase, State, StateFile, Transition};
+use openrouter_keymaster::config::Receiver;
+use openrouter_keymaster::ids::{Address, KeyHash, OperationId, ReceiverFingerprint, RemoteName};
+use openrouter_keymaster::state::{BeginCreate, Phase, State, StateFile, Transition};
 use support::sentinel::{SECRET_SENTINEL_KEY, assert_absent, assert_absent_under};
 use tempfile::TempDir;
 use time::OffsetDateTime;

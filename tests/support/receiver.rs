@@ -16,11 +16,11 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use keymaster::client::{
+use openrouter_keymaster::client::{
     Client, CreateKeyRequest, CreatedKey, KeyPlaintext, ManagementKey, Options,
 };
-use keymaster::ids::RemoteName;
-use keymaster::receiver::{Acknowledgement, DeliveryMetadata, Outcome, SecretReceiver};
+use openrouter_keymaster::ids::RemoteName;
+use openrouter_keymaster::receiver::{Acknowledgement, DeliveryMetadata, Outcome, SecretReceiver};
 use wiremock::Mock;
 use wiremock::matchers::{method, path};
 

@@ -105,9 +105,9 @@ fn rotation_summary(address: &Address, predecessor: &Predecessor, successor: &Su
         return format!(
             "key {hash} was created at generation {generation} and delivered to {receiver}, and \
              the record that it is now `{address}`'s key could not be written. Nothing remote is \
-             outstanding and nothing needs re-delivering; the next `keymaster apply` completes \
-             the promotion locally. Until it does, `{address}` is still using key {old} — do not \
-             retire it yet.",
+             outstanding and nothing needs re-delivering; the next `openrouter-keymaster apply` \
+             completes the promotion locally. Until it does, `{address}` is still using key {old} \
+             — do not retire it yet.",
             hash = successor.hash,
             generation = successor.generation,
             receiver = successor.receiver,
@@ -119,7 +119,7 @@ fn rotation_summary(address: &Address, predecessor: &Predecessor, successor: &Su
         "`{address}` now uses key {hash} at generation {generation}, delivered to {receiver}. Key \
          {old} is untouched and still enabled: Keymaster cannot know when the consumers of a \
          credential have adopted its successor, so it never retires one for you. Retire it with \
-         `keymaster retire {address} --hash {old}` once they have.",
+         `openrouter-keymaster retire {address} --hash {old}` once they have.",
         address = address.as_str(),
         hash = successor.hash,
         generation = successor.generation,
@@ -133,15 +133,16 @@ fn rotation_warnings(predecessor: &Predecessor, successor: &Successor) -> Vec<St
     let mut warnings = Vec::new();
     if !successor.promoted {
         warnings.push(format!(
-            "key {hash} was delivered but not promoted to current; the next `keymaster apply` \
-             completes that locally, and nothing remote is outstanding",
+            "key {hash} was delivered but not promoted to current; the next `openrouter-keymaster \
+             apply` completes that locally, and nothing remote is outstanding",
             hash = successor.hash
         ));
     }
     if predecessor.status.is_none() {
         warnings.push(format!(
             "key {hash} is still recorded as the current key, because the promotion did not land; \
-             do not retire it until `keymaster status` shows it as `awaiting_retirement`",
+             do not retire it until `openrouter-keymaster status` shows it as \
+             `awaiting_retirement`",
             hash = predecessor.hash
         ));
     }
@@ -217,7 +218,7 @@ impl RetireReport {
             summary: if confirmed {
                 format!(
                     "key {hash} is disabled and a read confirmed it. It stays tracked so an audit \
-                     can still see it; `keymaster delete key --hash {hash}` removes it \
+                     can still see it; `openrouter-keymaster delete key --hash {hash}` removes it \
                      permanently."
                 )
             } else {
@@ -512,8 +513,8 @@ impl ForgetReport {
             summary: format!(
                 "`{address}` is no longer bound to anything. {count} released and not changed: \
                  forget makes no API call and invokes no receiver, so every one of them still \
-                 exists exactly as it was. `keymaster plan` now reports them as unmanaged, and no \
-                 Keymaster command will touch them again."
+                 exists exactly as it was. `openrouter-keymaster plan` now reports them as \
+                 unmanaged, and no Keymaster command will touch them again."
             ),
             warnings: forget_warnings(&released),
             released,

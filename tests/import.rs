@@ -1,4 +1,4 @@
-//! Binary-level tests for `keymaster import`.
+//! Binary-level tests for `openrouter-keymaster import`.
 //!
 //! Import is the one command whose whole job is to write a binding, and the
 //! cases below are the ways that can go wrong. Every one of them asserts what
@@ -9,7 +9,7 @@ mod support;
 
 use std::fs;
 
-use keymaster::state::{KeyBinding, Origin, State};
+use openrouter_keymaster::state::{KeyBinding, Origin, State};
 use serde_json::Value;
 use support::fixtures::{FAKE_GUARDRAIL_ID, OTHER_FAKE_GUARDRAIL_ID, api_key, guardrail};
 use support::http::json_response;
@@ -376,7 +376,7 @@ fn another_writer_holding_the_lock_stops_the_import_before_it_reads_anything() {
     let project = Project::new(CONFIG);
     serve_key(&project, JOBFEED_HASH, "golf-jobfeed");
     let lock = project.directory.path().join("state.json.lock");
-    fs::write(&lock, "keymaster pid 1\n").expect("taking the lock");
+    fs::write(&lock, "openrouter-keymaster pid 1\n").expect("taking the lock");
 
     let streams =
         project.fail_silently(&["--json", "import", "key", "jobfeed", "--hash", JOBFEED_HASH]);
@@ -427,7 +427,7 @@ fn the_lock_is_taken_before_the_configuration_is_read() {
     let project = Project::new("version = 1\n\n[keys.jobfeed]\nname = \"\"\n");
     serve_key(&project, JOBFEED_HASH, "golf-jobfeed");
     let lock = project.directory.path().join("state.json.lock");
-    fs::write(&lock, "keymaster pid 1\n").expect("taking the lock");
+    fs::write(&lock, "openrouter-keymaster pid 1\n").expect("taking the lock");
 
     let streams =
         project.fail_silently(&["--json", "import", "key", "jobfeed", "--hash", JOBFEED_HASH]);

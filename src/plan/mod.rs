@@ -29,7 +29,7 @@
 //!   [`ActionKind::RecoveryRequired`] is reported first and
 //!   [`Plan::executable`] yields nothing. `secured` does not — the journal
 //!   already says the key exists, is restricted, and can never be delivered —
-//!   so it is a [`ActionKind::Replace`] for `keymaster recover replace` to
+//!   so it is a [`ActionKind::Replace`] for `openrouter-keymaster recover replace` to
 //!   perform, or a report saying why not even that is possible, and it holds
 //!   back only the other creates state would refuse beside it. `delivered`
 //!   holds back nothing: promotion is a local state
@@ -1230,7 +1230,7 @@ fn plan_pending(address: &Address, desired: Option<&Key>, operation: &PendingOpe
 ///
 /// The replacement is blocked whichever it is. The operation is on the
 /// address, and `begin_create` refuses to start another while one stands, so
-/// it is `keymaster recover replace`'s to perform (#17): that clears the
+/// it is `openrouter-keymaster recover replace`'s to perform (#17): that clears the
 /// operation and creates the successor under the same lock. Reporting the
 /// replacement as executable here would promise apply something the state API
 /// would refuse.

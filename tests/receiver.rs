@@ -1,7 +1,7 @@
 //! The receiver interface and the file receiver, delivering a real plaintext.
 //!
 //! Every case here hands a receiver the secret sentinel the way production
-//! hands it one: a [`CreatedKey`](keymaster::client::CreatedKey) parsed out of
+//! hands it one: a [`CreatedKey`](openrouter_keymaster::client::CreatedKey) parsed out of
 //! a create response served by the local HTTP harness. So an assertion that
 //! the sentinel reached the file, and no assertion that it reached anything
 //! else, is about the value the receiver actually held.
@@ -17,8 +17,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use keymaster::ids::{Address, OperationId};
-use keymaster::receiver::{
+use openrouter_keymaster::ids::{Address, OperationId};
+use openrouter_keymaster::receiver::{
     Acknowledgement, CommandReceiver, DeliveryMetadata, FileReceiver, SecretReceiver as _,
 };
 use serde_json::Value;
@@ -27,7 +27,7 @@ use support::sentinel::{SECRET_SENTINEL_KEY, assert_absent, assert_absent_under,
 use tempfile::TempDir;
 
 /// The metadata of one delivery, all of it non-secret.
-fn metadata(hash: &keymaster::ids::KeyHash) -> DeliveryMetadata {
+fn metadata(hash: &openrouter_keymaster::ids::KeyHash) -> DeliveryMetadata {
     DeliveryMetadata::new(
         Address::parse("jobfeed").expect("a valid address"),
         hash.clone(),
@@ -126,10 +126,10 @@ fn a_receiver_is_chosen_by_the_configuration_and_never_by_default() {
     // half of "no receiver is selected implicitly"; the configuration half is
     // that a key with no `receiver` is never created.
     let scratch = TempDir::new().expect("a temporary directory");
-    let configured = keymaster::config::Receiver::File {
+    let configured = openrouter_keymaster::config::Receiver::File {
         path: scratch.path().join("jobfeed.key"),
     };
-    let keymaster::config::Receiver::File { path } = &configured else {
+    let openrouter_keymaster::config::Receiver::File { path } = &configured else {
         unreachable!("the block above is a file receiver")
     };
 
@@ -142,11 +142,11 @@ fn a_receiver_is_chosen_by_the_configuration_and_never_by_default() {
 
 // ===== the command receiver =====
 
-/// The purpose-built adapter in `src/bin/keymaster-test-receiver.rs`. A real
+/// The purpose-built adapter in `src/bin/openrouter-keymaster-test-receiver.rs`. A real
 /// compiled program, not a shell string: what is under test is process
 /// spawning, argument passing, and an empty environment, none of which a
 /// script interpreted by `/bin/sh` would exercise honestly.
-const HELPER: &str = env!("CARGO_BIN_EXE_keymaster-test-receiver");
+const HELPER: &str = env!("CARGO_BIN_EXE_openrouter-keymaster-test-receiver");
 
 /// A receiver that runs the helper in one mode, recording into `directory`.
 fn helper(directory: &Path, mode: &str, extra: &[&str]) -> CommandReceiver {
@@ -463,13 +463,13 @@ fn a_program_that_is_not_there_committed_nothing() {
 #[test]
 fn a_configured_command_block_builds_the_command_receiver() {
     let scratch = TempDir::new().expect("a temporary directory");
-    let configured = keymaster::config::Receiver::Command {
+    let configured = openrouter_keymaster::config::Receiver::Command {
         program: PathBuf::from(HELPER),
         args: vec!["record".to_owned(), scratch.path().display().to_string()],
     };
     let created = created_sentinel_key();
 
-    let outcome = keymaster::receiver::from_config(&configured)
+    let outcome = openrouter_keymaster::receiver::from_config(&configured)
         .receive(&metadata(created.hash()), created.plaintext());
 
     assert!(outcome.is_delivered(), "{outcome}");

@@ -1,4 +1,4 @@
-//! The `keymaster recover` result documents.
+//! The `openrouter-keymaster recover` result documents.
 //!
 //! Recovery is the one place where Keymaster tells an operator about a key it
 //! cannot account for, so these documents are unusually careful about the
@@ -104,7 +104,7 @@ impl OperationReport {
 /// Never a match. A display name is mutable and not unique (ADR-0001), and a
 /// creation timestamp near an attempt is a coincidence as easily as a
 /// consequence. Selecting one is an operator's act, spelled
-/// `keymaster recover resolve NAME --leaked-hash HASH`.
+/// `openrouter-keymaster recover resolve NAME --leaked-hash HASH`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CandidateReport {
     /// The remote key's immutable identity.
@@ -254,8 +254,8 @@ impl InspectReport {
             operation: None,
             candidates: Vec::new(),
             remediation: format!(
-                "nothing to recover: `{address}` has no operation in progress. `keymaster plan` \
-                 reports what an apply would do with it.",
+                "nothing to recover: `{address}` has no operation in progress. \
+                 `openrouter-keymaster plan` reports what an apply would do with it.",
                 address = address.as_str()
             ),
             warnings: Vec::new(),
@@ -353,7 +353,8 @@ impl ResolveReport {
             summary: format!(
                 "operation {operation} is cleared on your attestation that OpenRouter holds no \
                  key from it. Keymaster cannot verify that; if a key does exist, it is now one \
-                 nothing tracks. The next `keymaster apply` will create `{address}` afresh.",
+                 nothing tracks. The next `openrouter-keymaster apply` will create `{address}` \
+                 afresh.",
                 operation = operation.id,
                 address = address.as_str()
             ),
@@ -386,7 +387,7 @@ impl ResolveReport {
                 "key {hash} is bound to `{address}` as a failed candidate and operation \
                  {operation} is cleared. Its plaintext was disclosed once, in a response nobody \
                  received, so the key can never be used and is kept only so it can be disabled \
-                 and deleted. Create a working key with `keymaster apply`.",
+                 and deleted. Create a working key with `openrouter-keymaster apply`.",
                 address = address.as_str(),
                 operation = operation.id
             ),
@@ -497,8 +498,9 @@ impl ReplaceReport {
                 Vec::new()
             } else {
                 vec![
-                    "the new key was delivered but not promoted to current; the next `keymaster \
-                     apply` completes that locally, and nothing remote is outstanding"
+                    "the new key was delivered but not promoted to current; the next \
+                     `openrouter-keymaster apply` completes that locally, and nothing remote is \
+                     outstanding"
                         .to_owned(),
                 ]
             },

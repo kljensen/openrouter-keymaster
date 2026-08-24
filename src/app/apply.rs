@@ -1,10 +1,10 @@
-//! `keymaster apply`: converging guardrails, existing keys, and assignments.
+//! `openrouter-keymaster apply`: converging guardrails, existing keys, and assignments.
 //!
 //! # The plan that runs is not the plan an operator read
 //!
 //! Apply takes the exclusive state lock, reloads the configuration and state
 //! under it, reads a fresh snapshot of OpenRouter, and computes the plan again.
-//! Whatever `keymaster plan` printed a minute ago is history: it was computed
+//! Whatever `openrouter-keymaster plan` printed a minute ago is history: it was computed
 //! against a snapshot that has since been replaced, and executing it would be
 //! executing a stale observation. Nothing carries a plan across that boundary,
 //! so there is nothing to go stale.
@@ -36,13 +36,13 @@
 //! deleted, and not unassigned; the successor is created, secured, verified,
 //! and delivered first, and only the promotion that follows a confirmed
 //! delivery moves the predecessor to `retained.awaiting_retirement`, where it
-//! stays enabled until an operator runs `keymaster retire`. So a rotation that
+//! stays enabled until an operator runs `openrouter-keymaster retire`. So a rotation that
 //! fails at any phase leaves the working credential working.
 //!
 //! # What apply will not do
 //!
 //! - **Retire, disable, or delete a predecessor.** Rotation stages; retirement
-//!   is always explicit. See `keymaster retire` and `keymaster delete key`.
+//!   is always explicit. See `openrouter-keymaster retire` and `openrouter-keymaster delete key`.
 //! - **Resolve what holds a write back.** An action whose dependency needs an
 //!   operator — an adoption, a missing resource, an unfinished operation — is
 //!   reported as held back, naming what it waits on. An apply that wrote
@@ -607,15 +607,15 @@ fn blockers(action: &Action) -> Vec<String> {
 fn predecessor_note(address: &Address, hash: &KeyHash, promoted: bool) -> String {
     if !promoted {
         return format!(
-            "Key {hash} is untouched and is still `{address}`'s current key, because the \
-             promotion did not land; do not retire it until the next `keymaster apply` completes \
+            "Key {hash} is untouched and is still `{address}`'s current key, because the promotion \
+             did not land; do not retire it until the next `openrouter-keymaster apply` completes \
              that and reports it as `awaiting_retirement`."
         );
     }
     format!(
         "Key {hash} is untouched — still enabled, now tracked as `awaiting_retirement` — because \
-         rotation never disables a predecessor; retire it with `keymaster retire {address} \
-         --hash {hash}` once every consumer holds the new key."
+         rotation never disables a predecessor; retire it with `openrouter-keymaster retire \
+         {address} --hash {hash}` once every consumer holds the new key."
     )
 }
 
@@ -640,8 +640,8 @@ fn ambiguous(resource: &str, error: &str) -> String {
 fn untracked(id: &crate::ids::Uuid, why: &str) -> String {
     format!(
         "guardrail {id} was created but its identity could not be recorded: {why}. Bind it with \
-         `keymaster import guardrail <address> --id {id}` before applying again, or a second \
-         guardrail will be created under the same name."
+         `openrouter-keymaster import guardrail <address> --id {id}` before applying again, or a \
+         second guardrail will be created under the same name."
     )
 }
 
@@ -656,7 +656,7 @@ pub enum ApplyError {
     /// An operation of unknown outcome stopped the run.
     #[error(
         "nothing was applied: an earlier run left an operation whose outcome only an operator can \
-         establish. Resolve it with `keymaster recover`, then apply again."
+         establish. Resolve it with `openrouter-keymaster recover`, then apply again."
     )]
     Blocked,
 

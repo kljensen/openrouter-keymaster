@@ -16,7 +16,7 @@ environment variable and from nowhere else.
 
 ```sh
 export OPENROUTER_MANAGEMENT_KEY="$(pass show openrouter/management)"
-keymaster plan
+openrouter-keymaster plan
 ```
 
 There is deliberately no `--management-key` option, no configuration field, and
@@ -37,7 +37,7 @@ own. Read the file in a wrapper and never let the value reach `argv`:
 set -eu
 OPENROUTER_MANAGEMENT_KEY="$(cat "$CREDENTIALS_DIRECTORY/openrouter")"
 export OPENROUTER_MANAGEMENT_KEY
-exec keymaster apply
+exec openrouter-keymaster apply
 ```
 
 `systemd`'s `Environment=` and `EnvironmentFile=` also work, but both leave the
@@ -61,12 +61,12 @@ in a build with the `fault-injection` feature, which is never a release build.
 ## What Keymaster protects against
 
 **Disclosure through its own output.** No command prints an inference key's
-plaintext, and there is no fallback that would. `keymaster` writes results to
-stdout and diagnostics to stderr through one module, from DTOs that have no
-field a secret could occupy. The management credential lives in a type with no
-`Serialize`, no accessor, a `Debug` that prints `[redacted]`, and a buffer that
-is cleared when it is dropped; it reaches the wire once, as a header marked
-sensitive. Text OpenRouter returns — a display name, a description, an
+plaintext, and there is no fallback that would. `openrouter-keymaster` writes
+results to stdout and diagnostics to stderr through one module, from DTOs that
+have no field a secret could occupy. The management credential lives in a type
+with no `Serialize`, no accessor, a `Debug` that prints `[redacted]`, and a
+buffer that is cleared when it is dropped; it reaches the wire once, as a header
+marked sensitive. Text OpenRouter returns — a display name, a description, an
 unrecognized reset schedule — is scrubbed before it is printed, so a credential
 someone pasted into a key's name is not read back out, and an ANSI escape in one
 cannot rewrite the line an operator is reading.
@@ -141,5 +141,5 @@ wrongly leaves a live key nothing tracks.
 
 Keymaster is not part of the answer. Revoke the management credential in
 OpenRouter, issue a new one, and export it. Then use Keymaster for what follows:
-`keymaster status` lists every key it tracks, and `rotate`, `retire`, and
-`delete key` replace and end them one identity at a time.
+`openrouter-keymaster status` lists every key it tracks, and `rotate`,
+`retire`, and `delete key` replace and end them one identity at a time.
