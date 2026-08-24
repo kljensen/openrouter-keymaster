@@ -293,6 +293,36 @@ Three properties are worth knowing before editing one:
   file and nothing else — no credential, no network, no write — and report
   every problem in one pass, each named by its configuration path.
 
+## Receivers
+
+A receiver is where a newly created key's plaintext goes. Keymaster never
+prints a key, never writes one to state, and never creates a key whose
+configuration names no receiver — there is no fallback and no implicit default.
+
+- **`file`** writes the key, and nothing else, to one absolute path: an
+  `O_EXCL` sibling temporary file at `0600`, fsynced and renamed into place, in
+  a directory created `0700` if it was missing. An existing target is replaced
+  with no backup. A relative path, a symbolic link at the target or its parent,
+  and a target that is not a regular file are all refused — and the directory
+  is opened once, with `O_DIRECTORY` and `O_NOFOLLOW`, with every step after
+  that relative to the descriptor, so a symbolic link swapped in after the
+  check cannot redirect the key. It is for local development: anything that can
+  read the file can spend the key.
+- **`command`** runs a program you write, with no shell, an exact argument
+  vector, and an empty environment, and writes one versioned JSON envelope to
+  its stdin. The key travels only in that envelope — never in `argv`, the
+  environment, or a temporary file — and the program's bounded stdout and
+  stderr are scrubbed of the key before an operator ever sees them.
+
+A delivery is classified as delivered, rejected, or ambiguous, and ambiguous is
+the default: only a mechanism that *guarantees* nothing was committed produces
+a rejection. Delivery is at-most-once and is never retried automatically
+(ADR-0002).
+
+[`docs/receiver-protocol.md`](docs/receiver-protocol.md) is the contract for
+adapter authors: the envelope schema, the empty-environment rules, the exit-code
+meanings, the idempotency story, and a worked example.
+
 ## Local state
 
 State lives in `.openrouter-keymaster/state.json` (git-ignored) unless
@@ -500,6 +530,17 @@ lookup and the requests it does *not* make, the reported difference, a repeated
 import that writes nothing, a 404, both one-to-one violations, lock contention,
 a state write that cannot happen, and a remote display name carrying the
 sentinel.
+
+`tests/receiver.rs` delivers a real plaintext — one parsed out of a create
+response served by the local HTTP harness, because there is deliberately no
+other way to obtain a `KeyPlaintext` — to both receivers, and scans the
+outcome, the messages, and every file and filename left behind for the
+sentinel. The command cases run `src/bin/keymaster-test-receiver.rs`, a real
+compiled adapter rather than a shell string, which records its argument vector,
+the names of every environment variable it inherited, and the envelope it was
+given, and can end in every way the protocol describes: cleanly, with the
+refusal code, with an undefined code, by signal, by timeout, by shouting
+megabytes at both streams, and by echoing the key back.
 
 `tests/apply.rs` asserts which requests apply sent, in what order, carrying
 what — and, as often, that it sent none: a converged project, an unmanaged

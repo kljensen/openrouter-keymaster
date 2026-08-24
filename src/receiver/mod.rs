@@ -36,11 +36,13 @@
 //! ADR-0002 makes delivery at-most-once: ambiguity is journaled and resolved
 //! by an operator, not by a second attempt.
 
+pub mod command;
 pub mod file;
 
 use crate::client::KeyPlaintext;
 use crate::ids::{Address, KeyHash, OperationId};
 
+pub use command::CommandReceiver;
 pub use file::FileReceiver;
 
 /// The non-secret facts about one delivery attempt.
@@ -215,6 +217,21 @@ pub trait SecretReceiver {
     /// is not an error to propagate but a classification the journal has to
     /// record: what the caller must know is what the attempt proved.
     fn receive(&self, metadata: &DeliveryMetadata, plaintext: &KeyPlaintext) -> Outcome;
+}
+
+/// Builds the receiver a configuration block names.
+///
+/// Selection is always explicit. There is no default receiver and no fallback:
+/// a key whose configuration names no receiver has nowhere for its plaintext
+/// to go, and is never created.
+#[must_use]
+pub fn from_config(spec: &crate::config::Receiver) -> Box<dyn SecretReceiver> {
+    match spec {
+        crate::config::Receiver::File { path } => Box::new(FileReceiver::new(path)),
+        crate::config::Receiver::Command { program, args } => {
+            Box::new(CommandReceiver::new(program, args.clone()))
+        }
+    }
 }
 
 #[cfg(test)]

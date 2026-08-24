@@ -181,13 +181,28 @@ impl SecretReceiver for FakeReceiver {
 /// the plaintext and clears it when it is dropped.
 #[must_use]
 pub fn created_sentinel_key() -> CreatedKey {
+    create(SECRET_SENTINEL_KEY.to_owned())
+}
+
+/// A created key whose plaintext is `bytes` long and still carries the
+/// sentinel, for the cases where the envelope has to be bigger than a pipe
+/// buffer. OpenRouter would never return one this long; the client would
+/// accept it, which is all this needs.
+#[must_use]
+pub fn created_oversized_key(bytes: usize) -> CreatedKey {
+    let padding = bytes.saturating_sub(SECRET_SENTINEL_KEY.len());
+    create(format!("{SECRET_SENTINEL_KEY}{}", "P".repeat(padding)))
+}
+
+/// Runs one create against the local harness and returns what it produced.
+fn create(plaintext: String) -> CreatedKey {
     let server = TestServer::start();
     server.mount(
         Mock::given(method("POST"))
             .and(path("/api/v1/keys"))
             .respond_with(json_response(
                 201,
-                &created_key("keyhash-0001", "golf-jobfeed", SECRET_SENTINEL_KEY),
+                &created_key("keyhash-0001", "golf-jobfeed", &plaintext),
             )),
     );
 

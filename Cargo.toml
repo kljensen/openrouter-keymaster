@@ -7,6 +7,9 @@ edition = "2024"
 rust-version = "1.92.0"
 # Keymaster is an application, not a crates.io library.
 publish = false
+# `src/bin/keymaster-test-receiver.rs` is a second binary, so `cargo run` needs
+# to be told which one is the program.
+default-run = "keymaster"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
