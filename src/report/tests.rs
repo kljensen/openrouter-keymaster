@@ -7,7 +7,7 @@
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use super::{PlanReport, StatusReport};
+use super::{ImportReport, PlanReport, StatusReport};
 use crate::api::{
     KeyUsage, ObservedAssignment, ObservedGuardrail, ObservedKey, RemoteTimestamps, ResetPolicy,
     ZeroDataRetention,
@@ -895,5 +895,85 @@ fn status_of_an_empty_project_renders_both_formats() {
     assert!(human.contains("keys (1):"));
     assert!(human.contains("not bound"));
     assert!(human.contains("guardrails (0):"));
+    serde_json::to_value(&report).expect("the report serializes");
+}
+
+// --- import ----------------------------------------------------------------
+
+/// The observed key `NARROW`'s address would be bound to.
+fn imported_key(name: &str) -> ObservedKey {
+    let mut world = World::new();
+    world.observe_key(JOBFEED_HASH, name);
+    world.snapshot.keys.pop().expect("the key just observed")
+}
+
+#[test]
+fn an_import_renders_the_binding_and_the_difference_in_both_formats() {
+    let desired = config(NARROW);
+    let observed = imported_key("an-older-name");
+    let key = desired
+        .keys
+        .get(&address("jobfeed"))
+        .expect("the configured key");
+    let changes = crate::plan::key_changes(key, Some(&observed));
+
+    let report = ImportReport::key(
+        &address("jobfeed"),
+        &hash(JOBFEED_HASH),
+        Origin::Imported,
+        &observed.name,
+        &changes,
+        true,
+    );
+
+    let human = report.to_string();
+    assert!(
+        human.contains("imported: keys.jobfeed is bound to key"),
+        "{human}"
+    );
+    assert!(human.contains("origin: imported"), "{human}");
+    assert!(
+        human.contains("name: an-older-name -> golf-jobfeed"),
+        "{human}"
+    );
+
+    let document: Value = serde_json::to_value(&report).expect("the report serializes");
+    assert_eq!(document["command"], "import");
+    assert_eq!(document["resource"], "key");
+    assert_eq!(document["bound"], Value::Bool(true));
+    assert_eq!(document["changes"][0]["field"], "name");
+    assert!(
+        report
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("cannot be delivered")),
+        "an imported key's plaintext is permanently unavailable"
+    );
+}
+
+#[test]
+fn a_repeated_import_renders_as_unchanged_with_nothing_to_reconcile() {
+    let report = ImportReport::guardrail(
+        &address("cheap"),
+        &uuid(RAIL_ID),
+        Origin::Imported,
+        "cheap-rail",
+        &[],
+        false,
+    );
+
+    let human = report.to_string();
+    assert!(
+        human.contains("unchanged: guardrails.cheap was already bound"),
+        "{human}"
+    );
+    assert!(
+        human.contains("managed fields: nothing to reconcile"),
+        "{human}"
+    );
+    assert!(
+        report.warnings().is_empty(),
+        "a guardrail import with nothing to reconcile warns about nothing"
+    );
     serde_json::to_value(&report).expect("the report serializes");
 }

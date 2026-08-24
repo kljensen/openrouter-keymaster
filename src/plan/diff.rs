@@ -35,7 +35,7 @@ pub(super) const IMMUTABLE_KEY_FIELDS: [&str; 2] = ["expires_at", "workspace_id"
 ///
 /// `observed` is `None` when the key does not exist, which makes the same
 /// function describe a create: every managed field differs from nothing.
-pub(super) fn key_changes(desired: &Key, observed: Option<&ObservedKey>) -> Vec<FieldChange> {
+pub fn key_changes(desired: &Key, observed: Option<&ObservedKey>) -> Vec<FieldChange> {
     let mut diff = Diff::new(observed.is_some());
     diff.name("name", observed.map(|key| key.name.as_str()), &desired.name);
     diff.budget(
@@ -74,7 +74,7 @@ pub(super) fn key_changes(desired: &Key, observed: Option<&ObservedKey>) -> Vec<
 }
 
 /// Every managed difference between a desired guardrail and the observed one.
-pub(super) fn guardrail_changes(
+pub fn guardrail_changes(
     desired: &Guardrail,
     observed: Option<&ObservedGuardrail>,
 ) -> Vec<FieldChange> {

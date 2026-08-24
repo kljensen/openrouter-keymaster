@@ -435,7 +435,7 @@ impl fmt::Display for ExpansionReport {
 
 /// One managed field that differs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct ChangeReport {
+pub(super) struct ChangeReport {
     /// The configuration's name for the field.
     field: &'static str,
     /// What OpenRouter has now.
@@ -448,7 +448,7 @@ struct ChangeReport {
 }
 
 impl ChangeReport {
-    fn new(change: &FieldChange) -> Self {
+    pub(super) fn new(change: &FieldChange) -> Self {
         // `from` is whatever OpenRouter has — a display name, a description, a
         // provider slug, a reset schedule this build does not recognize — and
         // `to` can be one too, since a name is only ever as trustworthy as the
@@ -461,7 +461,7 @@ impl ChangeReport {
         }
     }
 
-    fn describe(&self) -> String {
+    pub(super) fn describe(&self) -> String {
         let expansion = self
             .expansion
             .as_ref()

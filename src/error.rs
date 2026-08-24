@@ -1,5 +1,6 @@
 //! Keymaster's application error type.
 
+use crate::app::import::ImportError;
 use crate::client::ApiError;
 use crate::config::ConfigError;
 use crate::state::StateError;
@@ -42,6 +43,10 @@ pub enum Error {
     #[error(transparent)]
     Api(#[from] ApiError),
 
+    /// A binding could not be recorded. State is unchanged.
+    #[error(transparent)]
+    Import(#[from] ImportError),
+
     /// A result could not be written to stdout or stderr.
     #[error("cannot write output: {message}")]
     Output {
@@ -61,6 +66,7 @@ impl Error {
             Self::Config(error) => error.kind(),
             Self::State(error) => error.kind(),
             Self::Api(error) => error.kind(),
+            Self::Import(error) => error.kind(),
             Self::Output { .. } => "output",
         }
     }

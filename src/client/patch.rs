@@ -50,6 +50,21 @@ impl<T> Patch<T> {
             Managed::Cleared => Self::Clear,
         }
     }
+
+    /// Turns an explicit clear into an omission.
+    ///
+    /// For a create body: there is no remote value yet, so "this field should
+    /// hold nothing" and "do not mention this field" describe the same
+    /// resource. Sending `null` at creation would be asking a server that has
+    /// never seen the field to unset it, which some endpoints reject and none
+    /// needs.
+    #[must_use]
+    pub fn omit_clears(self) -> Self {
+        match self {
+            Self::Clear => Self::Omit,
+            other => other,
+        }
+    }
 }
 
 impl<T: Serialize> Serialize for Patch<T> {
@@ -89,6 +104,20 @@ mod tests {
             serde_json::to_value(&body).expect("a serializable body"),
             json!({ "name": "jobfeed", "limit": null })
         );
+    }
+
+    #[test]
+    fn a_create_body_omits_what_an_update_body_would_clear() {
+        let body = Body {
+            name: Patch::Set("jobfeed"),
+            limit: Patch::<f64>::Clear.omit_clears(),
+            limit_reset: Patch::<&str>::Omit.omit_clears(),
+        };
+        assert_eq!(
+            serde_json::to_value(&body).expect("a serializable body"),
+            json!({ "name": "jobfeed" })
+        );
+        assert_eq!(Patch::Set(5.0).omit_clears(), Patch::Set(5.0));
     }
 
     #[test]

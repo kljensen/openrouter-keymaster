@@ -1,8 +1,10 @@
-//! Reading OpenRouter: keys, guardrails, and the assignments between them.
+//! OpenRouter's keys, guardrails, and the assignments between them.
 //!
 //! Planning needs a complete, fresh snapshot of everything Keymaster manages,
-//! and completeness is the hard part — see [`pagination`]. Nothing in this
-//! module writes.
+//! and completeness is the hard part — see [`pagination`]. [`Reader`] is that
+//! snapshot; [`Writer`] is the small set of writes an ordinary convergence
+//! needs, and it never trusts what a write echoes back — apply refetches
+//! through [`Reader`] and checks.
 //!
 //! The observed types here are not the desired types. A desired value is
 //! something an operator asked for and Keymaster will converge; an observed
@@ -14,6 +16,7 @@
 
 pub mod pagination;
 mod wire;
+mod write;
 
 use std::collections::BTreeSet;
 
@@ -24,6 +27,8 @@ use crate::client::{ApiError, Client};
 use crate::config::{ResetInterval, Usd};
 use crate::ids::{KeyHash, Uuid};
 use pagination::{Page, PageLimits};
+
+pub use write::{AssignKeys, GuardrailBody, UpdateKey};
 
 /// How a USD budget resets, as OpenRouter reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +295,98 @@ impl<'client> Reader<'client> {
                     total: page.total_count,
                 })
             },
+        )
+    }
+}
+
+/// The writes an ordinary convergence makes.
+///
+/// Deliberately small: a guardrail can be created and patched, an existing
+/// key can be patched, and a key can be attached to or detached from a
+/// guardrail. Creating an inference key is not here — it is
+/// [`crate::client::Client::create_key_once`], because a one-time secret is a
+/// different kind of operation with its own journal (ADR-0002).
+///
+/// No method here reports success from what the server echoed back. An update
+/// returns `()`, and a create returns only the identity apply must persist
+/// before it does anything else; everything else is established by refetching
+/// through [`Reader`]. That is what makes an ambiguous write recoverable: the
+/// answer to "did it land?" comes from a fresh read, never from a replay.
+#[derive(Debug)]
+pub struct Writer<'client> {
+    client: &'client Client,
+}
+
+impl<'client> Writer<'client> {
+    /// Writes through `client`.
+    #[must_use]
+    pub fn new(client: &'client Client) -> Self {
+        Self { client }
+    }
+
+    /// Creates one guardrail and returns it, as OpenRouter recorded it.
+    ///
+    /// The returned identity is the only part of this that matters, and it
+    /// matters immediately: a guardrail whose UUID is not persisted is one
+    /// nothing can find again except by its mutable name.
+    ///
+    /// # Errors
+    ///
+    /// Returns the client's errors. Any failure other than a definite 4xx
+    /// leaves it unknown whether the guardrail exists; resolve that by
+    /// refreshing remote state, never by sending the request again.
+    pub fn create_guardrail(&self, body: &GuardrailBody) -> Result<ObservedGuardrail, ApiError> {
+        let created: wire::GuardrailEnvelope = self.client.post_json_once(&["guardrails"], body)?;
+        ObservedGuardrail::from_wire(created.into_guardrail())
+    }
+
+    /// Brings one guardrail's managed fields to the configured values.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_guardrail`].
+    pub fn update_guardrail(&self, id: &Uuid, body: &GuardrailBody) -> Result<(), ApiError> {
+        self.client
+            .patch_once_discarding_body(&["guardrails", id.as_str()], body)
+    }
+
+    /// Brings one existing key's managed fields to the configured values.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_guardrail`].
+    pub fn update_key(&self, hash: &KeyHash, body: &UpdateKey) -> Result<(), ApiError> {
+        self.client
+            .patch_once_discarding_body(&["keys", hash.as_str()], body)
+    }
+
+    /// Attaches one key to one guardrail.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_guardrail`].
+    pub fn assign_key(&self, guardrail: &Uuid, key: &KeyHash) -> Result<(), ApiError> {
+        self.client.post_once_discarding_body(
+            &["guardrails", guardrail.as_str(), "assignments", "keys"],
+            &AssignKeys::one(key),
+        )
+    }
+
+    /// Detaches one key from one guardrail.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_guardrail`].
+    pub fn unassign_key(&self, guardrail: &Uuid, key: &KeyHash) -> Result<(), ApiError> {
+        self.client.post_once_discarding_body(
+            &[
+                "guardrails",
+                guardrail.as_str(),
+                "assignments",
+                "keys",
+                "remove",
+            ],
+            &AssignKeys::one(key),
         )
     }
 }

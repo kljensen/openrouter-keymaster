@@ -18,6 +18,7 @@
 //! either already ordered by the planner or ordered here — so two runs over
 //! the same three inputs produce byte-identical output.
 
+mod import;
 mod plan;
 mod status;
 
@@ -31,6 +32,7 @@ use time::format_description::well_known::Rfc3339;
 use crate::ids::{Address, KeyHash, OperationId};
 use crate::state::Phase;
 
+pub use import::ImportReport;
 pub use plan::PlanReport;
 pub use status::StatusReport;
 

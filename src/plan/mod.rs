@@ -64,6 +64,11 @@ use crate::config::{Config, Guardrail, Key, Managed, ResetInterval, Usd};
 use crate::ids::{Address, KeyHash, OperationId, ReceiverFingerprint, RemoteName, Uuid};
 use crate::state::{CurrentKey, KeyBinding, PendingOperation, Phase, State};
 
+// The comparison itself, for the two commands that need one resource's managed
+// difference without a whole plan: `import`, which shows what a later apply
+// would reconcile, and apply, which builds the request body that reconciles it.
+pub use diff::{guardrail_changes, key_changes};
+
 /// A complete, freshly observed picture of the resources Keymaster manages.
 ///
 /// Completeness matters: a partial read makes a key that exists look like one

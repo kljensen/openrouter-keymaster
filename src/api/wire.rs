@@ -119,6 +119,29 @@ pub(super) struct Guardrail {
     pub updated_at: Option<String>,
 }
 
+/// A guardrail as a write returns it.
+///
+/// The reads are documented to wrap a single resource in `data`, and a write
+/// is expected to do the same. Accepting a bare object as well costs four
+/// lines and avoids the worst outcome a create can have: a guardrail that
+/// exists remotely and whose UUID Keymaster failed to read out of the
+/// response, which is not recoverable by sending the request again.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(super) enum GuardrailEnvelope {
+    Wrapped(One<Guardrail>),
+    Bare(Guardrail),
+}
+
+impl GuardrailEnvelope {
+    pub(super) fn into_guardrail(self) -> Guardrail {
+        match self {
+            Self::Wrapped(one) => one.data,
+            Self::Bare(guardrail) => guardrail,
+        }
+    }
+}
+
 /// One key-to-guardrail assignment.
 #[derive(Debug, Deserialize)]
 pub(super) struct Assignment {

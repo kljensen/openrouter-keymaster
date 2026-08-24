@@ -10,26 +10,19 @@ mod support;
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt as _;
-use std::path::{Path, PathBuf};
-use std::process::Output;
 
 use assert_cmd::Command;
-use keymaster::ids::{Address, KeyHash, OperationId, ReceiverFingerprint, RemoteName, Uuid};
-use keymaster::state::{BeginCreate, Origin, State, StateFile, Transition};
+use keymaster::ids::{OperationId, ReceiverFingerprint, RemoteName};
+use keymaster::state::{BeginCreate, Origin, State, Transition};
 use serde_json::{Value, json};
 use support::fixtures::{
-    FAKE_GUARDRAIL_ID, OTHER_FAKE_GUARDRAIL_ID, api_error, api_key, empty_page, guardrail, page,
+    FAKE_GUARDRAIL_ID, OTHER_FAKE_GUARDRAIL_ID, api_error, api_key, guardrail,
 };
-use support::http::{TestServer, json_response};
-use support::sentinel::{SECRET_SENTINEL_KEY, assert_absent, assert_absent_under};
-use tempfile::TempDir;
-use time::OffsetDateTime;
-use wiremock::matchers::{method, path, query_param};
+use support::http::json_response;
+use support::project::{BASE_URL_VAR, CREDENTIAL_VAR, Project, address, at, hash, uuid};
+use support::sentinel::{SECRET_SENTINEL_KEY, assert_absent};
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
-
-/// The environment variables the binary reads.
-const CREDENTIAL_VAR: &str = "OPENROUTER_MANAGEMENT_KEY";
-const BASE_URL_VAR: &str = "OPENROUTER_BASE_URL";
 
 const JOBFEED_HASH: &str = "hash-jobfeed-1";
 const GONE_HASH: &str = "hash-gone-1";
@@ -51,186 +44,6 @@ name = "cheap-rail"
 name = "golf-jobfeed"
 receiver = "vault"
 "#;
-
-/// A project directory, a server, and the binary that talks to both.
-struct Project {
-    directory: TempDir,
-    server: TestServer,
-}
-
-impl Project {
-    fn new(config: &str) -> Self {
-        let project = Self {
-            directory: tempfile::tempdir().expect("a temporary directory"),
-            server: TestServer::start(),
-        };
-        fs::write(project.config_path(), config).expect("writing the configuration");
-        project
-    }
-
-    fn config_path(&self) -> PathBuf {
-        self.directory.path().join("keymaster.toml")
-    }
-
-    fn state_path(&self) -> PathBuf {
-        self.directory.path().join("state.json")
-    }
-
-    /// Answers the three listings the snapshot needs.
-    ///
-    /// The answer depends on the offset rather than on call order, because
-    /// several cases run the binary more than once against one server and each
-    /// run reads every listing from the beginning.
-    fn observe(&self, keys: Vec<Value>, guardrails: Vec<Value>, assignments: Vec<Value>) {
-        for (route, items) in [
-            ("/api/v1/keys", keys),
-            ("/api/v1/guardrails", guardrails),
-            ("/api/v1/guardrails/assignments/keys", assignments),
-        ] {
-            self.server.mount(
-                Mock::given(method("GET"))
-                    .and(path(route))
-                    .and(query_param("offset", "0"))
-                    .respond_with(json_response(200, &page(items)))
-                    .with_priority(1),
-            );
-            self.server.mount(
-                Mock::given(method("GET"))
-                    .and(path(route))
-                    .respond_with(json_response(200, &empty_page()))
-                    .with_priority(2),
-            );
-        }
-    }
-
-    /// Writes a state file through Keymaster's own writer, so the fixture is
-    /// exactly what a previous run would have left.
-    fn write_state(&self, build: impl FnOnce(&mut State)) {
-        let mut state = State::new();
-        build(&mut state);
-        let file = StateFile::new(self.state_path());
-        let lock = file.lock().expect("the state lock");
-        lock.write(&mut state).expect("writing the state fixture");
-    }
-
-    /// Runs the binary with the harness's base URL and a sentinel credential.
-    fn run(&self, arguments: &[&str]) -> Output {
-        let mut command = Command::cargo_bin("keymaster").expect("the binary builds");
-        command
-            .env_remove(CREDENTIAL_VAR)
-            .env_remove(BASE_URL_VAR)
-            .env(CREDENTIAL_VAR, SECRET_SENTINEL_KEY)
-            .env(BASE_URL_VAR, self.server.api_base_url())
-            .arg("--config")
-            .arg(self.config_path())
-            .arg("--state")
-            .arg(self.state_path())
-            .args(arguments);
-        command.output().expect("the binary runs")
-    }
-
-    /// Runs the binary and fails unless it exited 0.
-    fn succeed(&self, arguments: &[&str]) -> Streams {
-        let output = self.run(arguments);
-        let streams = Streams::of(&output);
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "expected success from {arguments:?}:\n{}",
-            streams.err
-        );
-        self.assert_no_secret_escaped(&streams);
-        streams
-    }
-
-    /// Runs the binary and fails unless it exited 1.
-    fn fail(&self, arguments: &[&str]) -> Streams {
-        let output = self.run(arguments);
-        let streams = Streams::of(&output);
-        assert_eq!(
-            output.status.code(),
-            Some(1),
-            "expected an application error from {arguments:?}:\n{}",
-            streams.out
-        );
-        assert!(streams.out.is_empty(), "a failed run writes no result");
-        self.assert_no_secret_escaped(&streams);
-        streams
-    }
-
-    /// The scan every case runs, on the success path and the failure path
-    /// alike: the credential must reach the wire and nothing else.
-    fn assert_no_secret_escaped(&self, streams: &Streams) {
-        assert_absent("stdout", &streams.out);
-        assert_absent("stderr", &streams.err);
-        assert_absent_under(self.directory.path());
-    }
-
-    /// Fails unless every request the server saw was a read.
-    fn assert_read_only(&self) {
-        let requests = self.server.requests();
-        assert!(!requests.is_empty(), "the run must have read something");
-        for request in &requests {
-            assert_eq!(
-                request.method.to_string(),
-                "GET",
-                "plan and status may only read:\n{}",
-                support::http::describe_request(request)
-            );
-        }
-    }
-}
-
-/// One run's two streams, as text.
-struct Streams {
-    out: String,
-    err: String,
-}
-
-impl Streams {
-    fn of(output: &Output) -> Self {
-        Self {
-            out: String::from_utf8(output.stdout.clone()).expect("utf-8 stdout"),
-            err: String::from_utf8(output.stderr.clone()).expect("utf-8 stderr"),
-        }
-    }
-
-    /// The single JSON document on stdout.
-    fn document(&self) -> Value {
-        serde_json::from_str(&self.out).unwrap_or_else(|error| {
-            panic!(
-                "stdout is not exactly one JSON document ({error}):\n{}",
-                self.out
-            )
-        })
-    }
-
-    /// The single JSON diagnostic on stderr.
-    fn diagnostic(&self) -> Value {
-        serde_json::from_str(&self.err).unwrap_or_else(|error| {
-            panic!(
-                "stderr is not exactly one JSON document ({error}):\n{}",
-                self.err
-            )
-        })
-    }
-}
-
-fn address(value: &str) -> Address {
-    Address::parse(value).expect("a valid test address")
-}
-
-fn hash(value: &str) -> KeyHash {
-    KeyHash::parse(value).expect("a valid test hash")
-}
-
-fn uuid(value: &str) -> Uuid {
-    Uuid::parse(value).expect("a valid test UUID")
-}
-
-fn at(seconds: i64) -> OffsetDateTime {
-    OffsetDateTime::from_unix_timestamp(1_767_225_600 + seconds).expect("a valid instant")
-}
 
 /// Binds the guardrail and the key `BASE_CONFIG` describes.
 fn bind_base(state: &mut State) {
@@ -498,7 +311,7 @@ fn plan_writes_nothing_anywhere() {
     project.write_state(bind_base);
 
     let before = fs::read(project.state_path()).expect("the state fixture");
-    let directory_before = entries(project.directory.path());
+    let directory_before = project.entries();
 
     project.succeed(&["plan"]);
     project.succeed(&["--json", "plan"]);
@@ -512,7 +325,7 @@ fn plan_writes_nothing_anywhere() {
     );
     assert_eq!(
         directory_before,
-        entries(project.directory.path()),
+        project.entries(),
         "no lock file and no temporary file may be left behind"
     );
 }
@@ -547,9 +360,9 @@ fn a_rejected_credential_is_an_authentication_error() {
         )));
     project.write_state(bind_base);
 
-    let streams = project.fail(&["--json", "plan"]);
+    let streams = project.fail_silently(&["--json", "plan"]);
     assert_eq!(streams.diagnostic()["error"]["kind"], "authentication");
-    let human = project.fail(&["plan"]);
+    let human = project.fail_silently(&["plan"]);
     assert!(human.err.starts_with("error: "), "{}", human.err);
 }
 
@@ -581,7 +394,7 @@ fn a_missing_credential_is_its_own_category() {
 fn an_invalid_configuration_is_reported_before_anything_is_read() {
     let project = Project::new("version = 1\n[keys.jobfeed]\nname = \"\"\n");
 
-    let streams = project.fail(&["--json", "plan"]);
+    let streams = project.fail_silently(&["--json", "plan"]);
     assert_eq!(streams.diagnostic()["error"]["kind"], "config_invalid");
     project.server.assert_request_count(0);
 }
@@ -591,7 +404,7 @@ fn an_unreadable_state_file_is_a_state_error() {
     let project = Project::new(BASE_CONFIG);
     fs::write(project.state_path(), "{\"version\": 99}").expect("writing a future state file");
 
-    let streams = project.fail(&["--json", "plan"]);
+    let streams = project.fail_silently(&["--json", "plan"]);
     assert_eq!(
         streams.diagnostic()["error"]["kind"],
         "state_unsupported_version"
@@ -678,7 +491,7 @@ fn an_api_failure_is_a_status_error() {
     );
     project.write_state(bind_base);
 
-    let streams = project.fail(&["--json", "plan"]);
+    let streams = project.fail_silently(&["--json", "plan"]);
     assert_eq!(streams.diagnostic()["error"]["kind"], "http_status");
 }
 
@@ -767,20 +580,4 @@ fn status_reports_an_incomplete_operation_with_non_secret_remediation() {
     let human = project.succeed(&["status"]);
     assert!(human.out.contains("incomplete operation:"), "{}", human.out);
     assert!(human.err.contains("unfinished"), "{}", human.err);
-}
-
-/// The names of everything directly under a directory, sorted.
-fn entries(directory: &Path) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(directory)
-        .expect("listing the project directory")
-        .map(|entry| {
-            entry
-                .expect("a directory entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    names.sort();
-    names
 }

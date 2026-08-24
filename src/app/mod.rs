@@ -1,14 +1,20 @@
 //! Command dispatch.
 //!
-//! `plan` and `status` are implemented; every other v0.1 command parses and
-//! fails with a typed [`Error::NotImplemented`] until its feature issue lands.
-//! Each match arm calls that feature's handler, which builds an output DTO for
-//! [`Renderer`] to write.
+//! `plan`, `status`, and `import` are implemented; every other v0.1 command
+//! parses and fails with a typed [`Error::NotImplemented`] until its feature
+//! issue lands. Each match arm calls that feature's handler, which builds an
+//! output DTO for [`Renderer`] to write.
 //!
-//! Both implemented commands are strictly read-only: they parse the
-//! configuration, read state without locking or rewriting it, read a complete
-//! snapshot of OpenRouter, and print. No API write, no receiver invocation, and
-//! no state write happens on either path.
+//! `plan` and `status` are strictly read-only: they parse the configuration,
+//! read state without locking or rewriting it, read a complete snapshot of
+//! OpenRouter, and print. No API write, no receiver invocation, and no state
+//! write happens on either path.
+//!
+//! [`import`] is the first command that writes anything. It takes the
+//! exclusive state lock and reloads state under it, and it makes no remote
+//! write at all: it reads one remote object and records a binding.
+
+pub mod import;
 
 use std::fmt::Display;
 use std::io::Write;
@@ -17,7 +23,7 @@ use serde::Serialize;
 
 use crate::api::Reader;
 use crate::cli::{Cli, Command, DeleteResource, ImportResource, RecoverAction, StateAction};
-use crate::client::Client;
+use crate::client::{ApiError, Client};
 use crate::config::Config;
 use crate::error::Error;
 use crate::output::Renderer;
@@ -35,6 +41,7 @@ pub fn run<O: Write, E: Write>(cli: &Cli, renderer: &mut Renderer<O, E>) -> Resu
     match &cli.command {
         Command::Plan => plan_command(cli, renderer),
         Command::Status => status_command(cli, renderer),
+        Command::Import { resource } => import::run(cli, resource, renderer),
         command => Err(Error::NotImplemented {
             command: command_path(command),
         }),
@@ -108,17 +115,24 @@ fn observe(cli: &Cli) -> Result<Observation, Error> {
     let state = StateFile::new(&cli.state).read()?;
 
     let client = Client::from_env()?;
-    let reader = Reader::new(&client);
-    let snapshot = Snapshot {
-        keys: reader.list_keys(None)?,
-        guardrails: reader.list_guardrails(None)?,
-        assignments: reader.list_assignments()?,
-    };
+    let snapshot = snapshot(&Reader::new(&client))?;
 
     Ok(Observation {
         config,
         state,
         snapshot,
+    })
+}
+
+/// Reads one complete snapshot of everything Keymaster manages.
+///
+/// Shared with apply, which reads one under its lock before planning and a
+/// second one afterwards to verify what it wrote.
+fn snapshot(reader: &Reader<'_>) -> Result<Snapshot, ApiError> {
+    Ok(Snapshot {
+        keys: reader.list_keys(None)?,
+        guardrails: reader.list_guardrails(None)?,
+        assignments: reader.list_assignments()?,
     })
 }
 

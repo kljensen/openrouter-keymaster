@@ -157,16 +157,8 @@ fn a_parsed_command_fails_with_an_application_error_on_stderr() {
 
 #[test]
 fn every_unimplemented_command_parses_and_reaches_its_handler() {
-    let commands: [&[&str]; 10] = [
+    let commands: [&[&str]; 8] = [
         &["apply"],
-        &["import", "key", "jobfeed", "--hash", "sha256:aaaa"],
-        &[
-            "import",
-            "guardrail",
-            "cheap",
-            "--id",
-            "00000000-0000-4000-8000-000000000000",
-        ],
         &["rotate", "jobfeed"],
         &["recover", "inspect", "jobfeed"],
         &["recover", "resolve", "jobfeed", "--no-resource-created"],
@@ -186,24 +178,50 @@ fn every_unimplemented_command_parses_and_reaches_its_handler() {
     }
 }
 
-/// `plan` and `status` are implemented, so "reaching the handler" means
-/// reading the configuration. Both are given a path that does not exist, which
-/// stops them before a client is built and therefore before any network call.
+/// `plan`, `status`, and `import` are implemented, so "reaching the handler"
+/// means reading the configuration. Each is given a path that does not exist,
+/// which stops it before a client is built and therefore before any network
+/// call. `import` validates its identifier first, so the identifiers here are
+/// well formed.
 #[test]
-fn the_read_only_commands_reach_their_handler_and_stop_at_the_configuration() {
+fn the_implemented_commands_reach_their_handler_and_stop_at_the_configuration() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let missing = directory.path().join("nowhere.toml");
+    // A writing command takes the state lock before it reads the
+    // configuration, so it needs a state path of its own rather than the
+    // default one, relative to wherever the test runner happens to be.
+    let state = directory.path().join("state.json");
 
-    for command in ["plan", "status"] {
+    let commands: [&[&str]; 4] = [
+        &["plan"],
+        &["status"],
+        &["import", "key", "jobfeed", "--hash", "sha256:aaaa"],
+        &[
+            "import",
+            "guardrail",
+            "cheap",
+            "--id",
+            "00000000-0000-4000-8000-000000000000",
+        ],
+    ];
+
+    for command in commands {
         keymaster()
             .arg("--config")
             .arg(&missing)
-            .arg(command)
+            .arg("--state")
+            .arg(&state)
+            .args(command)
             .assert()
             .code(APPLICATION_ERROR)
             .stdout(predicate::str::is_empty())
             .stderr(predicate::str::contains("cannot read"));
     }
+
+    assert!(
+        !state.exists(),
+        "a run that stopped at the configuration writes no state"
+    );
 }
 
 #[test]

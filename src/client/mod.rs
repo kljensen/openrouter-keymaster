@@ -237,6 +237,61 @@ impl Client {
         created?.into_created_key()
     }
 
+    /// Sends one `POST` and parses its response. Never repeated.
+    ///
+    /// `pub(crate)`, like [`Client::patch_json_once`] and
+    /// [`Client::post_once_discarding_body`]: the generic response type is
+    /// what makes these usable for the ordinary write endpoints, and it is
+    /// also what would let a caller deserialize the create response into
+    /// `serde_json::Value` and hand a key's plaintext to `Debug` or
+    /// `Serialize`. Keeping them inside the crate keeps the public rule — no
+    /// public method returns unrestricted JSON from a write — intact, and
+    /// [`Client::create_key_once`] remains the only way to reach `POST /keys`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ApiError`] the single attempt ended with. Every failure
+    /// except a definite 4xx leaves the outcome unknown: resolve it by
+    /// refreshing remote state, never by calling this again (ADR-0002).
+    pub(crate) fn post_json_once<B: Serialize, T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        body: &B,
+    ) -> Result<T, ApiError> {
+        parse_json(&self.post_once(segments, body)?)
+    }
+
+    /// Sends one `POST` and reads its response without interpreting it.
+    ///
+    /// For an endpoint whose success is established by refetching rather than
+    /// by what it echoes back: a body that does not parse is then not a
+    /// failure, and a body that parses is not evidence.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::post_json_once`].
+    pub(crate) fn post_once_discarding_body<B: Serialize>(
+        &self,
+        segments: &[&str],
+        body: &B,
+    ) -> Result<(), ApiError> {
+        self.post_once(segments, body).map(|_| ())
+    }
+
+    /// Sends one `PATCH` and reads its response without interpreting it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::post_json_once`].
+    pub(crate) fn patch_once_discarding_body<B: Serialize>(
+        &self,
+        segments: &[&str],
+        body: &B,
+    ) -> Result<(), ApiError> {
+        self.write_once(reqwest::Method::PATCH, segments, body)
+            .map(|_| ())
+    }
+
     /// Sends one write and never repeats it.
     ///
     /// There is no retry loop here and no parameter that would enable one. A
@@ -244,16 +299,21 @@ impl Client {
     /// parse — is reported as it happened, and the caller resolves the
     /// ambiguity by refreshing remote state, never by sending the request
     /// again (ADR-0002).
-    ///
-    /// Private, and it returns bytes rather than a caller-chosen type: a
-    /// generic `T` here would let a caller deserialize a create response into
-    /// `serde_json::Value` and hand the plaintext to `Debug` or `Serialize`.
-    /// Each write endpoint exposes its own typed method instead.
     fn post_once<B: Serialize>(&self, segments: &[&str], body: &B) -> Result<Vec<u8>, ApiError> {
+        self.write_once(reqwest::Method::POST, segments, body)
+    }
+
+    /// One write request, sent exactly once.
+    fn write_once<B: Serialize>(
+        &self,
+        method: reqwest::Method,
+        segments: &[&str],
+        body: &B,
+    ) -> Result<Vec<u8>, ApiError> {
         let url = url::build(&self.base_url, segments, &[]);
         let sent = self
             .http
-            .post(&url)
+            .request(method, &url)
             .json(body)
             .send()
             .map_err(|error| error::from_reqwest(&error, self.options.request_timeout))?;

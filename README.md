@@ -3,9 +3,9 @@
 A declarative OpenRouter management CLI, written in Rust.
 
 Keymaster is an early work in progress. The command-line surface below is
-final for v0.1. The two read-only commands, `plan` and `status`, are
-implemented end to end; every writing command still fails with a "not
-implemented yet" error and exits 1.
+final for v0.1. `plan`, `status`, and `import` are implemented end to end;
+every remaining command still fails with a "not implemented yet" error and
+exits 1.
 
 ## Build, run, and test
 
@@ -21,8 +21,8 @@ cargo test
 keymaster plan                          show the changes an apply would make   [works]
 keymaster status                        report bindings and incomplete operations [works]
 keymaster apply                         converge OpenRouter with the configuration
-keymaster import key NAME --hash HASH   bind an existing key by its hash
-keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID
+keymaster import key NAME --hash HASH   bind an existing key by its hash      [works]
+keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID [works]
 keymaster rotate NAME                   stage a replacement key
 keymaster recover inspect NAME          report an interrupted key operation
 keymaster recover resolve NAME ...      attest what an ambiguous operation did
@@ -111,6 +111,49 @@ There is no Terraform-style detailed exit code. A failure exits 1 with an
 actionable category — `config_invalid`, `config_read`, `config_syntax`,
 `missing_credential`, `authentication`, `transport`, `timeout`, `http_status`,
 `state_parse`, and the rest — in the diagnostic's `kind` field.
+
+## Import
+
+`keymaster import key NAME --hash HASH` and
+`keymaster import guardrail NAME --id UUID` bind an existing remote object to a
+local address. **Import is the operator's authority to make that binding**;
+Keymaster never makes it on its own, because a display name is mutable and not
+unique. A remote object whose name matches an unbound address is reported by
+`plan` as `adoption_required` — a candidate, never an adoption.
+
+The command reads one object and writes one binding, in this order:
+
+1. Parse the address and the identifier. Neither reads a file, so a value that
+   cannot be used is refused before a lock or a credential is taken.
+2. Take the exclusive state lock.
+3. Load and validate the configuration, and reload state, both under the lock.
+   The address has to be described in the configuration: a binding whose
+   desired state nobody wrote is one no plan can act on, and a key's generation
+   comes from the configuration, so the file it is read from must be one
+   nothing can edit out from under the write that follows.
+4. `GET /keys/{hash}` or `GET /guardrails/{id}` — the exact identity, never a
+   listing filtered by name. A confirmed 404 ends the run and state is
+   untouched.
+5. Refuse an address already bound to a different object, and refuse an object
+   another address already owns. Either refusal names both addresses.
+6. Report the managed fields a later `keymaster apply` would reconcile.
+7. Record the binding with `origin = imported` and write state atomically.
+
+**It makes no remote write.** Whatever the configuration asks for that the
+remote object does not have is reported, not applied. Repeating an import that
+changes nothing writes nothing at all — not even a new serial — and says
+`unchanged`.
+
+**An imported key records no delivery.** Its plaintext was never Keymaster's to
+hold, so it can never be delivered to a receiver; the way to put a
+Keymaster-delivered key at that address is to raise the key's `generation` and
+let a replacement be created. That absence is not itself a reason to replace
+anything: a subsequent `plan` proposes ordinary managed-field convergence.
+
+Failures each have their own category and all of them leave state exactly as
+they found it: `import_argument`, `import_not_configured`, `import_absent`,
+`import_owned_elsewhere`, `import_address_bound`, `import_refused`, and the
+`state_locked` and `state_write` categories from the lock and the write path.
 
 ## Credentials
 
@@ -240,8 +283,8 @@ below inspectable.
 ## Reading OpenRouter
 
 `src/api/` reads the resources Keymaster manages: keys, guardrails, and the
-assignments between them. `api::Reader` is read-only — no write endpoint exists
-yet — and its types are observations, not desires. Usage counters, remaining
+assignments between them. `api::Reader` is read-only, and its types are
+observations, not desires. Usage counters, remaining
 budget, and creation timestamps are OpenRouter's alone, so they live in
 `KeyUsage` and `RemoteTimestamps` rather than beside the managed fields, where
 a diff could pick one up and propose "fixing" recorded spend.
@@ -330,6 +373,11 @@ with `mod support;`. It uses no external network and no real credential.
 that proves the server received the expected bearer credential while sentinel
 scanning proves it reached neither diagnostics nor any written artifact.
 
+- `project` — a temporary project directory, a server answering the three
+  listings a snapshot reads, and the compiled binary pointed at both with a
+  sentinel credential. Every run it starts is scanned for the sentinel in
+  stdout, stderr, and every file under the project directory.
+
 `tests/plan.rs` runs the compiled binary against that harness for the
 representative planning cases — converged, drift, name collision, missing,
 unmanaged, and an unfinished operation — and for the failure categories. Every
@@ -337,6 +385,12 @@ run in it scans stdout, stderr, and the whole project directory for the
 sentinel on the success path and the failure path alike, and one case proves
 that `plan` and `status` sent nothing but `GET` requests and left the state
 file byte for byte as they found it.
+
+`tests/import.rs` covers the binding rules the same way: the exact-identity
+lookup and the requests it does *not* make, the reported difference, a repeated
+import that writes nothing, a 404, both one-to-one violations, lock contention,
+a state write that cannot happen, and a remote display name carrying the
+sentinel.
 
 ## Lint policy
 
