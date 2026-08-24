@@ -25,8 +25,8 @@ const MAX_DETAIL: usize = 200;
 pub enum ApiError {
     /// No management credential is available.
     #[error(
-        "no management credential: set {MANAGEMENT_KEY_VAR} to an OpenRouter management key \
-         (`sk-or-mgmt-…`)"
+        "no management credential: set {MANAGEMENT_KEY_VAR} to an OpenRouter management key, \
+         created on OpenRouter's Management API Keys page"
     )]
     MissingCredential,
 

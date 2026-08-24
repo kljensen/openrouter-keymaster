@@ -637,6 +637,11 @@ fact succeeded.
 
 ## Credentials
 
+The credential is a management key, created on OpenRouter's Management API Keys
+page — where it comes from is what makes it one. Its text does not: a management
+key carries the same `sk-or-v1-` prefix an inference key does, so nothing can
+tell them apart by shape and every `sk-or-` string is treated as a secret.
+
 The management credential is read from the `OPENROUTER_MANAGEMENT_KEY`
 environment variable only. There is deliberately no command-line option for
 it, so it cannot appear in a process argument list, and no command echoes it.

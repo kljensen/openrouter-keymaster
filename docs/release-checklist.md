@@ -124,10 +124,11 @@ Check this item only after a real run against a real organization.
 Two questions, and they have different answers.
 
 **Did a real credential ever get committed?** Every OpenRouter credential
-carries the marker `sk-or-` — `sk-or-v1-` for an inference key, `sk-or-mgmt-`
-for a management key — which is the same marker `redaction::looks_like_credential`
-matches on. Scan for the family, case-insensitively, and list the distinct
-literals rather than filtering with an exclusion list that can be wrong:
+carries the marker `sk-or-`, and what follows it says nothing about which kind
+it is: a management key carries the same `sk-or-v1-` shape an inference key
+does. That marker is what `redaction::looks_like_credential` matches on. Scan
+for the family, case-insensitively, and list the distinct literals rather than
+filtering with an exclusion list that can be wrong:
 
 ```sh
 git grep -hoiE 'sk-or-[a-z0-9]+-[A-Za-z0-9_-]{4,}' $(git rev-list --all) -- . \
@@ -135,13 +136,19 @@ git grep -hoiE 'sk-or-[a-z0-9]+-[A-Za-z0-9_-]{4,}' $(git rev-list --all) -- . \
 ```
 
 **Expected:** every line is obviously a fake test constant, and a human reads
-them to say so. Verified — ten literals, all fake:
+them to say so. `sk-or-mgmt-` is not a real prefix; `sk-or-mgmt-abc123` is a
+fixture the identifier and redaction tests use to prove the marker match does
+not depend on what follows it, and the other two are earlier spellings of the
+fake management credentials, still in history. Verified — twelve literals, all
+fake:
 
 ```text
 sk-or-mgmt-abc123
 sk-or-mgmt-FAKEAMBIENTCREDENTIAL
 sk-or-mgmt-FAKEFAKEFAKE
+sk-or-v1-FAKEAMBIENTCREDENTIAL
 sk-or-v1-FAKEFAKEFAKE
+sk-or-v1-FAKEMANAGEMENTCREDENTIAL
 sk-or-v1-KEYMASTER-SENTINEL-8f31c2-NEVER-DISCLOSE
 sk-or-v1-leaked
 sk-or-v1-LEAKEDFROMANAME

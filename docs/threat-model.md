@@ -11,8 +11,12 @@ protect.
 
 ## Supplying the credential
 
-The management credential is read from the `OPENROUTER_MANAGEMENT_KEY`
-environment variable and from nowhere else.
+The management credential is the key OpenRouter's Management API Keys page
+issues. Its prefix is not distinctive — it looks like an inference key — so
+treat any `sk-or-` string as a secret.
+
+It is read from the `OPENROUTER_MANAGEMENT_KEY` environment variable and from
+nowhere else.
 
 ```sh
 export OPENROUTER_MANAGEMENT_KEY="$(pass show openrouter/management)"

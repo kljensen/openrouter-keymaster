@@ -9,21 +9,22 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Fixed
 
+- Documentation no longer claims management keys carry a distinct
+  `sk-or-mgmt-` prefix. A management key is the one OpenRouter's Management API
+  Keys page issues, carries the same `sk-or-v1-` shape an inference key does,
+  and any `sk-or-` string is treated as a secret.
 - `state forget` no longer says the resources it released are still live.
   It sends no request, so the warning and the summary now say each may still
   exist remotely and that nothing was disabled or deleted.
-
 - `rotate` and a planned replacement no longer describe the predecessor as
   "still enabled". Rotation does not read it, so the summary says it is
   unchanged — neither disabled nor deleted — and `apply` reports the `disabled`
   value its own read observed, or says nothing about it.
-
 - `plan` and `apply` report `converged` when there is nothing to write and
   nothing an operator has to clear. An `unmanaged` remote resource, an
   `orphaned_binding` with no operation pending, and a `no_op` no longer make a
   run `held_back`, which is now reserved for a write that cannot run and for a
   blocker only an operator can resolve.
-
 - A guardrail with `limit_usd` and no `reset_interval` is now rejected by
   offline validation, naming `guardrails.NAME.reset_interval`, instead of
   failing at apply time with an HTTP 400 from OpenRouter. Keys are unchanged: a

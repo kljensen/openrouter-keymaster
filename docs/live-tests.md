@@ -14,8 +14,8 @@ it. Not a shared organization, and not one that holds a key anything depends on.
 The suite deletes every key whose name carries its run prefix, and a bug in that
 filter is only survivable if there is nothing else there to hit.
 
-**A management credential for that organization**, exported as
-`OPENROUTER_MANAGEMENT_KEY`. The suite never reads it into a test variable; the
+**A management credential for that organization** — a key from OpenRouter's
+Management API Keys page — exported as `OPENROUTER_MANAGEMENT_KEY`. The suite never reads it into a test variable; the
 child `openrouter-keymaster` process inherits it from the environment.
 
 ## Running it

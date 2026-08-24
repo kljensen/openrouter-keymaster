@@ -7,8 +7,12 @@
 //! does not write itself — a deserializer's error, which may quote the
 //! offending input.
 
-/// The marker every OpenRouter credential carries: management keys are
-/// `sk-or-mgmt-…` and inference keys are `sk-or-v1-…`.
+/// The marker every OpenRouter credential carries.
+///
+/// What follows it does not say which kind of credential it is: a management
+/// key from OpenRouter's Management API Keys page carries the same `sk-or-v1-`
+/// shape an inference key does. So the marker is the whole test, and any
+/// `sk-or-` string is treated as a secret.
 const CREDENTIAL_MARKER: &str = "sk-or-";
 
 /// What a redacted token is replaced with.
@@ -87,6 +91,8 @@ mod tests {
     #[test]
     fn credential_prefixes_are_recognized_anywhere_in_a_value() {
         assert!(looks_like_credential("sk-or-v1-abc"));
+        // A management key looks like an inference key, so the marker match
+        // must not depend on what follows it.
         assert!(looks_like_credential("sk-or-mgmt-abc"));
         assert!(looks_like_credential("Bearer SK-OR-V1-ABC"));
         assert!(!looks_like_credential("google/gemini-2.5-flash"));

@@ -12,7 +12,11 @@
 use serde_json::{Value, json};
 
 /// An obviously fake management credential.
-pub const FAKE_MANAGEMENT_KEY: &str = "sk-or-mgmt-FAKEFAKEFAKE";
+///
+/// It carries the `sk-or-v1-` prefix a real one does: OpenRouter's Management
+/// API Keys page is what makes a key a management key, and nothing in its text
+/// distinguishes it from an inference key.
+pub const FAKE_MANAGEMENT_KEY: &str = "sk-or-v1-FAKEMANAGEMENTCREDENTIAL";
 
 /// An obviously fake inference key, as `POST /keys` would return once.
 pub const FAKE_INFERENCE_KEY: &str = "sk-or-v1-FAKEFAKEFAKE";

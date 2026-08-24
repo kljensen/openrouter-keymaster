@@ -345,7 +345,7 @@ fn global_paths_are_accepted_from_any_position() {
 #[test]
 fn an_ambient_credential_does_not_change_behavior_or_appear_in_output() {
     // The only test that sets the credential: it must stay out of the output.
-    const AMBIENT: &str = "sk-or-mgmt-FAKEAMBIENTCREDENTIAL";
+    const AMBIENT: &str = "sk-or-v1-FAKEAMBIENTCREDENTIAL";
 
     let directory = tempfile::tempdir().expect("a temporary directory");
     let output = Command::cargo_bin("openrouter-keymaster")
