@@ -2,6 +2,7 @@
 
 use crate::app::apply::ApplyError;
 use crate::app::import::ImportError;
+use crate::app::recover::RecoverError;
 use crate::client::ApiError;
 use crate::config::ConfigError;
 use crate::state::StateError;
@@ -53,6 +54,11 @@ pub enum Error {
     #[error(transparent)]
     Apply(#[from] ApplyError),
 
+    /// An unfinished operation could not be inspected or resolved. State is
+    /// unchanged unless the message says otherwise.
+    #[error(transparent)]
+    Recover(#[from] RecoverError),
+
     /// A result could not be written to stdout or stderr.
     #[error("cannot write output: {message}")]
     Output {
@@ -74,6 +80,7 @@ impl Error {
             Self::Api(error) => error.kind(),
             Self::Import(error) => error.kind(),
             Self::Apply(error) => error.kind(),
+            Self::Recover(error) => error.kind(),
             Self::Output { .. } => "output",
         }
     }

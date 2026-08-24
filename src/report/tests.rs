@@ -643,10 +643,17 @@ fn a_recovery_required_action_reports_the_five_facts() {
     assert_eq!(recovery["phase"], Phase::Created.as_str());
     assert_eq!(recovery["phase_at"], "2026-01-01T00:00:04Z");
     assert_eq!(recovery["known_hash"], JOBFEED_HASH);
+    // `created` records a hash, so `recover resolve` refuses it and `recover
+    // replace` is what accepts it. The remediation has to name the command that
+    // will actually run.
+    let remediation = recovery["remediation"].as_str().unwrap_or_default();
     assert!(
-        recovery["remediation"]
-            .as_str()
-            .is_some_and(|text| text.contains("keymaster recover inspect jobfeed"))
+        remediation.contains("keymaster recover replace jobfeed"),
+        "{remediation}"
+    );
+    assert!(
+        !remediation.contains("recover resolve"),
+        "a phase whose hash is known has nothing to attest: {remediation}"
     );
 
     let human = report.to_string();

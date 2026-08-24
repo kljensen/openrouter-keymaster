@@ -387,6 +387,197 @@ fn a_transition_is_legal_from_exactly_one_phase() {
     }
 }
 
+/// Every phase, so a table can be exhaustive rather than representative.
+const ALL_PHASES: [Phase; 7] = [
+    Phase::CreateStarted,
+    Phase::CreateAmbiguous,
+    Phase::Created,
+    Phase::Secured,
+    Phase::DeliveryStarted,
+    Phase::DeliveryAmbiguous,
+    Phase::Delivered,
+];
+
+/// The two phases in which nobody knows whether a key exists.
+const UNKNOWN_EXISTENCE: [Phase; 2] = [Phase::CreateStarted, Phase::CreateAmbiguous];
+
+#[test]
+fn an_attestation_of_absence_is_legal_only_where_existence_is_unknown() {
+    for phase in ALL_PHASES {
+        let (mut state, jobfeed) = in_phase(phase);
+        let cleared = state.clear_ambiguous_create(&jobfeed);
+        assert_eq!(
+            cleared.is_ok(),
+            UNKNOWN_EXISTENCE.contains(&phase),
+            "attesting absence from {phase}"
+        );
+        if cleared.is_ok() {
+            assert!(
+                state.key(&jobfeed).and_then(KeyBinding::pending).is_none(),
+                "the operation is gone from {phase}"
+            );
+        } else {
+            assert_eq!(
+                state
+                    .key(&jobfeed)
+                    .and_then(KeyBinding::pending)
+                    .map(|pending| pending.phase),
+                Some(phase),
+                "a refused attestation changes nothing"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_leaked_candidate_is_bound_only_where_the_hash_is_still_unknown() {
+    for phase in ALL_PHASES {
+        let (mut state, jobfeed) = in_phase(phase);
+        let bound = state.retain_leaked_candidate(&jobfeed, hash("leaked"), at(20));
+        assert_eq!(
+            bound.is_ok(),
+            UNKNOWN_EXISTENCE.contains(&phase),
+            "binding a leaked hash from {phase}"
+        );
+        let Ok(retained) = bound else { continue };
+
+        assert_eq!(retained.status, RetainedStatus::FailedCandidate);
+        assert_eq!(retained.generation, 1);
+        let binding = state.key(&jobfeed).expect("the binding");
+        assert!(
+            binding.pending().is_none(),
+            "binding the leak closes the operation"
+        );
+        assert_eq!(
+            binding.retained().len(),
+            1,
+            "and the hash is tracked, never promoted"
+        );
+        assert!(
+            binding.current().is_none(),
+            "a found hash is never a working key: its plaintext is gone"
+        );
+    }
+}
+
+#[test]
+fn a_leaked_hash_another_address_owns_is_refused() {
+    let (mut state, jobfeed) = in_phase(Phase::CreateAmbiguous);
+    let payroll = address("payroll");
+    state
+        .bind_key(&payroll, hash("leaked"), 1, at(0))
+        .expect("binding the hash somewhere else first");
+
+    let refused = state
+        .retain_leaked_candidate(&jobfeed, hash("leaked"), at(20))
+        .expect_err("one remote key belongs to one local address");
+    assert!(
+        matches!(refused, TransitionError::HashOwnedElsewhere { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(
+        state
+            .key(&jobfeed)
+            .and_then(KeyBinding::pending)
+            .map(|pending| pending.phase),
+        Some(Phase::CreateAmbiguous),
+        "a refused binding leaves the operation exactly as it was"
+    );
+}
+
+#[test]
+fn a_candidate_is_retired_only_from_a_phase_whose_key_is_dead() {
+    // Every phase that carries a hash except `delivered`, which is not dead:
+    // `promote_key` finishes that one.
+    let dead = [
+        Phase::Created,
+        Phase::Secured,
+        Phase::DeliveryStarted,
+        Phase::DeliveryAmbiguous,
+    ];
+
+    for phase in ALL_PHASES {
+        let (mut state, jobfeed) = in_phase(phase);
+        let retired = state.retire_candidate(&jobfeed, at(20));
+        assert_eq!(
+            retired.is_ok(),
+            dead.contains(&phase),
+            "retiring a candidate from {phase}"
+        );
+        let Ok(retained) = retired else {
+            assert_eq!(
+                state
+                    .key(&jobfeed)
+                    .and_then(KeyBinding::pending)
+                    .map(|pending| pending.phase),
+                Some(phase),
+                "a refused retirement changes nothing"
+            );
+            continue;
+        };
+
+        assert_eq!(retained.hash, hash("h1"), "the journaled hash is kept");
+        assert_eq!(retained.status, RetainedStatus::FailedCandidate);
+        let binding = state.key(&jobfeed).expect("the binding");
+        assert!(binding.pending().is_none(), "the dead operation is cleared");
+        assert!(
+            binding.current().is_none(),
+            "a dead key is never promoted to current"
+        );
+    }
+}
+
+#[test]
+fn a_successor_can_be_created_once_the_dead_candidate_is_retired() {
+    // The point of retiring: `begin_create` refuses while an operation stands,
+    // and the successor's generation has to clear the one the dead key holds.
+    let (mut state, jobfeed) = in_phase(Phase::Secured);
+    state
+        .retire_candidate(&jobfeed, at(20))
+        .expect("retiring the dead candidate");
+
+    assert!(
+        state.begin_create(&jobfeed, begin(1), at(21)).is_err(),
+        "the retained candidate still holds generation 1"
+    );
+    state
+        .begin_create(&jobfeed, begin(2), at(22))
+        .expect("the successor takes the next generation");
+    assert_eq!(
+        state
+            .key(&jobfeed)
+            .and_then(KeyBinding::pending)
+            .map(|pending| pending.generation),
+        Some(2)
+    );
+}
+
+#[test]
+fn a_retired_candidate_survives_a_round_trip_through_the_file() {
+    let scratch = Scratch::new();
+    let (mut state, jobfeed) = in_phase(Phase::DeliveryAmbiguous);
+    state
+        .retire_candidate(&jobfeed, at(20))
+        .expect("retiring the dead candidate");
+
+    let file = StateFile::new(&scratch.path);
+    let lock = file.lock().expect("the lock");
+    lock.write(&mut state).expect("writing the state");
+    drop(lock);
+
+    let reopened = file
+        .read()
+        .expect("the reader accepts what the writer wrote");
+    let binding = reopened.key(&jobfeed).expect("the binding");
+    assert_eq!(binding.retained().len(), 1);
+    assert_eq!(binding.retained()[0].hash, hash("h1"));
+    assert_eq!(
+        binding.retained()[0].status,
+        RetainedStatus::FailedCandidate
+    );
+    assert!(binding.pending().is_none());
+}
+
 #[test]
 fn a_definite_receiver_rejection_returns_the_operation_to_secured() {
     let (mut state, jobfeed) = in_phase(Phase::DeliveryStarted);

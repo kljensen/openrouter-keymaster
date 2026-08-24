@@ -158,11 +158,8 @@ fn a_parsed_command_fails_with_an_application_error_on_stderr() {
 
 #[test]
 fn every_unimplemented_command_parses_and_reaches_its_handler() {
-    let commands: [&[&str]; 7] = [
+    let commands: [&[&str]; 4] = [
         &["rotate", "jobfeed"],
-        &["recover", "inspect", "jobfeed"],
-        &["recover", "resolve", "jobfeed", "--no-resource-created"],
-        &["recover", "replace", "jobfeed"],
         &["retire", "jobfeed", "--hash", "sha256:aaaa"],
         &["delete", "key", "--hash", "sha256:aaaa"],
         &["state", "forget", "keys.jobfeed"],
@@ -178,11 +175,15 @@ fn every_unimplemented_command_parses_and_reaches_its_handler() {
     }
 }
 
-/// `plan`, `status`, `import`, and `apply` are implemented, so "reaching the
-/// handler" means reading the configuration. Each is given a path that does not
-/// exist, which stops it before a client is built and therefore before any
-/// network call. `import` validates its identifier first, so the identifiers
-/// here are well formed.
+/// `plan`, `status`, `import`, `apply`, and `recover replace` are implemented,
+/// so "reaching the handler" means reading the configuration. Each is given a
+/// path that does not exist, which stops it before a client is built and
+/// therefore before any network call. `import` validates its identifier first,
+/// so the identifiers here are well formed.
+///
+/// `recover inspect` and `recover resolve` are absent because neither reads the
+/// configuration: they act on the journal, which the configuration does not
+/// describe. `tests/recover.rs` covers them.
 #[test]
 fn the_implemented_commands_reach_their_handler_and_stop_at_the_configuration() {
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -192,10 +193,11 @@ fn the_implemented_commands_reach_their_handler_and_stop_at_the_configuration() 
     // default one, relative to wherever the test runner happens to be.
     let state = directory.path().join("state.json");
 
-    let commands: [&[&str]; 5] = [
+    let commands: [&[&str]; 6] = [
         &["plan"],
         &["status"],
         &["apply"],
+        &["recover", "replace", "jobfeed"],
         &["import", "key", "jobfeed", "--hash", "sha256:aaaa"],
         &[
             "import",

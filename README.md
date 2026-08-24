@@ -3,9 +3,9 @@
 A declarative OpenRouter management CLI, written in Rust.
 
 Keymaster is an early work in progress. The command-line surface below is
-final for v0.1. `plan`, `status`, `import`, and `apply` are implemented end to
-end; every remaining command still fails with a "not implemented yet" error and
-exits 1. `apply` converges guardrails, existing keys, and assignments, and
+final for v0.1. `plan`, `status`, `import`, `apply`, and `recover` are
+implemented end to end; every remaining command still fails with a "not
+implemented yet" error and exits 1. `apply` converges guardrails, existing keys, and assignments, and
 creates inference keys through the journaled transaction of ADR-0002. It does
 not replace one yet — that is #19.
 
@@ -26,9 +26,9 @@ keymaster apply                         converge OpenRouter with the configurati
 keymaster import key NAME --hash HASH   bind an existing key by its hash      [works]
 keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID [works]
 keymaster rotate NAME                   stage a replacement key
-keymaster recover inspect NAME          report an interrupted key operation
-keymaster recover resolve NAME ...      attest what an ambiguous operation did
-keymaster recover replace NAME          replace a key after resolving ambiguity
+keymaster recover inspect NAME          report an interrupted key operation   [works]
+keymaster recover resolve NAME ...      attest what an ambiguous operation did [works]
+keymaster recover replace NAME          replace a key after resolving ambiguity [works]
 keymaster retire NAME --hash HASH       disable a tracked retained key
 keymaster delete key --hash HASH        permanently delete a tracked key
 keymaster state forget ADDRESS          relinquish local ownership of an address
@@ -314,6 +314,91 @@ handled by `keymaster recover`.
 One phase needs no operator: `delivered`. The transaction is over and only the
 local promotion is outstanding, so `apply` completes it under its lock before it
 plans, and says so in a warning.
+
+## Recovering an interrupted operation
+
+Any create or delivery that ends without an answer leaves a journal entry and
+stops the whole apply. `keymaster recover` is the only way to close one, and it
+never guesses: it does not retry a create, adopt a remote key because its
+display name matches, or invoke a receiver a second time.
+
+Start by reading the journal:
+
+```sh
+keymaster recover inspect jobfeed
+```
+
+It reports the operation's identifier, phase, timestamp, generation, the
+intended name and workspace, the hash when the journal has one, and the
+non-secret fingerprint of the receiver the plaintext was bound for. When the
+phase is one where a key's existence is still unknown — `create_started` or
+`create_ambiguous` — it also lists the remote keys that *could* be the one the
+attempt made: keys no local address owns, in the workspace the attempt named,
+that carry the intended name or were created within an hour of it. Each says
+which of those two signals fired. They are candidates, never matches, and
+Keymaster will not choose one. An empty listing is not an all-clear either, and
+the run says so. Each report ends with a remediation naming the one command that phase accepts:
+`recover resolve` while a key's existence is unknown, `recover replace` once the
+journal records a hash, and neither for `delivered`, which the next `apply`
+finishes by itself.
+
+`inspect` takes no lock and writes nothing. It reaches the network only when
+there is something to search for: once the journal records a hash, every fact in
+the report is already on disk, so inspecting a `secured` or `delivery_ambiguous`
+operation needs no management credential and makes no API call at all.
+
+Then look at OpenRouter yourself, and tell Keymaster what you found:
+
+```sh
+# Nothing was created.
+keymaster recover resolve jobfeed --no-resource-created
+
+# A key was created, and this is its hash.
+keymaster recover resolve jobfeed --leaked-hash <HASH>
+```
+
+Exactly one of the two is required, and giving both is a usage error.
+`--no-resource-created` clears the operation on your word — Keymaster has no way
+to check it, and says so; an attestation that is wrong leaves a live key nothing
+tracks. `--leaked-hash` fetches that exact hash, refuses if OpenRouter does not
+have it, binds it as a **failed candidate** so it stays tracked *before* any
+cleanup, then disables it and confirms that by reading it back. A confirmed
+disable records it as `retired`; anything else leaves it a failed candidate for
+a later explicit `retire` or `delete`. A found hash is never promoted to
+current: its plaintext was disclosed once, in a response nobody received.
+
+Repeating a resolution that already succeeded is a clear no-op, not an error.
+
+Finally, get the address a working key:
+
+```sh
+keymaster recover replace jobfeed
+```
+
+`replace` handles the phases where the outcome is already known and the
+plaintext is gone — `created`, `secured`, `delivery_started`, and
+`delivery_ambiguous`. Under one lock it checks everything the successor needs
+first — the key is configured, a receiver is named, the guardrail is bound and
+converged — and only once that passes does it retire the dead key into
+`retained`, try to disable it, and stage a successor through the same journaled
+transaction, taking the next free generation. The order matters: the key about
+to be disabled may be live, and finding out afterwards that no successor can be
+created would leave the address with neither. A preflight failure writes
+nothing and sends no write, so the operation still stands and can be retried
+once the configuration is fixed. It is refused from
+`create_started` and `create_ambiguous`, because creating a successor before
+anyone knows whether the first attempt made a key is how a live credential ends
+up untracked; resolve those first. It is refused from `delivered` too, where the
+next `apply` finishes the local promotion, and when nothing is pending at all —
+`rotate` is the command for a key that works.
+
+**Delivery ambiguity has no attestation.** ADR-0002 allows a lost
+acknowledgement to be resolved as delivered only through a receiver-specific
+idempotency or query contract: one that accepts the operation ID and can be
+asked authoritatively whether it committed. v0.1 defines no such contract, so
+there is deliberately no `resolve --delivered` flag. The only resolution is
+`recover replace`, which costs a rotation even when the original delivery in
+fact succeeded.
 
 ## Credentials
 

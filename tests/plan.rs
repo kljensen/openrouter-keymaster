@@ -282,10 +282,19 @@ fn an_unfinished_operation_blocks_the_plan_and_reports_how_to_resolve_it() {
     assert_eq!(recovery["recovery"]["phase"], "created");
     assert_eq!(recovery["recovery"]["phase_at"], "2026-01-01T00:00:04Z");
     assert_eq!(recovery["recovery"]["known_hash"], JOBFEED_HASH);
+    // `created` records a hash, so `recover resolve` refuses it and `recover
+    // replace` is the command that accepts it. Naming the other one would send
+    // an operator to a command that rejects them.
+    let remediation = recovery["recovery"]["remediation"]
+        .as_str()
+        .unwrap_or_default();
     assert!(
-        recovery["recovery"]["remediation"]
-            .as_str()
-            .is_some_and(|text| text.contains("keymaster recover inspect jobfeed"))
+        remediation.contains("keymaster recover replace jobfeed"),
+        "{remediation}"
+    );
+    assert!(
+        !remediation.contains("recover resolve"),
+        "a phase whose hash is known has nothing to attest: {remediation}"
     );
 
     let human = project.succeed(&["plan"]);

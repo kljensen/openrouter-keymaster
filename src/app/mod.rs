@@ -1,8 +1,8 @@
 //! Command dispatch.
 //!
-//! `plan`, `status`, `import`, and `apply` are implemented; every other v0.1
-//! command parses and fails with a typed [`Error::NotImplemented`] until its
-//! feature issue lands. Each match arm calls that feature's handler, which
+//! `plan`, `status`, `import`, `apply`, and `recover` are implemented; every
+//! other v0.1 command parses and fails with a typed [`Error::NotImplemented`]
+//! until its feature issue lands. Each match arm calls that feature's handler, which
 //! builds an output DTO for [`Renderer`] to write.
 //!
 //! `plan` and `status` are strictly read-only: they parse the configuration,
@@ -10,15 +10,18 @@
 //! OpenRouter, and print. No API write, no receiver invocation, and no state
 //! write happens on either path.
 //!
-//! The two writing commands take the exclusive state lock first and reload
+//! The writing commands take the exclusive state lock first and reload
 //! everything under it. [`import`] makes no remote write at all — it reads one
-//! remote object and records a binding — and [`apply`] converges guardrails,
-//! keys, and assignments, verifying what it wrote, and runs the journaled
-//! creation transaction for a planned key.
+//! remote object and records a binding; [`apply`] converges guardrails, keys,
+//! and assignments, verifying what it wrote, and runs the journaled creation
+//! transaction for a planned key; and [`recover`] closes an operation whose
+//! outcome only an operator can establish. `recover inspect` is read-only like
+//! `plan`.
 
 pub mod apply;
 pub mod import;
 mod issuance;
+pub mod recover;
 
 use std::fmt::Display;
 use std::io::Write;
@@ -47,6 +50,7 @@ pub fn run<O: Write, E: Write>(cli: &Cli, renderer: &mut Renderer<O, E>) -> Resu
         Command::Status => status_command(cli, renderer),
         Command::Import { resource } => import::run(cli, resource, renderer),
         Command::Apply => apply::run(cli, renderer),
+        Command::Recover { action } => recover::run(cli, action, renderer),
         command => Err(Error::NotImplemented {
             command: command_path(command),
         }),

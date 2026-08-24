@@ -84,12 +84,22 @@ pub(super) struct Issuer<'a> {
 
 /// What one completed transaction produced.
 ///
-/// Non-secret by construction: a hash, a generation, and sentences this module
-/// wrote, gathered into one string. There is nowhere here to put a plaintext,
-/// and the type has no `Serialize` either, so a report has to say explicitly
-/// what it publishes.
+/// Non-secret by construction: a hash, a generation, an operation name, and
+/// sentences this module wrote. There is nowhere here to put a plaintext, and
+/// the type has no `Serialize` either, so a report has to say explicitly what
+/// it publishes.
 #[derive(Debug, Clone)]
 pub(super) struct Issued {
+    /// The attempt's journaled name.
+    pub(super) operation: OperationId,
+    /// The new key's immutable identity.
+    pub(super) hash: KeyHash,
+    /// The generation it was created as.
+    pub(super) generation: u32,
+    /// The destination, as the receiver describes itself. Never secret.
+    pub(super) receiver: String,
+    /// Whether the new hash became the address's current key.
+    pub(super) promoted: bool,
     /// What the run should tell an operator about this issuance.
     pub(super) detail: String,
 }
@@ -118,7 +128,35 @@ impl Issuer<'_> {
         at: OffsetDateTime,
     ) -> Result<Issued, IssueFailure> {
         let prepared = self
-            .prepare(address, state)
+            .preflight(address, state)
+            .map_err(|message| format!("nothing was created: {message}"))?;
+        self.issue_prepared(address, state, prepared, at)
+    }
+
+    /// Creates the key a passed [`Issuer::preflight`] described.
+    ///
+    /// For the caller that has to know the successor is creatable before it
+    /// changes anything else. Everything after the first line here is
+    /// non-idempotent, so nothing may reach this that the preflight has not
+    /// already cleared.
+    ///
+    /// # Errors
+    ///
+    /// As [`Issuer::issue`].
+    pub(super) fn issue_prepared(
+        &self,
+        address: &Address,
+        state: &mut State,
+        mut prepared: Prepared<'_>,
+        at: OffsetDateTime,
+    ) -> Result<Issued, IssueFailure> {
+        // Read again rather than trusted from the preflight. Retiring a dead
+        // candidate between the two moves its generation from the operation to
+        // the retained list, which leaves the highest recorded generation
+        // unchanged — but the number a live key is staked on should come from
+        // the state the journal entry is actually written against, not from an
+        // argument that happens to still be right.
+        prepared.generation = next_generation(address, state, prepared.desired)
             .map_err(|message| format!("nothing was created: {message}"))?;
 
         let operation = OperationId::mint(at);
@@ -139,10 +177,18 @@ impl Issuer<'_> {
 
     /// Checks everything that can be checked before a request is sent.
     ///
-    /// Nothing here writes, so a configuration or dependency problem costs a
-    /// read and stops — with no journal entry, no `POST /keys`, and nothing for
-    /// an operator to resolve.
-    fn prepare<'cfg>(
+    /// Nothing here writes — not to state, not to OpenRouter — so a
+    /// configuration or dependency problem costs a read and stops, with no
+    /// journal entry, no `POST /keys`, and nothing for an operator to resolve.
+    ///
+    /// It is separate from [`Issuer::issue_prepared`] because one caller needs
+    /// the two apart. `keymaster recover replace` closes a dead operation and
+    /// disables its key before staging the successor; discovering only then
+    /// that the successor cannot be created — no receiver configured, a
+    /// guardrail that has drifted — would leave the address with a disabled key
+    /// and nothing to replace it. So it runs this first, and touches nothing
+    /// until it passes.
+    pub(super) fn preflight<'cfg>(
         &'cfg self,
         address: &Address,
         state: &State,
@@ -238,14 +284,9 @@ impl Issuer<'_> {
     /// Classifies a create that did not return a usable response.
     ///
     /// One question decides it: does this answer prove the server did not apply
-    /// the request? Only a well-formed 4xx does — a 4xx whose response arrived
-    /// whole, which is what [`ApiError::is_definite_rejection`] means. A 4xx
-    /// status line followed by a body that stopped partway through is *not*
-    /// that, however definite the number looks: the exchange failed after the
-    /// status, and clearing the journal on it would forget an attempt that may
-    /// have made a live key. Everything else — a timeout, a reset, a 5xx, a
-    /// redirect, a success whose body cannot be read — leaves the outcome
-    /// unknown too, and ADR-0002 refuses to guess.
+    /// the request? Only a well-formed 4xx does. Everything else — a timeout, a
+    /// reset, a 5xx, a redirect, a success whose body cannot be read — leaves it
+    /// unknown whether a key now exists, and ADR-0002 refuses to guess.
     fn classify_create(
         &self,
         address: &Address,
@@ -452,9 +493,15 @@ impl Issuer<'_> {
         drop(created);
 
         match outcome.acknowledgement() {
-            Acknowledgement::Delivered => {
-                self.promote(address, state, prepared, &hash, outcome.detail(), at)
-            }
+            Acknowledgement::Delivered => self.promote(
+                address,
+                state,
+                prepared,
+                &hash,
+                operation,
+                outcome.detail(),
+                at,
+            ),
             Acknowledgement::Rejected => {
                 Err(self.record_rejection(address, state, &hash, outcome.detail(), at))
             }
@@ -471,12 +518,19 @@ impl Issuer<'_> {
     /// separate journal entries because a crash between them is a real state
     /// with a defined answer: the transaction is over, and the next run
     /// completes the promotion under its lock without touching anything remote.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "these are the transaction's own values; gathering them into a struct would add \
+                  a type whose only purpose is to satisfy a count, and would hide which of them \
+                  this step reads"
+    )]
     fn promote(
         &self,
         address: &Address,
         state: &mut State,
         prepared: &Prepared<'_>,
         hash: &KeyHash,
+        operation: &OperationId,
         delivery: &str,
         at: OffsetDateTime,
     ) -> Result<Issued, IssueFailure> {
@@ -501,11 +555,15 @@ impl Issuer<'_> {
             ),
         };
         Ok(Issued {
+            operation: operation.clone(),
+            hash: hash.clone(),
+            generation: prepared.generation,
+            receiver: prepared.receiver.describe(),
+            promoted: note.is_empty(),
             detail: format!(
                 "created key {hash} at generation {generation}, verified its restrictions and \
-                 guardrail, and delivered it once to {receiver}: {delivery}.{note}",
-                generation = prepared.generation,
-                receiver = prepared.receiver.describe()
+                 guardrail, and delivered it once: {delivery}.{note}",
+                generation = prepared.generation
             ),
         })
     }
@@ -681,8 +739,9 @@ fn next_generation(address: &Address, state: &State, desired: &Key) -> Result<u3
 
     // Checked, not saturating. Saturating would hand back a number the address
     // has already used, which `begin_create` then refuses — but only after the
-    // caller has acted on this answer, and a caller that had already changed
-    // something on the strength of it would be left with no way forward.
+    // caller has acted on the preflight's answer. For `keymaster recover
+    // replace` that is the dead end the preflight exists to prevent: the old
+    // key retired and disabled, and no successor possible.
     let next = recorded.checked_add(1).ok_or_else(|| {
         format!(
             "`{address}` has recorded generation {recorded}, the highest there is, so no further \
@@ -695,7 +754,7 @@ fn next_generation(address: &Address, state: &State, desired: &Key) -> Result<u3
 }
 
 /// Everything the transaction needs, checked before anything is journaled.
-struct Prepared<'a> {
+pub(super) struct Prepared<'a> {
     /// The desired key, as the configuration describes it.
     desired: &'a Key,
     /// Where the plaintext goes. Selected explicitly; there is no fallback.

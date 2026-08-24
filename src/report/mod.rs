@@ -21,6 +21,7 @@
 mod apply;
 mod import;
 mod plan;
+mod recover;
 mod status;
 
 #[cfg(test)]
@@ -36,6 +37,10 @@ use crate::state::Phase;
 pub use apply::{ActionOutcome, ApplyReport};
 pub use import::ImportReport;
 pub use plan::PlanReport;
+pub use recover::{
+    CandidateReport, InspectReport, ReplaceReport, ResolveReport, RetainedReport, Retired,
+    Successor, created_near,
+};
 pub use status::StatusReport;
 
 /// An unfinished create-or-deliver operation, and what to do about it.
@@ -95,21 +100,29 @@ impl RecoveryReport {
 
 /// What resolves an operation stopped in `phase`.
 ///
-/// Keyed to the phase because the phases differ in what they leave undecided:
-/// two of them are settled by the journal alone, and the rest need an operator
-/// to establish what OpenRouter and the receiver actually did (ADR-0002).
+/// Keyed to the phase because the phases differ in what they leave undecided,
+/// and — this is the part that has to stay true — because they differ in which
+/// command will actually accept them. `recover resolve` is refused once the
+/// journal records a hash, and `recover replace` is refused while it does not,
+/// so naming the wrong one here would send an operator to a command that
+/// rejects them. The split below is the same one `app::recover` enforces:
+/// resolve for the two phases where a key's existence is unknown, replace for
+/// the four where the key exists and its plaintext is gone, and neither for
+/// `delivered`, which the next apply finishes by itself.
 fn remediation(phase: Phase, address: Option<&Address>) -> String {
     let name = address.map_or("NAME", Address::as_str);
     match phase {
         Phase::CreateStarted | Phase::CreateAmbiguous => format!(
             "the create request may or may not have created a key. Run `keymaster recover \
-             inspect {name}` to see the remote keys that carry the recorded name, then attest \
-             what you found with `keymaster recover resolve {name}`."
+             inspect {name}` to see the remote keys that could be the one it made, then attest \
+             what you found: `keymaster recover resolve {name} --no-resource-created`, or \
+             `keymaster recover resolve {name} --leaked-hash HASH`."
         ),
         Phase::Created => format!(
-            "a key exists but its restrictions were never verified, so it may be an \
-             unrestricted live credential. Run `keymaster recover inspect {name}`, then attest \
-             the outcome with `keymaster recover resolve {name}`."
+            "a key exists — its hash is journaled — but its restrictions were never verified, \
+             so it may be an unrestricted live credential, and its plaintext is gone either \
+             way. There is nothing left to attest: `keymaster recover replace {name}` disables \
+             it, keeps it tracked, and creates a successor."
         ),
         Phase::Secured => format!(
             "the key exists and is restricted, and its plaintext no longer exists anywhere, so \
@@ -117,9 +130,10 @@ fn remediation(phase: Phase, address: Option<&Address>) -> String {
              {name}`."
         ),
         Phase::DeliveryStarted | Phase::DeliveryAmbiguous => format!(
-            "the receiver may or may not hold the plaintext, and it can never be delivered \
-             again. Establish what the receiver has, run `keymaster recover resolve {name}` to \
-             record it, then `keymaster recover replace {name}`."
+            "the receiver may or may not hold the plaintext, and the key can never be delivered \
+             again. v0.1 has no receiver query contract, so there is nothing to attest: \
+             `keymaster recover replace {name}` retires this key and creates a successor. Check \
+             the destination yourself before you retire what may be working."
         ),
         Phase::Delivered => format!(
             "the delivery finished and only local promotion is left; the next `keymaster apply` \

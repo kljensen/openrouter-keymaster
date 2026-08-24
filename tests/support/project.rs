@@ -181,6 +181,26 @@ impl Project {
         command.output().expect("the binary runs")
     }
 
+    /// Runs the binary with no management credential in its environment.
+    ///
+    /// For a command that must not need one. The base URL is removed too, so a
+    /// run that did reach for the API would be aiming at production rather than
+    /// quietly succeeding against the harness — which makes "this made no HTTP
+    /// call" an assertion rather than a hope.
+    #[must_use]
+    pub fn run_without_credential(&self, arguments: &[&str]) -> Output {
+        let mut command = Command::cargo_bin("keymaster").expect("the binary builds");
+        command
+            .env_remove(CREDENTIAL_VAR)
+            .env_remove(BASE_URL_VAR)
+            .arg("--config")
+            .arg(self.config_path())
+            .arg("--state")
+            .arg(self.state_path())
+            .args(arguments);
+        command.output().expect("the binary runs")
+    }
+
     /// Runs the binary with extra environment variables set.
     ///
     /// The only current use is `KEYMASTER_STATE_FAULT`, which the

@@ -875,6 +875,163 @@ impl State {
         Ok(())
     }
 
+    /// Clears a create after an operator attested that no key was made.
+    ///
+    /// Legal only from `create_started` and `create_ambiguous` — the two phases
+    /// in which the journal does not know whether a key exists. Past them the
+    /// hash is recorded, so there is nothing to attest and forgetting the
+    /// operation would forget a live credential.
+    ///
+    /// Separate from [`State::abandon_create`], which the same phase would
+    /// allow, because the authority is different and that difference is the
+    /// whole point of the command that calls this. A definite 4xx is
+    /// OpenRouter saying it declined; this is an operator saying they looked.
+    /// Keymaster cannot check the second one, so it must be spelled out at the
+    /// call site rather than borrowed from a function that means the first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransitionError`] when there is no pending operation, or when
+    /// it has passed the phases where a key's existence is still unknown.
+    pub fn clear_ambiguous_create(&mut self, address: &Address) -> Result<(), TransitionError> {
+        let from = self.pending_phase(address)?;
+        if !matches!(from, Phase::CreateStarted | Phase::CreateAmbiguous) {
+            return Err(TransitionError::NothingToAttest {
+                address: address.clone(),
+                phase: from,
+            });
+        }
+        if let Some(binding) = self.keys.get_mut(address) {
+            binding.pending = None;
+        }
+        Ok(())
+    }
+
+    /// Binds the key an operator found as the leaked result of an ambiguous
+    /// create, and closes the operation.
+    ///
+    /// The hash is retained as a [`RetainedStatus::FailedCandidate`], never
+    /// promoted: OpenRouter disclosed this key's plaintext once, in a response
+    /// nobody received, so the key exists, can never be used, and is kept only
+    /// so it can be disabled and deleted (ADR-0002).
+    ///
+    /// Legal from the same two phases as [`State::clear_ambiguous_create`]. Past
+    /// them the operation already carries a hash, and binding a second one
+    /// would claim the address owns two keys from one attempt.
+    ///
+    /// Returns the retained entry it recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransitionError`] when there is no pending operation, when it
+    /// has passed the phases where the hash is still unknown, or when the hash
+    /// already belongs to some address.
+    pub fn retain_leaked_candidate(
+        &mut self,
+        address: &Address,
+        hash: KeyHash,
+        at: OffsetDateTime,
+    ) -> Result<RetainedKey, TransitionError> {
+        let from = self.pending_phase(address)?;
+        if !matches!(from, Phase::CreateStarted | Phase::CreateAmbiguous) {
+            return Err(TransitionError::NothingToAttest {
+                address: address.clone(),
+                phase: from,
+            });
+        }
+        if let Some(owner) = self.address_owning(&hash) {
+            return Err(TransitionError::HashOwnedElsewhere {
+                hash,
+                owner: owner.clone(),
+            });
+        }
+
+        let Some(binding) = self.keys.get_mut(address) else {
+            return Err(TransitionError::NotPending {
+                address: address.clone(),
+            });
+        };
+        let Some(pending) = binding.pending.take() else {
+            return Err(TransitionError::NotPending {
+                address: address.clone(),
+            });
+        };
+        let retained = RetainedKey {
+            hash,
+            generation: pending.generation,
+            status: RetainedStatus::FailedCandidate,
+            recorded_at: at,
+        };
+        binding.retained.push(retained.clone());
+        Ok(retained)
+    }
+
+    /// Closes an operation whose key exists and can never be delivered, keeping
+    /// the hash tracked.
+    ///
+    /// This is what stands between a dead operation and its replacement. The
+    /// key is real — the create response arrived and its hash is journaled —
+    /// and its plaintext is gone, so nothing can rescue it; but forgetting it
+    /// would leave a live budgeted credential nothing names. It moves to
+    /// [`RetainedStatus::FailedCandidate`], where an explicit `retire` or
+    /// `delete` can still reach it, and the address is free to stage a
+    /// successor.
+    ///
+    /// Legal from every phase that carries a hash except `delivered`, which is
+    /// not dead at all: [`State::promote_key`] finishes that one.
+    ///
+    /// Returns the retained entry, so the caller can attempt to disable it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransitionError`] when there is no pending operation, or when
+    /// its phase is not one this closes.
+    pub fn retire_candidate(
+        &mut self,
+        address: &Address,
+        at: OffsetDateTime,
+    ) -> Result<RetainedKey, TransitionError> {
+        let from = self.pending_phase(address)?;
+        if !matches!(
+            from,
+            Phase::Created | Phase::Secured | Phase::DeliveryStarted | Phase::DeliveryAmbiguous
+        ) {
+            return Err(TransitionError::CannotRetireCandidate {
+                address: address.clone(),
+                phase: from,
+            });
+        }
+
+        let Some(binding) = self.keys.get_mut(address) else {
+            return Err(TransitionError::NotPending {
+                address: address.clone(),
+            });
+        };
+        let Some(pending) = binding.pending.take() else {
+            return Err(TransitionError::NotPending {
+                address: address.clone(),
+            });
+        };
+        // The four phases above all require a hash, so this is unreachable;
+        // restoring the operation is the honest answer if it ever is reached,
+        // because dropping it would forget an attempt nobody has resolved.
+        let Some(hash) = pending.hash.clone() else {
+            binding.pending = Some(pending);
+            return Err(TransitionError::CannotRetireCandidate {
+                address: address.clone(),
+                phase: from,
+            });
+        };
+        let retained = RetainedKey {
+            hash,
+            generation: pending.generation,
+            status: RetainedStatus::FailedCandidate,
+            recorded_at: at,
+        };
+        binding.retained.push(retained.clone());
+        Ok(retained)
+    }
+
     /// Promotes a delivered key to current.
     ///
     /// Any previous current hash moves to `awaiting_retirement`; rotation
@@ -1515,6 +1672,32 @@ pub enum TransitionError {
         "`{address}` is in phase `{phase}`, so its create cannot be abandoned; a key may exist"
     )]
     CannotAbandon {
+        /// The local address.
+        address: Address,
+        /// The phase the operation is in.
+        phase: Phase,
+    },
+
+    /// An operator's attestation was offered for an operation whose key is
+    /// already known to exist.
+    #[error(
+        "`{address}` is in phase `{phase}`, where the create response already recorded a key, so \
+         there is nothing left for an operator to attest about whether one exists"
+    )]
+    NothingToAttest {
+        /// The local address.
+        address: Address,
+        /// The phase the operation is in.
+        phase: Phase,
+    },
+
+    /// A candidate was retired from a phase that does not carry a hash, or from
+    /// one that is not dead.
+    #[error(
+        "`{address}` is in phase `{phase}`, so its operation cannot be retired; only an \
+         operation whose key exists and can never be delivered is retired this way"
+    )]
+    CannotRetireCandidate {
         /// The local address.
         address: Address,
         /// The phase the operation is in.

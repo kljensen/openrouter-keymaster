@@ -121,6 +121,43 @@ it could not be — a configuration, credential, state, or API error.")]
     },
 
     /// Inspect or resolve an interrupted key operation.
+    #[command(long_about = "\
+Inspect or resolve an interrupted key operation.
+
+A create request whose response was lost, a receiver that never acknowledged, \
+or a run that died between two journal entries leaves an operation whose \
+outcome only an operator can establish. Keymaster never guesses: it does not \
+retry the create, adopt a remote key because its display name matches, or \
+invoke a receiver a second time.
+
+`recover inspect NAME` reports the journaled operation — its identifier, \
+phase, timestamp, intended name and workspace, known hash, and the non-secret \
+fingerprint of the receiver it was bound for — and lists the remote keys that \
+could be the one a lost create made. Those are candidates, never matches, and \
+none of them is ever selected automatically. It writes nothing, locally or \
+remotely, and it reaches OpenRouter only when there is something to search \
+for: once the journal records a hash, inspect needs no credential and makes no \
+API call.
+
+`recover resolve NAME --no-resource-created` records your attestation that \
+OpenRouter holds no key from the attempt, and clears it. Keymaster cannot \
+verify that.
+
+`recover resolve NAME --leaked-hash HASH` fetches that exact hash, binds it as \
+a failed candidate so it stays tracked, then disables it and confirms that by \
+reading it back. A found hash is never promoted: OpenRouter disclosed its \
+plaintext once, in a response nobody received, so the key can only be cleaned \
+up. A disable that fails leaves the hash tracked for a later `retire` or \
+`delete`.
+
+`recover replace NAME` retires a dead operation — one whose key exists and \
+whose plaintext is gone — and stages a successor through the same journaled \
+transaction, under one lock. Everything the successor needs is checked before \
+anything is retired or disabled, so a configuration that cannot produce one \
+leaves the operation and its key exactly as they were. It is refused while it is still unknown whether \
+the attempt created a key; resolve that first. A lost delivery acknowledgement \
+has no attestation in v0.1, because no receiver exposes a query contract: \
+replacement is the resolution.")]
     Recover {
         #[command(subcommand)]
         action: RecoverAction,
