@@ -128,6 +128,33 @@ impl UpdateKey {
     }
 }
 
+/// The body that disables one key and asks for nothing else.
+///
+/// Deliberately not [`UpdateKey`] with `disabled` forced true. This is the body
+/// of a cleanup: a key whose plaintext is lost, or one an operator found as the
+/// leaked result of an ambiguous create. Keymaster may know nothing about that
+/// key beyond its hash — the configuration block may be gone, or may never have
+/// described it — and sending a name and a budget alongside the one field that
+/// matters would rewrite a resource while trying to make it harmless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DisableKey {
+    disabled: bool,
+}
+
+impl DisableKey {
+    /// The body that disables a key.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { disabled: true }
+    }
+}
+
+impl Default for DisableKey {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The body of both assignment endpoints: the keys to attach to a guardrail,
 /// or to detach from it.
 ///
@@ -270,6 +297,15 @@ mod tests {
                 "disabled": false,
             }),
             "expires_at and workspace_id are fixed at creation and are never patched"
+        );
+    }
+
+    #[test]
+    fn a_disable_body_carries_one_field_and_no_other() {
+        assert_eq!(
+            body(&DisableKey::new()),
+            json!({ "disabled": true }),
+            "a cleanup must not rewrite fields it was never asked about"
         );
     }
 

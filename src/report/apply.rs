@@ -313,6 +313,17 @@ impl ApplyReport {
         &self.warnings
     }
 
+    /// Adds something the run did before it planned.
+    ///
+    /// Apply completes a delivered operation's promotion under its lock, before
+    /// the plan exists, so no action can carry it. It still has to be reported:
+    /// the run changed what the address owns.
+    pub fn note(&mut self, note: Option<String>) {
+        if let Some(note) = note {
+            self.warnings.insert(0, note);
+        }
+    }
+
     /// Whether this apply finished without a write failing or an unfinished
     /// operation stopping it.
     ///
@@ -350,8 +361,8 @@ impl ApplyReport {
         }
         if self.skipped > 0 {
             warnings.push(format!(
-                "{} not made; `keymaster apply` does not create or replace inference keys yet, \
-                 so the configuration is not fully converged",
+                "{} not made; `keymaster apply` does not replace an inference key yet, so the \
+                 configuration is not fully converged",
                 plural(self.skipped, "planned write was")
             ));
         }

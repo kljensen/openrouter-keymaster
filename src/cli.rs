@@ -78,9 +78,14 @@ OpenRouter again and reports, per action, whether the result was verified.
 Every write is sent exactly once. A write whose outcome is unknown is never \
 repeated; the read that follows says whether it took effect.
 
-Apply does not yet create or replace inference keys: issuing a one-time secret \
-needs the journaled transaction of #16. A planned creation is skipped, and the \
-run reports that the configuration is not fully converged.
+A planned key creation runs the journaled transaction of ADR-0002: one durable \
+journal entry before and after every non-idempotent step, exactly one \
+`POST /keys` with retries disabled, restrictions and the guardrail applied and \
+verified before the plaintext goes anywhere, and the configured receiver \
+invoked exactly once. Any outcome other than a delivered key stops the whole \
+run and is resolved with `keymaster recover`, never by trying again. Apply does \
+not yet replace an inference key; a planned replacement is skipped, and the run \
+reports that the configuration is not fully converged.
 
 Exit code 0 means nothing went wrong, which is not the same as converged: a \
 write apply cannot make yet, or one the plan holds back until an operator \

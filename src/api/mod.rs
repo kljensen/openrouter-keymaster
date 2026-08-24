@@ -28,7 +28,7 @@ use crate::config::{ResetInterval, Usd};
 use crate::ids::{KeyHash, Uuid};
 use pagination::{Page, PageLimits};
 
-pub use write::{AssignKeys, GuardrailBody, UpdateKey};
+pub use write::{AssignKeys, DisableKey, GuardrailBody, UpdateKey};
 
 /// How a USD budget resets, as OpenRouter reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,6 +358,23 @@ impl<'client> Writer<'client> {
     pub fn update_key(&self, hash: &KeyHash, body: &UpdateKey) -> Result<(), ApiError> {
         self.client
             .patch_once_discarding_body(&["keys", hash.as_str()], body)
+    }
+
+    /// Disables one key, asking for nothing else.
+    ///
+    /// The safe cleanup for a key that exists and can never be used: a create
+    /// whose delivery failed, or one an operator found as the leaked result of
+    /// an ambiguous attempt (ADR-0002). Disabling rather than deleting is
+    /// deliberate — the key stays visible to an audit and to a later explicit
+    /// `delete` — and this returns nothing, so whether it took is answered by
+    /// refetching.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_guardrail`].
+    pub fn disable_key(&self, hash: &KeyHash) -> Result<(), ApiError> {
+        self.client
+            .patch_once_discarding_body(&["keys", hash.as_str()], &DisableKey::new())
     }
 
     /// Attaches one key to one guardrail.

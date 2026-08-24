@@ -42,7 +42,14 @@ use time::OffsetDateTime;
 
 use crate::ids::{Address, KeyHash, OperationId, ReceiverFingerprint, RemoteName, Uuid};
 
-pub use persist::{StateFile, StateLock};
+pub use persist::{Fault, Faults, StateFile, StateLock};
+
+/// Names the durable phase a test asks a run to be interrupted at.
+///
+/// Present only for the crate's own tests and for the `fault-injection`
+/// feature; see [`StateFile`].
+#[cfg(any(test, feature = "fault-injection"))]
+pub use persist::STATE_FAULT_VAR;
 
 /// The only state schema version this build understands.
 ///

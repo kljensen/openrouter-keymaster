@@ -5,8 +5,9 @@ A declarative OpenRouter management CLI, written in Rust.
 Keymaster is an early work in progress. The command-line surface below is
 final for v0.1. `plan`, `status`, `import`, and `apply` are implemented end to
 end; every remaining command still fails with a "not implemented yet" error and
-exits 1. `apply` converges guardrails, existing keys, and assignments, but does
-not create or replace inference keys yet — that is #16.
+exits 1. `apply` converges guardrails, existing keys, and assignments, and
+creates inference keys through the journaled transaction of ADR-0002. It does
+not replace one yet — that is #19.
 
 ## Build, run, and test
 
@@ -199,15 +200,13 @@ section.
 
 What apply will not do:
 
-- **Create or replace an inference key.** Issuing a one-time secret needs the
-  journaled transaction of ADR-0002, which is #16 (and rotation is #19). A
-  planned creation or replacement is skipped with a reason naming the issue,
-  and the outcome is `incomplete` rather than `applied`. The assignment planned
+- **Replace an inference key.** Staging a successor beside a live predecessor
+  is #19. A planned replacement is skipped with a reason naming the issue, and
+  the outcome is `incomplete` rather than `applied`. The assignment planned
   beside it is held back too, because that assignment belongs to the key the
-  issuance would have produced: for a replacement, the address still owns the
-  live predecessor, and assigning *it* to the successor's guardrail would
-  change what an existing credential may do on the strength of a key that was
-  never created.
+  replacement would have produced: the address still owns the live predecessor,
+  and assigning *it* to the successor's guardrail would change what an existing
+  credential may do on the strength of a key that was never created.
 - **Touch anything unmanaged.** Only actions the planner produced are executed,
   and the planner never proposes a write to a remote object no local address
   owns.
@@ -251,6 +250,70 @@ has converged nothing, and it says so.
 The two failing outcomes exit 1 with `apply_unresolved` or `apply_blocked` —
 after writing the result document, because what did happen is what an operator
 needs.
+
+## Creating a key
+
+Creating an inference key is the one operation Keymaster cannot make
+repeatable. OpenRouter returns the plaintext in the create response and nowhere
+else, and documents no idempotency token, so a request whose response is lost
+can never be told apart from one that was never applied. ADR-0002 answers that
+with a journal, and `apply` runs it for every planned key `create`:
+
+```text
+validate ─▶ create_started ─▶ POST /keys ─▶ created ─▶ PATCH + assign
+                                                           │
+        delivered ◀─ receiver ◀─ delivery_started ◀─ secured ◀─ verify
+            │
+            └─▶ promote to current
+```
+
+Each arrow a crash could fall through is a durable state write. The intent
+markers — `create_started` and `delivery_started` — land *before* the
+non-idempotent action they announce; the outcome phases land after the result
+is known. The rules that follow from that:
+
+- **Exactly one `POST /keys`, ever.** Retries are off at the transport as well
+  as in the client. A timeout, a reset, a 5xx, or a success whose body cannot be
+  read is journaled as `create_ambiguous` and stops the whole apply. It is never
+  resolved by sending the request again, and never by adopting a remote key
+  because its display name matches.
+- **A well-formed 4xx is the one definite negative.** The server saw the
+  request, declined it, and said so in a response that arrived whole, so no key
+  exists: the attempt is cleared and the next run plans an ordinary create.
+  *Well-formed* is load-bearing. A 4xx status line followed by a body that stops
+  partway through is ambiguous, not definite — the exchange failed after the
+  status, and clearing the journal on it would forget an attempt that may have
+  made a live key. The body has to finish; it does not have to parse.
+- **The hash is durable before anything else.** Before the update that applies
+  restrictions, before the guardrail assignment, before the receiver. Until that
+  write lands the process holds the only record that the key exists.
+- **Restrictions and the guardrail are verified before delivery.** `POST /keys`
+  has no `disabled` field, so a disabled key is born enabled and restricted by
+  the update that follows; that update and the assignment are then read back and
+  compared. The receiver cannot run until both check out.
+- **The receiver runs at most once.** A definite rejection holds the operation
+  at `secured` with a refusal marker the state API reads to refuse a second
+  invocation. A lost acknowledgement is `delivery_ambiguous` and is never
+  retried: the receiver may already have committed the secret.
+- **A failure after the hash is durable tries to disable the key**, confirms
+  that by reading it back, keeps the hash tracked either way, and says so. A
+  failure *at* the hash write sends nothing further at all — the rule is that
+  the hash is on disk before any follow-up call, and a disable would be one.
+  The report names the hash, and `recover resolve --leaked-hash` binds it
+  before disabling it.
+- **The plaintext exists only in memory**, between the response being parsed and
+  the receiver returning. It is never written to state, a log, stdout, stderr,
+  JSON, argv, an environment variable, or a temporary file, and it is never
+  printed as a fallback. A key with no configured receiver is never created.
+
+Creations run one at a time, and the whole apply stops at the first unresolved
+operation — the state API enforces the same rule from below, refusing to start a
+second operation while one stands. Everything an unresolved one leaves behind is
+handled by `keymaster recover`.
+
+One phase needs no operator: `delivered`. The transaction is over and only the
+local promotion is outstanding, so `apply` completes it under its lock before it
+plans, and says so in a warning.
 
 ## Credentials
 

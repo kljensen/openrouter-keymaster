@@ -52,8 +52,16 @@ struct VersionProbe {
 }
 
 /// A point in the write path at which a test can force a failure.
+///
+/// The four stand for the two things a crash can do to one journal entry.
+/// [`Fault::BeforeTemp`], [`Fault::DuringWrite`], and [`Fault::BeforeRename`]
+/// stop before the rename, so the phase does not land: they are "interrupted
+/// immediately before this durable phase". [`Fault::AfterRename`] stops during
+/// the parent-directory sync, so the phase *has* landed and the run still
+/// fails: "interrupted immediately after this durable phase". ADR-0002's
+/// interruption table is exactly the set of answers those two produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Fault {
+pub enum Fault {
     /// Before the temporary file is created.
     BeforeTemp,
     /// After the bytes are written, before they are flushed and synced.
@@ -64,20 +72,90 @@ pub(super) enum Fault {
     AfterRename,
 }
 
-/// Which fault, if any, this state file injects. Production callers inject
-/// none; the field exists so the durability tests exercise the real path
-/// rather than a copy of it.
-#[derive(Debug, Clone, Copy, Default)]
-pub(super) struct Faults(Option<Fault>);
+impl Fault {
+    /// Parses the spelling used in [`STATE_FAULT_VAR`].
+    #[cfg(any(test, feature = "fault-injection"))]
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "before_temp" => Some(Self::BeforeTemp),
+            "during_write" => Some(Self::DuringWrite),
+            "before_rename" => Some(Self::BeforeRename),
+            "after_rename" => Some(Self::AfterRename),
+            _ => None,
+        }
+    }
+}
+
+/// Which fault, if any, this state file injects, and at which write.
+///
+/// Production callers inject none; the field exists so the durability tests
+/// exercise the real path rather than a copy of it. One journaled create makes
+/// several writes in a fixed order, so the *ordinal* is what selects a phase:
+/// `nth` counts calls to [`StateLock::write`] on this file, from one.
+#[derive(Debug, Clone, Default)]
+pub struct Faults {
+    fault: Option<Fault>,
+    nth: usize,
+    writes: std::cell::Cell<usize>,
+}
 
 impl Faults {
-    fn check(self, stage: Fault) -> io::Result<()> {
-        if self.0 == Some(stage) {
+    /// Injects nothing.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Fails the `nth` write, counting from one, at `fault`.
+    #[must_use]
+    pub fn at(fault: Fault, nth: usize) -> Self {
+        Self {
+            fault: Some(fault),
+            nth,
+            writes: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Reads the fault this process was asked to inject.
+    ///
+    /// Compiled only for the crate's own tests and for the `fault-injection`
+    /// feature, which exists so binary-level tests can interrupt a real run at
+    /// a real durable phase. A production build has no such variable to read:
+    /// this function is not in it.
+    #[cfg(any(test, feature = "fault-injection"))]
+    fn from_env() -> Self {
+        let Ok(value) = std::env::var(STATE_FAULT_VAR) else {
+            return Self::none();
+        };
+        let (stage, nth) = value.split_once('@').unwrap_or((value.as_str(), "1"));
+        match (Fault::parse(stage.trim()), nth.trim().parse::<usize>()) {
+            (Some(fault), Ok(nth)) if nth > 0 => Self::at(fault, nth),
+            _ => Self::none(),
+        }
+    }
+
+    /// Counts one write. Called once per [`StateLock::write`], before any
+    /// stage is checked, so `nth` names a write rather than a stage.
+    fn begin(&self) {
+        self.writes.set(self.writes.get().saturating_add(1));
+    }
+
+    fn check(&self, stage: Fault) -> io::Result<()> {
+        if self.fault == Some(stage) && self.writes.get() == self.nth {
             return Err(io::Error::other(format!("injected fault at {stage:?}")));
         }
         Ok(())
     }
 }
+
+/// Names the durable phase a test asks a run to be interrupted at, as
+/// `<stage>@<nth>` — for example `before_rename@2`.
+///
+/// Only read when the `fault-injection` feature is compiled in, which the
+/// production build does not do. Tests use it to stop a real `keymaster` run
+/// immediately before or immediately after one journal entry lands.
+#[cfg(any(test, feature = "fault-injection"))]
+pub const STATE_FAULT_VAR: &str = "KEYMASTER_STATE_FAULT";
 
 /// The state file on disk.
 #[derive(Debug, Clone)]
@@ -92,7 +170,10 @@ impl StateFile {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
-            faults: Faults::default(),
+            #[cfg(any(test, feature = "fault-injection"))]
+            faults: Faults::from_env(),
+            #[cfg(not(any(test, feature = "fault-injection")))]
+            faults: Faults::none(),
         }
     }
 
@@ -228,12 +309,12 @@ impl StateFile {
         }
     }
 
-    /// Builds a state file that fails at one point of the write path.
+    /// Builds a state file that fails at one point of its first write.
     #[cfg(test)]
     pub(super) fn with_fault(path: impl Into<PathBuf>, fault: Fault) -> Self {
         Self {
             path: path.into(),
-            faults: Faults(Some(fault)),
+            faults: Faults::at(fault, 1),
         }
     }
 }
@@ -316,7 +397,8 @@ impl StateLock<'_> {
     /// The temporary-file, fsync, rename, sync-parent sequence.
     fn persist(&self, bytes: &[u8]) -> Result<(), StateError> {
         let path = &self.file.path;
-        let faults = self.file.faults;
+        let faults = &self.file.faults;
+        faults.begin();
 
         let write = || -> io::Result<()> {
             faults.check(Fault::BeforeTemp)?;
@@ -352,7 +434,7 @@ impl Drop for StateLock<'_> {
 }
 
 /// Writes the bytes and makes them durable.
-fn write_durably(file: &File, bytes: &[u8], faults: Faults) -> io::Result<()> {
+fn write_durably(file: &File, bytes: &[u8], faults: &Faults) -> io::Result<()> {
     let mut file = file;
     io::Write::write_all(&mut file, bytes)?;
     faults.check(Fault::DuringWrite)?;
@@ -362,7 +444,7 @@ fn write_durably(file: &File, bytes: &[u8], faults: Faults) -> io::Result<()> {
 
 /// Syncs a directory so a rename inside it is durable, after the fault
 /// injection point that stands in for that sync failing.
-fn sync_directory(directory: &Path, faults: Faults) -> io::Result<()> {
+fn sync_directory(directory: &Path, faults: &Faults) -> io::Result<()> {
     faults.check(Fault::AfterRename)?;
     sync_directory_now(directory)
 }

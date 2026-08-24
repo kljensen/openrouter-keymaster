@@ -13,10 +13,12 @@
 //! The two writing commands take the exclusive state lock first and reload
 //! everything under it. [`import`] makes no remote write at all — it reads one
 //! remote object and records a binding — and [`apply`] converges guardrails,
-//! existing keys, and assignments, verifying what it wrote.
+//! keys, and assignments, verifying what it wrote, and runs the journaled
+//! creation transaction for a planned key.
 
 pub mod apply;
 pub mod import;
+mod issuance;
 
 use std::fmt::Display;
 use std::io::Write;

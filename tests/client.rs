@@ -174,10 +174,12 @@ fn a_structured_api_error_keeps_its_code_and_message() {
             status,
             code,
             message,
+            body_complete,
         } => {
             assert_eq!(status, 404);
             assert_eq!(code, Some(404));
             assert_eq!(message.as_deref(), Some("Not found"));
+            assert!(body_complete, "this body arrived whole");
         }
         other => panic!("expected a status error, got {other:?}"),
     }
@@ -688,10 +690,11 @@ fn raw_client(server: &RawServer) -> Client {
 }
 
 #[test]
-fn a_rejection_stays_a_rejection_when_its_body_cannot_be_read() {
-    // A 400 means the request was refused whether or not its explanation
-    // arrives. Reporting the truncated body instead would throw the status
-    // away, turning a definite answer into an ambiguous one.
+fn a_status_survives_a_body_that_cannot_be_read() {
+    // The status is the most informative thing left when the body stops
+    // partway through, so it is what gets reported: "HTTP 400" names what
+    // happened, "the connection dropped" does not. What it is *not* is proof —
+    // see `a_rejection_whose_body_stopped_short_is_not_a_definite_rejection`.
     let server = RawServer::scripted(vec![truncated_body_with_status(
         400,
         r#"{"error": {"code": 400, "mess"#,
@@ -703,7 +706,7 @@ fn a_rejection_stays_a_rejection_when_its_body_cannot_be_read() {
 
     assert_eq!(failure.kind(), "http_status");
     assert_eq!(failure.status(), Some(400));
-    // Definite, so not retried.
+    // 4xx is not retried whatever became of its body.
     server.assert_request_count(1);
 }
 
@@ -751,9 +754,14 @@ fn a_rate_limit_with_an_unreadable_body_is_still_retried() {
 }
 
 #[test]
-fn a_create_refused_with_a_truncated_body_is_a_definite_rejection() {
-    // The case ADR-0002 turns on. A 400 means no key was created, so this must
-    // not become an ambiguous failure that sends an operator to `recover`.
+fn a_rejection_whose_body_stopped_short_is_not_a_definite_rejection() {
+    // The case ADR-0002 turns on, and the direction is the opposite of what the
+    // status alone suggests. A definite rejection needs a *well-formed* 4xx:
+    // the server saw the request, refused it, and said so in a response that
+    // arrived whole. Here the status line arrived and the exchange then failed,
+    // so what the server did with the request is unknown — and a create
+    // classified as definite on that evidence would clear a journal entry for
+    // an attempt that may have made a live key.
     let server = RawServer::scripted(vec![truncated_body_with_status(
         400,
         r#"{"error": {"code": 400, "mess"#,
@@ -767,10 +775,89 @@ fn a_create_refused_with_a_truncated_body_is_a_definite_rejection() {
     assert_eq!(
         failure.status(),
         Some(400),
-        "a definite rejection must keep its status, or recovery cannot tell it \
-         from a create that may have happened"
+        "the status is still the most useful thing to report"
+    );
+    assert!(
+        !failure.is_definite_rejection(),
+        "but it is not proof the request was declined: {failure}"
+    );
+    assert!(
+        failure
+            .to_string()
+            .contains("stopped before its body finished"),
+        "and the message says why: {failure}"
     );
     server.assert_request_count(1);
+}
+
+#[test]
+fn a_rejection_whose_body_arrived_whole_is_a_definite_rejection() {
+    // The other side of the same rule, so the one above cannot pass by making
+    // every 4xx ambiguous. This response completes, so the server processed the
+    // request and declined it, and no key exists.
+    let server = TestServer::start();
+    server.mount(
+        Mock::given(method("POST"))
+            .and(path("/api/v1/keys"))
+            .respond_with(json_response(
+                400,
+                &api_error(400, "limit_reset is not valid"),
+            )),
+    );
+
+    let failure = client(&server)
+        .create_key_once(&create_request())
+        .expect_err("a 400 refuses the create");
+
+    assert!(
+        failure.is_definite_rejection(),
+        "a complete 4xx proves nothing was created: {failure}"
+    );
+    assert!(
+        !failure
+            .to_string()
+            .contains("stopped before its body finished"),
+        "{failure}"
+    );
+    server.assert_request_count(1);
+}
+
+#[test]
+fn a_body_that_arrived_whole_is_a_definite_rejection_even_if_it_is_not_json() {
+    // What makes a rejection definite is that the response *finished*, not that
+    // its body parsed. A server that answers 400 with a plain sentence has
+    // still processed the request and declined it.
+    let server = TestServer::start();
+    server.mount(
+        Mock::given(method("POST"))
+            .and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(400).set_body_raw("nope", "text/plain")),
+    );
+
+    let failure = client(&server)
+        .create_key_once(&create_request())
+        .expect_err("a 400 refuses the create");
+
+    assert!(failure.is_definite_rejection(), "{failure}");
+}
+
+#[test]
+fn a_server_error_is_never_a_definite_rejection_however_complete_its_body() {
+    let server = TestServer::start();
+    server.mount(
+        Mock::given(method("POST"))
+            .and(path("/api/v1/keys"))
+            .respond_with(json_response(500, &api_error(500, "server exploded"))),
+    );
+
+    let failure = client(&server)
+        .create_key_once(&create_request())
+        .expect_err("a 500 is an error");
+
+    assert!(
+        !failure.is_definite_rejection(),
+        "a 5xx says nothing about whether the request was applied: {failure}"
+    );
 }
 
 #[test]

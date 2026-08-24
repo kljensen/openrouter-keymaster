@@ -471,21 +471,25 @@ fn timed_out(error: &io::Error) -> bool {
 
 /// The error a status justifies on its own, when the body cannot be read.
 ///
-/// A redirect and a rejection are complete without their body: the body carries
-/// a human-readable message and nothing Keymaster decides from. Reporting the
-/// body's failure instead would throw the status away, and that matters most
-/// where it is least recoverable — ADR-0002 rests on telling a definite 4xx,
-/// which means the key was not created, from an ambiguous failure, which means
-/// it may have been. A create refused with 400 and a truncated body must stay a
-/// refusal rather than sending an operator to `keymaster recover`.
+/// A redirect and a rejection say more than the read failure that followed
+/// them: the body carries a human-readable message and nothing Keymaster
+/// decides from, so reporting "the connection dropped" instead would throw away
+/// the one fact that names what happened.
 ///
 /// 2xx and 5xx are absent deliberately. A success is its body, so a success
 /// without one is not a success; and a 5xx is ambiguous whether or not its body
 /// arrives, so nothing is gained by preferring it to the read failure.
+///
+/// "Complete without their body" is about the *diagnostic*, not about what the
+/// exchange proves. The error built here records that the body did not arrive,
+/// so [`ApiError::is_definite_rejection`] refuses it: a 400 whose response
+/// stopped partway through still leaves it unknown whether `POST /keys` created
+/// a key, and ADR-0002 requires a well-formed 4xx before a journal entry is
+/// cleared.
 fn definitive_without_body(status: u16) -> Option<ApiError> {
     (300..500)
         .contains(&status)
-        .then(|| ApiError::from_status(status, &[]))
+        .then(|| ApiError::from_incomplete_status(status))
 }
 
 /// What one attempt produced, and whether repeating it is allowed.

@@ -155,6 +155,49 @@ impl Project {
     /// to `arguments`.
     #[must_use]
     pub fn run_at(&self, state: &Path, arguments: &[&str]) -> Output {
+        self.run_at_with(state, arguments, &[])
+    }
+
+    /// Runs the binary against a base URL other than this project's own
+    /// server.
+    ///
+    /// For the handful of answers `wiremock` cannot express — a body that stops
+    /// before its declared length — which `RawServer` writes onto the socket
+    /// directly. The configuration, the state file, and the credential are this
+    /// project's; only where the requests go differs.
+    #[must_use]
+    pub fn run_against(&self, base_url: &str, arguments: &[&str]) -> Output {
+        let mut command = Command::cargo_bin("keymaster").expect("the binary builds");
+        command
+            .env_remove(CREDENTIAL_VAR)
+            .env_remove(BASE_URL_VAR)
+            .env(CREDENTIAL_VAR, SECRET_SENTINEL_KEY)
+            .env(BASE_URL_VAR, base_url)
+            .arg("--config")
+            .arg(self.config_path())
+            .arg("--state")
+            .arg(self.state_path())
+            .args(arguments);
+        command.output().expect("the binary runs")
+    }
+
+    /// Runs the binary with extra environment variables set.
+    ///
+    /// The only current use is `KEYMASTER_STATE_FAULT`, which the
+    /// `fault-injection` feature reads to stop a real run at a named durable
+    /// phase. Nothing here relaxes the isolation the other runners have: the
+    /// credential and base URL are still removed before they are set.
+    #[must_use]
+    pub fn run_with(&self, arguments: &[&str], environment: &[(&str, &str)]) -> Output {
+        self.run_at_with(&self.state_path(), arguments, environment)
+    }
+
+    fn run_at_with(
+        &self,
+        state: &Path,
+        arguments: &[&str],
+        environment: &[(&str, &str)],
+    ) -> Output {
         let mut command = Command::cargo_bin("keymaster").expect("the binary builds");
         command
             .env_remove(CREDENTIAL_VAR)
@@ -166,6 +209,9 @@ impl Project {
             .arg("--state")
             .arg(state)
             .args(arguments);
+        for (name, value) in environment {
+            command.env(name, value);
+        }
         command.output().expect("the binary runs")
     }
 

@@ -11,6 +11,19 @@ publish = false
 # to be told which one is the program.
 default-run = "keymaster"
 
+[features]
+# Lets a test interrupt a real `keymaster` run at a named durable phase, by
+# setting `KEYMASTER_STATE_FAULT`. ADR-0002 requires crash coverage immediately
+# before and after every journal entry, and the only faithful way to get it is
+# to stop the production write path at that exact point rather than to
+# reimplement the transaction in a test.
+#
+# Off by default and never in a release build: `just check` runs
+# `cargo check --locked --all-targets` with no features, which is the shape
+# shipped, and `cargo test --all-features`, which is the shape tested. The
+# `keymaster` binary reads the variable only when this feature is compiled in.
+fault-injection = []
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 # URL path segments and query values are percent-encoded before they reach the

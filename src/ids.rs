@@ -8,8 +8,10 @@
 //! credential where an identifier belongs must not see it echoed back.
 
 use std::fmt;
+use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 /// Longest accepted local address. Long enough for a descriptive name, short
 /// enough that an address is readable in a plan or an error.
@@ -284,6 +286,33 @@ impl OperationId {
         Ok(Self(value.to_owned()))
     }
 
+    /// Mints an identifier for one attempt, beginning at `at`.
+    ///
+    /// Two components, and both earn their place. The instant lets an operator
+    /// reading a journal entry line it up against an OpenRouter audit log
+    /// without consulting anything else — which matters most in exactly the
+    /// case this identifier exists for, an attempt whose response was lost. The
+    /// random token makes a collision impossible in practice: two attempts in
+    /// the same second, or two machines sharing a state file that ADR-0001 says
+    /// they should not, would otherwise mint the same name for different
+    /// operations.
+    ///
+    /// Infallible by construction: every character produced here is one
+    /// [`OperationId::parse`] accepts, and nothing about a timestamp or a
+    /// hexadecimal token can be credential-shaped.
+    #[must_use]
+    pub fn mint(at: OffsetDateTime) -> Self {
+        // Seeded by the operating system, as in `files::temporary_name`. This
+        // names an attempt; it is not a secret and nothing authenticates with
+        // it, so an unpredictable-but-not-cryptographic token is the right
+        // strength.
+        let token = RandomState::new().build_hasher().finish();
+        Self(format!(
+            "op-{seconds}-{token:016x}",
+            seconds = at.unix_timestamp()
+        ))
+    }
+
     /// The identifier as written.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -528,6 +557,28 @@ mod tests {
                 "{rejected}"
             );
         }
+    }
+
+    #[test]
+    fn a_minted_operation_id_parses_and_is_unique() {
+        let at = OffsetDateTime::from_unix_timestamp(1_767_225_600).expect("a valid instant");
+        let minted = OperationId::mint(at);
+
+        assert!(
+            minted.as_str().starts_with("op-1767225600-"),
+            "a minted id carries the instant it names: {minted}"
+        );
+        assert_eq!(
+            OperationId::parse(minted.as_str()),
+            Ok(minted.clone()),
+            "a minted id must survive the parser that reads it back from state"
+        );
+
+        let again = OperationId::mint(at);
+        assert_ne!(
+            minted, again,
+            "two attempts in the same second must not share a name"
+        );
     }
 
     #[test]

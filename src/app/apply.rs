@@ -20,12 +20,23 @@
 //! guardrail that exists and is not recorded is one only its mutable name could
 //! find again, which is exactly the situation ADR-0001 exists to avoid.
 //!
+//! # Creating a key is its own transaction
+//!
+//! A planned key `create` runs the journaled transaction in
+//! [`super::issuance`], which is the only thing here that issues secret
+//! material. It sits inside the key phase like any other write, but it obeys
+//! ADR-0002's rules rather than this module's: exactly one `POST /keys`, a
+//! durable journal entry on either side of every non-idempotent step, and no
+//! second attempt at anything. Any outcome other than a delivered, promoted key
+//! ends the whole run, because an unresolved operation may have made a live
+//! credential no local record names.
+//!
+//! A `replace` is still skipped. Staging a successor beside a live predecessor
+//! is #19's, and the transaction it will use is the one already here.
+//!
 //! # What apply will not do
 //!
-//! - **Create or replace an inference key.** That is a one-time secret with a
-//!   journal of its own (ADR-0002), and it belongs to #16 and #19. A planned
-//!   create or replace is skipped, conspicuously, and the run says the
-//!   configuration is not fully converged.
+//! - **Replace an inference key.** See above: #19 owns rotation.
 //! - **Resolve what holds a write back.** An action whose dependency needs an
 //!   operator — an adoption, a missing resource, an unfinished operation — is
 //!   reported as held back, naming what it waits on. An apply that wrote
@@ -62,17 +73,25 @@ use crate::ids::Address;
 use crate::output::Renderer;
 use crate::plan::{self, Action, ActionKind, Identity, Plan, Reason, ResourceAddress};
 use crate::report::{ActionOutcome, ApplyReport};
-use crate::state::{KeyBinding, State, StateFile, StateLock};
+use crate::state::{KeyBinding, Phase as JournalPhase, State, StateFile, StateLock};
 
-/// Why a planned key create or replace is not made.
-const ISSUANCE_SKIPPED: &str = "skipped: `keymaster apply` does not create or replace inference \
-                                keys yet, because issuing a one-time secret needs the journaled \
-                                transaction of #16";
+use super::issuance::Issuer;
 
-/// Why an assignment planned beside a skipped create or replace is not made.
-const ASSIGNMENT_AWAITING_ISSUANCE: &str = "not attempted: this assignment belongs to the key the skipped create or replace would have \
-     produced, and #16 owns that. Assigning what the address holds now would point a key the \
+/// Why a planned key replacement is not made.
+const REPLACEMENT_SKIPPED: &str = "skipped: `keymaster apply` does not replace an inference key \
+                                   yet. Staging a successor beside a live predecessor is #19's; \
+                                   the journaled transaction it will use is already here, and \
+                                   `keymaster recover replace` runs it for a key whose plaintext \
+                                   is gone.";
+
+/// Why an assignment planned beside a skipped replacement is not made.
+const ASSIGNMENT_AWAITING_ISSUANCE: &str = "not attempted: this assignment belongs to the key the skipped replacement would have \
+     produced, and #19 owns that. Assigning what the address holds now would point a key the \
      configuration is replacing at its successor's guardrail.";
+
+/// Why an assignment beside a completed creation needs no separate write.
+const ASSIGNMENT_ISSUED: &str = "the key was attached to its guardrail as part of the journaled \
+                                 creation, and verified, before its plaintext was delivered";
 
 /// Why an assignment whose key does not exist is not made.
 const ASSIGNMENT_WITHOUT_KEY: &str =
@@ -102,6 +121,12 @@ pub(super) fn run<O: Write, E: Write>(
     let config = Config::load(&cli.config)?;
     let mut state = lock.read()?;
 
+    // Before anything is planned: a delivered operation is finished remotely,
+    // and what is left of it — promotion — touches nothing outside this file.
+    // Completing it here means the plan this run executes describes the world
+    // as it now is, rather than one holding an operation that is already over.
+    let promoted = fast_forward(&lock, &mut state)?;
+
     let client = Client::from_env()?;
     let reader = Reader::new(&client);
     let writer = Writer::new(&client);
@@ -112,15 +137,19 @@ pub(super) fn run<O: Write, E: Write>(
 
     let mut apply = Apply {
         config: &config,
+        client: &client,
+        reader: &reader,
         writer: &writer,
         lock: &lock,
         stopped: false,
         awaiting_issuance: BTreeSet::new(),
+        issued: BTreeSet::new(),
     };
     let mut outcomes = apply.execute(&plan, &mut state);
     let failure = verify(&plan, &config, &state, &reader, &mut outcomes);
 
-    let report = ApplyReport::new(&plan, &outcomes, failure);
+    let mut report = ApplyReport::new(&plan, &outcomes, failure);
+    report.note(promoted);
     super::write(renderer, &report, report.warnings())?;
 
     if report.succeeded() {
@@ -131,6 +160,50 @@ pub(super) fn run<O: Write, E: Write>(
     }
     let (failed, unverified) = report.unresolved();
     Err(ApplyError::Unresolved { failed, unverified }.into())
+}
+
+/// Completes a delivered operation, before this run plans anything.
+///
+/// `delivered` is the one unfinished phase that needs no operator. The key
+/// exists, its restrictions were verified, and the receiver acknowledged the
+/// plaintext; all that is left is promoting the hash to current, which is a
+/// local state operation with no external effect (ADR-0002). The planner
+/// documents this contract — it reports the phase as
+/// [`crate::plan::Reason::PromotionPending`] and holds nothing back — and this
+/// is the other half of it.
+///
+/// It must happen before the plan is computed rather than during the run,
+/// because the operation is also what `begin_create` refuses to start a second
+/// one beside: planning first would produce a plan whose creates state would
+/// then decline.
+///
+/// Returns the sentence explaining what was completed, when anything was.
+///
+/// # Errors
+///
+/// Returns [`ApplyError::Promotion`] when the promotion is refused, and the
+/// state errors of making it durable. Nothing remote is touched either way.
+fn fast_forward(lock: &StateLock<'_>, state: &mut State) -> Result<Option<String>, Error> {
+    let Some((address, pending)) = state.pending_operation() else {
+        return Ok(None);
+    };
+    if pending.phase != JournalPhase::Delivered {
+        return Ok(None);
+    }
+    let (address, operation) = (address.clone(), pending.id.clone());
+
+    state
+        .promote_key(&address, now())
+        .map_err(|error| ApplyError::Promotion {
+            address: address.clone(),
+            message: error.to_string(),
+        })?;
+    lock.write(state)?;
+
+    Ok(Some(format!(
+        "operation {operation} delivered `{address}`'s key and stopped before promoting it; this \
+         run completed that promotion locally, which touches nothing remote"
+    )))
 }
 
 /// The fixed order the phases run in.
@@ -160,13 +233,19 @@ const fn phase_of(address: &ResourceAddress) -> Option<Phase> {
 /// One apply's writes.
 struct Apply<'a> {
     config: &'a Config,
+    client: &'a Client,
+    reader: &'a Reader<'a>,
     writer: &'a Writer<'a>,
     lock: &'a StateLock<'a>,
     /// Set by the first failed write. Nothing is attempted after it: a later
     /// action may depend on the one that failed, and a run that pressed on
     /// would report a second failure caused by the first.
+    ///
+    /// An unresolved key creation sets it too, and there the rule is not
+    /// merely tidy: ADR-0002 stops the whole apply at the first operation whose
+    /// outcome nobody knows.
     stopped: bool,
-    /// Key addresses whose create or replace was skipped.
+    /// Key addresses whose replacement was skipped.
     ///
     /// The assignment an issuance is planned with belongs to the key that
     /// issuance would produce, not to whatever the address holds now. For a
@@ -174,6 +253,12 @@ struct Apply<'a> {
     /// successor's guardrail would change what an existing credential may do —
     /// on the strength of a key that was never created.
     awaiting_issuance: BTreeSet<Address>,
+    /// Key addresses whose creation completed during this run.
+    ///
+    /// Their assignment was made and verified inside the transaction, before
+    /// the plaintext was delivered, so the assignment action beside the create
+    /// has nothing left to send.
+    issued: BTreeSet<Address>,
 }
 
 impl Apply<'_> {
@@ -232,9 +317,10 @@ impl Apply<'_> {
             (ResourceAddress::Guardrail(address), ActionKind::Update) => {
                 self.update_guardrail(address, action)
             }
-            (ResourceAddress::Key(address), ActionKind::Create | ActionKind::Replace) => {
+            (ResourceAddress::Key(address), ActionKind::Create) => self.create_key(address, state),
+            (ResourceAddress::Key(address), ActionKind::Replace) => {
                 self.awaiting_issuance.insert(address.clone());
-                Ok(ActionOutcome::skipped(ISSUANCE_SKIPPED))
+                Ok(ActionOutcome::skipped(REPLACEMENT_SKIPPED))
             }
             (ResourceAddress::Key(address), ActionKind::Update) => self.update_key(address, action),
             (ResourceAddress::Assignment(address), ActionKind::Assign) => {
@@ -245,6 +331,31 @@ impl Apply<'_> {
                 "skipped: apply does not know how to execute this action",
             )),
         }
+    }
+
+    /// Creates, secures, delivers, and promotes one key.
+    ///
+    /// The whole of ADR-0002 is in [`Issuer::issue`]; what this adds is the
+    /// consequence for the run. Any outcome other than a delivered key is a
+    /// failed action, which stops apply — and that is the ADR's rule, not a
+    /// convenience: while an operation stands, the state API refuses to start
+    /// another, and an attempt whose outcome nobody knows must not be buried
+    /// under a second one.
+    fn create_key(
+        &mut self,
+        address: &Address,
+        state: &mut State,
+    ) -> Result<ActionOutcome, String> {
+        let issuer = Issuer {
+            config: self.config,
+            client: self.client,
+            reader: self.reader,
+            writer: self.writer,
+            lock: self.lock,
+        };
+        let issued = issuer.issue(address, state, now())?;
+        self.issued.insert(address.clone());
+        Ok(ActionOutcome::applied(issued.detail))
     }
 
     /// Creates a guardrail and records its identity before anything else runs.
@@ -340,6 +451,9 @@ impl Apply<'_> {
     /// a live predecessor at the successor's guardrail would change what an
     /// existing credential may do for a key that does not exist.
     fn assign(&self, address: &Address, state: &State) -> Result<ActionOutcome, String> {
+        if self.issued.contains(address) {
+            return Ok(ActionOutcome::applied(ASSIGNMENT_ISSUED));
+        }
         if self.awaiting_issuance.contains(address) {
             return Ok(ActionOutcome::not_attempted(ASSIGNMENT_AWAITING_ISSUANCE));
         }
@@ -540,6 +654,19 @@ pub enum ApplyError {
         /// How many attempted writes could not be confirmed.
         unverified: usize,
     },
+
+    /// A delivered key could not be promoted to current.
+    #[error(
+        "`{address}` has a delivered key that could not be promoted to current: {message}. \
+         Nothing remote is outstanding — promotion is a local state operation — but apply will \
+         not plan against an operation it could not complete."
+    )]
+    Promotion {
+        /// The local address.
+        address: Address,
+        /// Why the promotion was refused.
+        message: String,
+    },
 }
 
 impl ApplyError {
@@ -549,6 +676,7 @@ impl ApplyError {
         match self {
             Self::Blocked => "apply_blocked",
             Self::Unresolved { .. } => "apply_unresolved",
+            Self::Promotion { .. } => "apply_promotion",
         }
     }
 }

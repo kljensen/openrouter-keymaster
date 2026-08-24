@@ -52,16 +52,23 @@ pub enum ApiError {
     },
 
     /// OpenRouter refused the credential.
-    #[error("OpenRouter rejected the management credential (HTTP {status}){}", detail(.message))]
+    #[error(
+        "OpenRouter rejected the management credential (HTTP {status}){}{}",
+        detail(.message),
+        incomplete(*.body_complete)
+    )]
     Authentication {
         /// The HTTP status, 401 or 403.
         status: u16,
         /// OpenRouter's own message, redacted, when it sent one.
         message: Option<String>,
+        /// Whether the response body was read to the end. See
+        /// [`ApiError::is_definite_rejection`].
+        body_complete: bool,
     },
 
     /// OpenRouter answered with an error status.
-    #[error("OpenRouter returned HTTP {status}{}", detail(.message))]
+    #[error("OpenRouter returned HTTP {status}{}{}", detail(.message), incomplete(*.body_complete))]
     Status {
         /// The HTTP status.
         status: u16,
@@ -69,6 +76,9 @@ pub enum ApiError {
         code: Option<i64>,
         /// The `error.message` field of the response body, redacted.
         message: Option<String>,
+        /// Whether the response body was read to the end. See
+        /// [`ApiError::is_definite_rejection`].
+        body_complete: bool,
     },
 
     /// OpenRouter answered with a redirect.
@@ -125,8 +135,7 @@ impl ApiError {
         }
     }
 
-    /// The HTTP status Keymaster saw, when it saw one. Callers use this to tell
-    /// a definite rejection from an ambiguous failure (ADR-0002).
+    /// The HTTP status Keymaster saw, when it saw one.
     #[must_use]
     pub const fn status(&self) -> Option<u16> {
         match self {
@@ -134,6 +143,34 @@ impl ApiError {
             | Self::Status { status, .. }
             | Self::Redirected { status } => Some(*status),
             _ => None,
+        }
+    }
+
+    /// Whether this answer proves the server processed the request and declined
+    /// it without applying it.
+    ///
+    /// The one question ADR-0002 asks of a failed `POST /keys`, and the reason
+    /// the status alone will not answer it. A definite rejection needs a
+    /// *well-formed* 4xx: the server saw the request, refused it, and said so
+    /// in a response that arrived whole. A 4xx status line followed by a body
+    /// that stops partway through is a different thing — the status is the last
+    /// complete fact Keymaster has, the exchange failed after it, and treating
+    /// that as proof that nothing was created would clear a journal entry for
+    /// an attempt that may have made a live key.
+    ///
+    /// So both halves are required. A 3xx is never a rejection either: it is a
+    /// redirect Keymaster refuses to follow, and what the server would have
+    /// done with the request is unknown.
+    #[must_use]
+    pub const fn is_definite_rejection(&self) -> bool {
+        match self {
+            Self::Authentication { body_complete, .. } => *body_complete,
+            Self::Status {
+                status,
+                body_complete,
+                ..
+            } => *body_complete && *status >= 400 && *status < 500,
+            _ => false,
         }
     }
 
@@ -151,11 +188,27 @@ impl ApiError {
         }
     }
 
-    /// Classifies a failed HTTP exchange.
+    /// Classifies a failed HTTP exchange whose body arrived whole.
     ///
     /// `body` is the response body as read, which may be JSON, may be a plain
-    /// string, and may be neither.
+    /// string, and may be neither. What matters for
+    /// [`ApiError::is_definite_rejection`] is not that it parsed but that it
+    /// *finished*: a server that sent a complete response processed the request
+    /// and answered it, whatever it chose to put in the body.
     pub(super) fn from_status(status: u16, body: &[u8]) -> Self {
+        Self::classify(status, body, true)
+    }
+
+    /// Classifies a failed exchange whose body could not be read to the end.
+    ///
+    /// The status is worth keeping — it is more informative than the read
+    /// failure that followed it — but it is not a complete answer, and
+    /// [`ApiError::is_definite_rejection`] says so.
+    pub(super) fn from_incomplete_status(status: u16) -> Self {
+        Self::classify(status, &[], false)
+    }
+
+    fn classify(status: u16, body: &[u8], body_complete: bool) -> Self {
         if (300..400).contains(&status) {
             return Self::Redirected { status };
         }
@@ -163,12 +216,17 @@ impl ApiError {
         let reported = ReportedError::parse(body);
         let message = reported.as_ref().map(|error| excerpt(&error.message));
         if status == 401 || status == 403 {
-            return Self::Authentication { status, message };
+            return Self::Authentication {
+                status,
+                message,
+                body_complete,
+            };
         }
         Self::Status {
             status,
             code: reported.and_then(|error| error.code),
             message,
+            body_complete,
         }
     }
 }
@@ -192,6 +250,20 @@ fn excerpt(message: &str) -> String {
     let mut truncated: String = redacted.chars().take(MAX_DETAIL).collect();
     truncated.push('…');
     truncated
+}
+
+/// Says so when the answer stopped before its body finished.
+///
+/// Worth a phrase in the message rather than only a field, because the two
+/// failures read identically otherwise and they mean opposite things for a
+/// create: one says the key was not made, the other says nobody knows.
+fn incomplete(body_complete: bool) -> &'static str {
+    if body_complete {
+        ""
+    } else {
+        " (the response stopped before its body finished, so what the server did with the \
+         request is unknown)"
+    }
 }
 
 /// Renders an optional remote message as a suffix.

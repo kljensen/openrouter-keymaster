@@ -792,59 +792,6 @@ fn a_replacement_an_unfinished_operation_holds_back_is_not_convergence_either() 
     );
 }
 
-#[test]
-fn a_planned_key_creation_is_skipped_and_says_which_issue_owns_it() {
-    let project = Project::new(CONFIG);
-    serve_guardrail_create(&project, NEW_RAIL_ID, "cheap-rail");
-    serve_writes(&project);
-    // Nothing is bound and nothing remote carries the key's name, so the plan
-    // proposes creating it — the one thing apply must not do.
-    project.observe_sequence(
-        vec![Vec::new()],
-        vec![Vec::new(), vec![converged_rail()]],
-        vec![Vec::new()],
-    );
-
-    let streams = project.succeed(&["--json", "apply"]);
-    let document = streams.document();
-
-    assert_eq!(
-        project.write_trace(),
-        vec!["POST /api/v1/guardrails".to_owned()],
-        "the guardrail is created; the key is not"
-    );
-    assert_eq!(document["outcome"], "incomplete");
-    let key = action(&document, "keys.jobfeed");
-    assert_eq!(key["kind"], "create");
-    assert_eq!(key["status"], "skipped");
-    assert!(
-        key["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains("#16")),
-        "the skip names the issue that will implement it: {key}"
-    );
-    assert_eq!(
-        action(&document, "keys.jobfeed.guardrail")["status"],
-        "not_attempted",
-        "and so is the assignment of a key that does not exist"
-    );
-    assert!(
-        document["warnings"]
-            .as_array()
-            .expect("a warning array")
-            .iter()
-            .any(|warning| warning
-                .as_str()
-                .is_some_and(|warning| warning.contains("not fully converged"))),
-        "an incomplete apply says so: {document}"
-    );
-    assert!(
-        streams.err.is_empty(),
-        "under --json a stream carries exactly one document: {}",
-        streams.err
-    );
-}
-
 /// A key whose generation rose: the planner proposes a replacement, which apply
 /// cannot make yet.
 const REPLACEMENT_CONFIG: &str = r#"
@@ -922,7 +869,7 @@ fn a_skipped_replacement_never_reassigns_the_key_it_would_have_replaced() {
     assert!(
         assignment["detail"]
             .as_str()
-            .is_some_and(|detail| detail.contains("#16")),
+            .is_some_and(|detail| detail.contains("#19")),
         "the assignment says it is waiting on the same issuance: {assignment}"
     );
     assert!(
