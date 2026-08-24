@@ -977,6 +977,40 @@ fn binding_a_guardrail_is_one_to_one_and_repeating_it_is_a_no_op() {
     );
 }
 
+#[test]
+fn a_recreated_guardrail_replaces_the_binding_to_the_one_that_is_gone() {
+    let gone = uuid("6c7f5f5a-4f1b-4e2d-9a3c-1b2d3e4f5a6b");
+    let fresh = uuid("11111111-2222-3333-4444-555555555555");
+    let cheap = address("cheap");
+    let rich = address("rich");
+
+    let mut state = State::new();
+    state
+        .bind_guardrail(&cheap, gone, Origin::Imported, at(0))
+        .expect("binding the guardrail that later disappears");
+
+    state
+        .replace_guardrail(&cheap, fresh.clone(), at(1))
+        .expect("recreating it");
+    let binding = state.guardrail(&cheap).expect("the new binding");
+    assert_eq!(binding.id, fresh);
+    assert_eq!(
+        binding.origin,
+        Origin::Created,
+        "the guardrail it now names is one Keymaster created"
+    );
+    assert_eq!(binding.bound_at, at(1));
+
+    // The one-to-one rule still holds: a UUID another address owns is refused.
+    assert_eq!(
+        state.replace_guardrail(&rich, fresh.clone(), at(2)),
+        Err(BindError::GuardrailOwnedElsewhere {
+            id: fresh,
+            owner: cheap,
+        })
+    );
+}
+
 // --- persistence -----------------------------------------------------------
 
 #[test]

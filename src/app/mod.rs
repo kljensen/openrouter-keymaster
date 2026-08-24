@@ -1,19 +1,21 @@
 //! Command dispatch.
 //!
-//! `plan`, `status`, and `import` are implemented; every other v0.1 command
-//! parses and fails with a typed [`Error::NotImplemented`] until its feature
-//! issue lands. Each match arm calls that feature's handler, which builds an
-//! output DTO for [`Renderer`] to write.
+//! `plan`, `status`, `import`, and `apply` are implemented; every other v0.1
+//! command parses and fails with a typed [`Error::NotImplemented`] until its
+//! feature issue lands. Each match arm calls that feature's handler, which
+//! builds an output DTO for [`Renderer`] to write.
 //!
 //! `plan` and `status` are strictly read-only: they parse the configuration,
 //! read state without locking or rewriting it, read a complete snapshot of
 //! OpenRouter, and print. No API write, no receiver invocation, and no state
 //! write happens on either path.
 //!
-//! [`import`] is the first command that writes anything. It takes the
-//! exclusive state lock and reloads state under it, and it makes no remote
-//! write at all: it reads one remote object and records a binding.
+//! The two writing commands take the exclusive state lock first and reload
+//! everything under it. [`import`] makes no remote write at all — it reads one
+//! remote object and records a binding — and [`apply`] converges guardrails,
+//! existing keys, and assignments, verifying what it wrote.
 
+pub mod apply;
 pub mod import;
 
 use std::fmt::Display;
@@ -42,6 +44,7 @@ pub fn run<O: Write, E: Write>(cli: &Cli, renderer: &mut Renderer<O, E>) -> Resu
         Command::Plan => plan_command(cli, renderer),
         Command::Status => status_command(cli, renderer),
         Command::Import { resource } => import::run(cli, resource, renderer),
+        Command::Apply => apply::run(cli, renderer),
         command => Err(Error::NotImplemented {
             command: command_path(command),
         }),
@@ -226,14 +229,14 @@ mod tests {
 
     #[test]
     fn an_unimplemented_command_reports_itself() {
-        let cli = Cli::parse_from(["keymaster", "apply"]);
+        let cli = Cli::parse_from(["keymaster", "rotate", "jobfeed"]);
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let mut renderer = Renderer::new(Format::Human, &mut out, &mut err);
 
-        let error = run(&cli, &mut renderer).expect_err("apply is not implemented yet");
+        let error = run(&cli, &mut renderer).expect_err("rotate is not implemented yet");
 
         assert_eq!(error.kind(), "not_implemented");
-        assert!(error.to_string().contains("apply"));
+        assert!(error.to_string().contains("rotate"));
         assert!(out.is_empty(), "an unimplemented command writes nothing");
     }
 

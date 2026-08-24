@@ -148,7 +148,8 @@ fn recover_resolve_requires_exactly_one_finding() {
 #[test]
 fn a_parsed_command_fails_with_an_application_error_on_stderr() {
     keymaster()
-        .arg("apply")
+        .arg("rotate")
+        .arg("jobfeed")
         .assert()
         .code(APPLICATION_ERROR)
         .stdout(predicate::str::is_empty())
@@ -157,8 +158,7 @@ fn a_parsed_command_fails_with_an_application_error_on_stderr() {
 
 #[test]
 fn every_unimplemented_command_parses_and_reaches_its_handler() {
-    let commands: [&[&str]; 8] = [
-        &["apply"],
+    let commands: [&[&str]; 7] = [
         &["rotate", "jobfeed"],
         &["recover", "inspect", "jobfeed"],
         &["recover", "resolve", "jobfeed", "--no-resource-created"],
@@ -178,11 +178,11 @@ fn every_unimplemented_command_parses_and_reaches_its_handler() {
     }
 }
 
-/// `plan`, `status`, and `import` are implemented, so "reaching the handler"
-/// means reading the configuration. Each is given a path that does not exist,
-/// which stops it before a client is built and therefore before any network
-/// call. `import` validates its identifier first, so the identifiers here are
-/// well formed.
+/// `plan`, `status`, `import`, and `apply` are implemented, so "reaching the
+/// handler" means reading the configuration. Each is given a path that does not
+/// exist, which stops it before a client is built and therefore before any
+/// network call. `import` validates its identifier first, so the identifiers
+/// here are well formed.
 #[test]
 fn the_implemented_commands_reach_their_handler_and_stop_at_the_configuration() {
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -192,9 +192,10 @@ fn the_implemented_commands_reach_their_handler_and_stop_at_the_configuration() 
     // default one, relative to wherever the test runner happens to be.
     let state = directory.path().join("state.json");
 
-    let commands: [&[&str]; 4] = [
+    let commands: [&[&str]; 5] = [
         &["plan"],
         &["status"],
+        &["apply"],
         &["import", "key", "jobfeed", "--hash", "sha256:aaaa"],
         &[
             "import",
@@ -237,7 +238,7 @@ fn plan_help_documents_that_exit_zero_covers_a_plan_with_changes() {
 #[test]
 fn json_diagnostics_are_one_uncolored_json_document() {
     let output = keymaster()
-        .args(["--json", "apply"])
+        .args(["--json", "rotate", "jobfeed"])
         .output()
         .expect("the binary runs");
 

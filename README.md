@@ -3,9 +3,10 @@
 A declarative OpenRouter management CLI, written in Rust.
 
 Keymaster is an early work in progress. The command-line surface below is
-final for v0.1. `plan`, `status`, and `import` are implemented end to end;
-every remaining command still fails with a "not implemented yet" error and
-exits 1.
+final for v0.1. `plan`, `status`, `import`, and `apply` are implemented end to
+end; every remaining command still fails with a "not implemented yet" error and
+exits 1. `apply` converges guardrails, existing keys, and assignments, but does
+not create or replace inference keys yet — that is #16.
 
 ## Build, run, and test
 
@@ -20,7 +21,7 @@ cargo test
 ```text
 keymaster plan                          show the changes an apply would make   [works]
 keymaster status                        report bindings and incomplete operations [works]
-keymaster apply                         converge OpenRouter with the configuration
+keymaster apply                         converge OpenRouter with the configuration [partly]
 keymaster import key NAME --hash HASH   bind an existing key by its hash      [works]
 keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID [works]
 keymaster rotate NAME                   stage a replacement key
@@ -155,6 +156,102 @@ they found it: `import_argument`, `import_not_configured`, `import_absent`,
 `import_owned_elsewhere`, `import_address_bound`, `import_refused`, and the
 `state_locked` and `state_write` categories from the lock and the write path.
 
+## Apply
+
+`keymaster apply` is the only command that writes to OpenRouter. It:
+
+1. takes the exclusive state lock;
+2. reloads the configuration and state under it;
+3. reads a complete snapshot of OpenRouter and **computes the plan again**;
+4. executes that plan in three fixed phases — guardrail creates and updates,
+   updates to keys that already exist, then assignment changes;
+5. records a created guardrail's UUID before anything else happens;
+6. reads OpenRouter again and reports, per action, whether the result was
+   verified.
+
+**The plan an operator read is never the plan that runs.** Step 3 is not an
+optimization: a plan printed a minute ago was computed against a snapshot that
+has since been replaced, and nothing carries a plan across the lock boundary,
+so there is nothing to go stale.
+
+**Verification is a replan, not a spot check.** An attempted action counts as
+verified when the recomputed plan's actions at that address are all no-ops —
+the same question the next run will ask, so a verified apply is one whose
+successor is a no-op. Nothing weaker counts. "No *executable* action there"
+would pass a key that vanished between the write and the read, which the
+planner reports as `missing` precisely because it will not act on it, and it
+would pass an address the plan stopped describing at all. Those are questions,
+not confirmation. Anything short of a no-op is reported as `UNVERIFIED` rather
+than assumed, and the run exits 1.
+
+**A privilege expansion is reported from the verification, not from the
+response.** Each action carries `privilege_expansion`: `occurred` when the
+write was attempted and a fresh read confirms the configured state,
+`unconfirmed` when it was attempted and the read does not, and `none` when
+nothing was attempted. Both failure shapes land on the wrong side of a boolean,
+which is why it is not one: an expanding PATCH that returned 500 and took
+effect anyway *did* widen the credential, and an expanding PATCH that returned
+200 and does not show up afterwards may not have. The unconfirmed case gets the
+louder warning of the two — a credential whose privileges nobody can currently
+state is worse than one that changed on purpose — and the human run marks both
+with `!` and names the state on each line of the `! privilege expansions`
+section.
+
+What apply will not do:
+
+- **Create or replace an inference key.** Issuing a one-time secret needs the
+  journaled transaction of ADR-0002, which is #16 (and rotation is #19). A
+  planned creation or replacement is skipped with a reason naming the issue,
+  and the outcome is `incomplete` rather than `applied`. The assignment planned
+  beside it is held back too, because that assignment belongs to the key the
+  issuance would have produced: for a replacement, the address still owns the
+  live predecessor, and assigning *it* to the successor's guardrail would
+  change what an existing credential may do on the strength of a key that was
+  never created.
+- **Touch anything unmanaged.** Only actions the planner produced are executed,
+  and the planner never proposes a write to a remote object no local address
+  owns.
+- **Delete, disable, or forget anything because a configuration block
+  disappeared.** That stays an orphaned binding, reported and tracked.
+- **Repeat an ambiguous write.** Every write is sent exactly once. Whether it
+  landed is answered by the read that follows, never by sending it again.
+- **Continue after a failed write.** A later action may depend on the one that
+  failed, so the rest are reported as `not_attempted`. Verification still runs,
+  so the report says exactly what was and was not confirmed — including a
+  failed PATCH that turns out to have taken effect anyway.
+
+Request bodies carry only managed fields, so a budget, an expiry, or a
+provider-managed field Keymaster cannot express is preserved rather than
+overwritten; a managed model or provider list is sent whole, because OpenRouter
+replaces those rather than merging into them; and a key PATCH never carries
+`expires_at` or `workspace_id`, which are fixed at creation and are a reason to
+replace a key rather than to patch one. An assignment write names one key,
+never a guardrail's whole key list — a guardrail can carry keys no local
+address owns.
+
+An apply's outcome is one of six, and `converged` is the strict one — it means
+the plan held nothing but no-ops, exactly what `keymaster plan` calls converged:
+
+| Outcome | Meaning | Exit |
+| ------- | ------- | ---- |
+| `converged` | The plan was all no-ops; nothing was written | 0 |
+| `applied` | Every planned write was made and verified | 0 |
+| `incomplete` | Nothing failed, but a write apply cannot make yet was skipped | 0 |
+| `held_back` | Nothing failed, and work remains that only an operator can unblock | 0 |
+| `failed` | A write failed, or one that was made could not be confirmed | 1 |
+| `blocked` | An unfinished operation of unknown outcome stopped the run | 1 |
+
+**A write the planner held back is not convergence.** An action whose
+dependency needs an operator — an adoption, a missing resource, an unfinished
+operation — is reported as `held_back`, per action and in the counts, with a
+warning naming the addresses and each action saying what it waits on. An apply
+that wrote nothing because everything it wanted to write is waiting on someone
+has converged nothing, and it says so.
+
+The two failing outcomes exit 1 with `apply_unresolved` or `apply_blocked` —
+after writing the result document, because what did happen is what an operator
+needs.
+
 ## Credentials
 
 The management credential is read from the `OPENROUTER_MANAGEMENT_KEY`
@@ -280,14 +377,20 @@ below inspectable.
   so no caller can route that plaintext into `Debug` or `Serialize` by choosing
   its own response type.
 
-## Reading OpenRouter
+## Reading and writing OpenRouter
 
-`src/api/` reads the resources Keymaster manages: keys, guardrails, and the
-assignments between them. `api::Reader` is read-only, and its types are
-observations, not desires. Usage counters, remaining
-budget, and creation timestamps are OpenRouter's alone, so they live in
-`KeyUsage` and `RemoteTimestamps` rather than beside the managed fields, where
-a diff could pick one up and propose "fixing" recorded spend.
+`src/api/` reads and writes the resources Keymaster manages: keys, guardrails,
+and the assignments between them. `api::Reader` is read-only and its types are
+observations, not desires; `api::Writer` is the small set of writes an ordinary
+convergence needs. No method on the writer reports success from what the server
+echoed back — an update returns `()`, a create returns only the identity apply
+must persist immediately — because an ambiguous write is resolved by a fresh
+read, never by a replay.
+
+Usage counters, remaining budget, and creation timestamps are OpenRouter's
+alone, so they live in `KeyUsage` and `RemoteTimestamps` rather than beside the
+managed fields, where a diff could pick one up and propose "fixing" recorded
+spend.
 
 Pagination is centralized in `api::pagination` because a partial snapshot is
 worse than none: a key that pagination missed reads as a key that is not there,
@@ -302,6 +405,12 @@ caps stop a listing that would otherwise never end.
 Unknown response fields are ignored, so a field OpenRouter adds tomorrow does
 not stop a plan today; a record with no usable identity is a typed
 invalid-response error instead.
+
+Write bodies live in `api::write`. `Patch` gives every managed field three
+states — omitted, set, and explicitly `null` — so a field Keymaster does not
+manage is left out of the body rather than cleared by accident, and a create
+omits what an update would clear, because a field that has never existed cannot
+be unset.
 
 ## Output and exit codes
 
@@ -391,6 +500,15 @@ lookup and the requests it does *not* make, the reported difference, a repeated
 import that writes nothing, a 404, both one-to-one violations, lock contention,
 a state write that cannot happen, and a remote display name carrying the
 sentinel.
+
+`tests/apply.rs` asserts which requests apply sent, in what order, carrying
+what — and, as often, that it sent none: a converged project, an unmanaged
+resource, a blocked plan, and a plan whose only work is a key creation all
+write nothing. It also covers the phase order and request bodies, verification,
+a second apply that is a no-op, a guardrail recreated after it disappeared, an
+assignment removed and one restored, and a guardrail create that fails midway —
+which must leave the identity of the one that succeeded tracked and state
+exactly which actions were verified.
 
 ## Lint policy
 

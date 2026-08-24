@@ -25,7 +25,7 @@ use wiremock::Mock;
 use wiremock::matchers::{method, path, query_param};
 
 use super::fixtures::{empty_page, page};
-use super::http::{TestServer, json_response};
+use super::http::{Scripted, TestServer, json_response};
 use super::sentinel::{SECRET_SENTINEL_KEY, assert_absent, assert_absent_under};
 
 /// The environment variables the binary reads.
@@ -76,6 +76,43 @@ impl Project {
                     .and(path(route))
                     .and(query_param("offset", "0"))
                     .respond_with(json_response(200, &page(items)))
+                    .with_priority(1),
+            );
+            self.server.mount(
+                Mock::given(method("GET"))
+                    .and(path(route))
+                    .respond_with(json_response(200, &empty_page()))
+                    .with_priority(2),
+            );
+        }
+    }
+
+    /// Answers the three listings differently each time they are read.
+    ///
+    /// The first complete read of a listing gets the first set of records, the
+    /// second read the second, and so on, with the last repeating. That is how
+    /// a case scripts a world that changes between two runs — or between an
+    /// apply's writes and the read that verifies them — without a stateful
+    /// fake server standing in for OpenRouter.
+    ///
+    /// Only the first page of each read is scripted; the page after it is
+    /// empty, which is what ends a listing.
+    pub fn observe_sequence(
+        &self,
+        keys: Vec<Vec<Value>>,
+        guardrails: Vec<Vec<Value>>,
+        assignments: Vec<Vec<Value>>,
+    ) {
+        for (route, reads) in [
+            ("/api/v1/keys", keys),
+            ("/api/v1/guardrails", guardrails),
+            ("/api/v1/guardrails/assignments/keys", assignments),
+        ] {
+            self.server.mount(
+                Mock::given(method("GET"))
+                    .and(path(route))
+                    .and(query_param("offset", "0"))
+                    .respond_with(Scripted::json(reads.into_iter().map(page)))
                     .with_priority(1),
             );
             self.server.mount(

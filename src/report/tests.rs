@@ -7,7 +7,7 @@
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use super::{ImportReport, PlanReport, StatusReport};
+use super::{ActionOutcome, ApplyReport, ImportReport, PlanReport, StatusReport};
 use crate::api::{
     KeyUsage, ObservedAssignment, ObservedGuardrail, ObservedKey, RemoteTimestamps, ResetPolicy,
     ZeroDataRetention,
@@ -976,4 +976,91 @@ fn a_repeated_import_renders_as_unchanged_with_nothing_to_reconcile() {
         "a guardrail import with nothing to reconcile warns about nothing"
     );
     serde_json::to_value(&report).expect("the report serializes");
+}
+
+// --- apply -----------------------------------------------------------------
+
+#[test]
+fn an_apply_renders_every_outcome_in_both_formats() {
+    let world = wide_world();
+    let plan = compute(&config(WIDE), &world.state, &world.snapshot);
+
+    // One of each state apply can report, spread across the plan's actions.
+    let states: [fn() -> ActionOutcome; 5] = [
+        || ActionOutcome::applied("patched it"),
+        || ActionOutcome::skipped("skipped: #16 owns this"),
+        || ActionOutcome::failed("the write failed"),
+        || ActionOutcome::not_attempted("not attempted: an earlier write failed"),
+        || ActionOutcome::held_back("held back: waiting on guardrails.cheap"),
+    ];
+    let mut outcomes: Vec<ActionOutcome> = plan
+        .actions()
+        .iter()
+        .enumerate()
+        .map(|(index, _)| states[index % states.len()]())
+        .collect();
+    for outcome in &mut outcomes {
+        if outcome.was_attempted() {
+            outcome.record_verification(true);
+        }
+    }
+
+    let report = ApplyReport::new(&plan, &outcomes, None);
+    let human = report.to_string();
+    for expected in [
+        "apply:",
+        "applied",
+        "skipped",
+        "failed",
+        "not_attempted",
+        "verified",
+    ] {
+        assert!(
+            human.contains(expected),
+            "apply output omits {expected}:\n{human}"
+        );
+    }
+
+    let document: Value = serde_json::to_value(&report).expect("the report serializes");
+    assert_eq!(document["command"], "apply");
+    assert_eq!(
+        document["actions"].as_array().map(Vec::len),
+        Some(plan.actions().len()),
+        "every planned action is reported"
+    );
+    assert!(!report.succeeded(), "a failed write is not a success");
+    assert_eq!(
+        report.unresolved().0,
+        outcomes
+            .iter()
+            .filter(|outcome| outcome.was_attempted())
+            .count()
+            / 2
+    );
+}
+
+#[test]
+fn an_apply_that_could_not_verify_says_so() {
+    let world = wide_world();
+    let plan = compute(&config(WIDE), &world.state, &world.snapshot);
+    let outcomes: Vec<ActionOutcome> = plan
+        .actions()
+        .iter()
+        .map(|_| ActionOutcome::reported())
+        .collect();
+
+    let report = ApplyReport::new(
+        &plan,
+        &outcomes,
+        Some("nothing could be verified: the read failed".to_owned()),
+    );
+    assert!(
+        report
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("nothing could be verified")),
+        "a failed verification read is a warning of its own"
+    );
+    let document: Value = serde_json::to_value(&report).expect("the report serializes");
+    assert!(document["verification_failure"].is_string());
 }

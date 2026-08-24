@@ -64,6 +64,30 @@ error, whose category is named in the diagnostic.")]
     Plan,
 
     /// Converge OpenRouter with the desired configuration.
+    #[command(long_about = "\
+Converge OpenRouter with the desired configuration.
+
+Apply takes the exclusive state lock, reloads the configuration and state under \
+it, reads a complete snapshot of OpenRouter, and computes the plan again — so \
+what runs is never the plan an earlier `keymaster plan` printed. It then \
+executes that plan in three fixed phases: guardrail creates and updates, \
+updates to keys that already exist, and assignment changes. A created \
+guardrail's UUID is recorded before anything else happens. Finally it reads \
+OpenRouter again and reports, per action, whether the result was verified.
+
+Every write is sent exactly once. A write whose outcome is unknown is never \
+repeated; the read that follows says whether it took effect.
+
+Apply does not yet create or replace inference keys: issuing a one-time secret \
+needs the journaled transaction of #16. A planned creation is skipped, and the \
+run reports that the configuration is not fully converged.
+
+Exit code 0 means nothing went wrong, which is not the same as converged: a \
+write apply cannot make yet, or one the plan holds back until an operator \
+resolves what blocks it, leaves the run reporting `incomplete` or `held_back`. \
+Exit code 1 means something did go wrong — a write failed, a write could not \
+be confirmed, or an unfinished operation stopped the run — and the result \
+document on stdout says exactly which.")]
     Apply,
 
     /// Report bindings, remote presence, and incomplete operations.

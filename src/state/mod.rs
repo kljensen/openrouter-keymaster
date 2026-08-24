@@ -693,6 +693,52 @@ impl State {
         Ok(())
     }
 
+    /// Binds a guardrail Keymaster has just created, over a binding to one
+    /// that is gone.
+    ///
+    /// [`State::bind_guardrail`] refuses to rebind an address, which is what
+    /// makes an import safe: an operator who names the wrong address is told,
+    /// rather than having a live guardrail quietly forgotten. Recreation is the
+    /// one case where replacing a binding is right, and it is not the caller's
+    /// judgement to make casually — the planner proposes a guardrail create
+    /// only when the bound UUID is absent from a complete snapshot *and* no
+    /// remote guardrail carries the configured name, so the identity being
+    /// overwritten is one that no longer exists.
+    ///
+    /// The origin becomes `created`, because the guardrail it now names is one
+    /// Keymaster created.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BindError::GuardrailOwnedElsewhere`] when another address
+    /// already owns the new UUID.
+    pub fn replace_guardrail(
+        &mut self,
+        address: &Address,
+        id: Uuid,
+        at: OffsetDateTime,
+    ) -> Result<(), BindError> {
+        if let Some((owner, _)) = self
+            .guardrails
+            .iter()
+            .find(|(owner, binding)| binding.id == id && *owner != address)
+        {
+            return Err(BindError::GuardrailOwnedElsewhere {
+                id,
+                owner: owner.clone(),
+            });
+        }
+        self.guardrails.insert(
+            address.clone(),
+            GuardrailBinding {
+                id,
+                origin: Origin::Created,
+                bound_at: at,
+            },
+        );
+        Ok(())
+    }
+
     /// Journals the intent to create a key, before any request is sent.
     ///
     /// # Errors

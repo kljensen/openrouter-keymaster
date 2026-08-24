@@ -314,7 +314,7 @@ impl ActionReport {
                 .copied()
                 .map(ExpansionReport::new)
                 .collect(),
-            executable: !plan_blocked && action.kind.writes() && !blocked,
+            executable: action.is_executable(plan_blocked),
             blocked,
             depends_on: action
                 .depends_on

@@ -1,5 +1,6 @@
 //! Keymaster's application error type.
 
+use crate::app::apply::ApplyError;
 use crate::app::import::ImportError;
 use crate::client::ApiError;
 use crate::config::ConfigError;
@@ -47,6 +48,11 @@ pub enum Error {
     #[error(transparent)]
     Import(#[from] ImportError),
 
+    /// An apply did not converge the configuration. Whatever it did do has
+    /// already been reported on stdout.
+    #[error(transparent)]
+    Apply(#[from] ApplyError),
+
     /// A result could not be written to stdout or stderr.
     #[error("cannot write output: {message}")]
     Output {
@@ -67,6 +73,7 @@ impl Error {
             Self::State(error) => error.kind(),
             Self::Api(error) => error.kind(),
             Self::Import(error) => error.kind(),
+            Self::Apply(error) => error.kind(),
             Self::Output { .. } => "output",
         }
     }

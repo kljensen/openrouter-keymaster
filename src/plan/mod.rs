@@ -139,7 +139,7 @@ impl Plan {
         let blocked = self.is_blocked();
         self.actions
             .iter()
-            .filter(move |action| !blocked && action.kind.writes() && !action.is_blocked())
+            .filter(move |action| action.is_executable(blocked))
     }
 
     /// Whether anything would be written if this plan were applied.
@@ -183,6 +183,18 @@ impl Action {
                 Reason::BlockedBy { .. } | Reason::OperationIncomplete { .. }
             )
         })
+    }
+
+    /// Whether apply may execute this action, given whether the plan it
+    /// belongs to is blocked.
+    ///
+    /// The one definition of "executable", so that [`Plan::executable`], the
+    /// plan report, and apply itself cannot drift apart on what an apply would
+    /// do — which is the difference between a report an operator can trust and
+    /// one they cannot.
+    #[must_use]
+    pub fn is_executable(&self, plan_blocked: bool) -> bool {
+        !plan_blocked && self.kind.writes() && !self.is_blocked()
     }
 }
 
