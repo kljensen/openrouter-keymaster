@@ -263,15 +263,16 @@ that is not established; the result document says what happened.")]
 Local state maintenance.
 
 `state forget ADDRESS` relinquishes local ownership of everything an address \
-is bound to. It makes no API call and invokes no receiver: nothing is disabled, \
-nothing is deleted, and every remote resource it releases goes on existing \
-exactly as it was. It needs no management credential, no network, and no \
-configuration, because it exists to correct state that is wrong — which is when \
-those may all be unavailable.
+is bound to. It makes no API call and invokes no receiver: nothing is disabled \
+and nothing is deleted, so a released resource is left however it already was — \
+Keymaster made no request, and does not claim it is still there. It needs no \
+management credential, no network, and no configuration, because it exists to \
+correct state that is wrong — which is when those may all be unavailable.
 
 The result lists every identity being released, so you can see what you are \
-letting go of. Afterwards `openrouter-keymaster plan` reports them as unmanaged, and no \
-Keymaster command will touch them again.
+letting go of. Afterwards `openrouter-keymaster plan` reports whichever of them \
+OpenRouter still has as unmanaged, and no Keymaster command will touch them \
+again.
 
 ADDRESS is `keys.NAME` or `guardrails.NAME`. A bare NAME is accepted when only \
 one of the two is bound, and refused when both are.

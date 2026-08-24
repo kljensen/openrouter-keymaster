@@ -506,8 +506,9 @@ openrouter-keymaster state forget guardrails.cheap
 ```
 
 Relinquishes local ownership. **Zero HTTP requests and zero receiver
-invocations**: nothing is disabled, nothing is deleted, and every resource it
-releases goes on existing exactly as it was. It needs no management credential,
+invocations**: nothing is disabled and nothing is deleted, so a released
+resource is left however it already was. Keymaster makes no request, so it does
+not claim the resource is still there. It needs no management credential,
 no network, and no configuration — it exists to correct state that is wrong,
 which is precisely when those may be unavailable.
 

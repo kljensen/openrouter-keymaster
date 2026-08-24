@@ -9,6 +9,10 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Fixed
 
+- `state forget` no longer says the resources it released are still live.
+  It sends no request, so the warning and the summary now say each may still
+  exist remotely and that nothing was disabled or deleted.
+
 - `rotate` and a planned replacement no longer describe the predecessor as
   "still enabled". Rotation does not read it, so the summary says it is
   unchanged — neither disabled nor deleted — and `apply` reports the `disabled`

@@ -491,7 +491,7 @@ pub struct ForgetReport {
     /// Whether this run removed a binding.
     forgotten: bool,
     /// Every remote identity the binding named. Keymaster no longer owns any of
-    /// them, and none was changed.
+    /// them, and this run changed none of them — it made no request at all.
     released: Vec<Released>,
     /// What this run established.
     summary: String,
@@ -514,11 +514,15 @@ impl ForgetReport {
             address: written.to_owned(),
             resource: Some(resource),
             forgotten: true,
+            // Never "still live". Forget sends no request, so this run
+            // observed nothing about whether any of these resources is still
+            // there (#24).
             summary: format!(
-                "`{address}` is no longer bound to anything. {count} released and not changed: \
-                 forget makes no API call and invokes no receiver, so every one of them still \
-                 exists exactly as it was. `openrouter-keymaster plan` now reports them as \
-                 unmanaged, and no Keymaster command will touch them again."
+                "`{address}` is no longer bound to anything. {count} released and not changed by \
+                 this run: forget makes no API call and invokes no receiver, so nothing here was \
+                 disabled or deleted, and each may still exist remotely — no request was made to \
+                 find out. `openrouter-keymaster plan` now reports whichever of them OpenRouter \
+                 still has as unmanaged, and no Keymaster command will touch them again."
             ),
             warnings: forget_warnings(&released),
             released,
@@ -556,8 +560,8 @@ fn forget_warnings(released: &[Released]) -> Vec<String> {
         return Vec::new();
     }
     vec![format!(
-        "{count} released and still live remotely; nothing was disabled or deleted, and \
-         Keymaster no longer tracks any of them",
+        "{count} released and no longer tracked; each may still exist remotely, and no request \
+         was made — nothing was disabled or deleted",
         count = super::plural(released.len(), "remote resource")
     )]
 }
@@ -573,7 +577,7 @@ impl fmt::Display for ForgetReport {
 
         lines.push(format!("  resource: {}", self.resource.unwrap_or("(none)")));
         lines.push(format!(
-            "released ({count}) — still live, and no longer tracked:",
+            "released ({count}) — no longer tracked; each may still exist remotely:",
             count = self.released.len()
         ));
         if self.released.is_empty() {

@@ -1473,6 +1473,21 @@ fn forget_releases_every_hash_and_makes_no_remote_call() {
         "every hash being released is listed, so an operator sees what they let go"
     );
 
+    // The command sent nothing, so it may not say the resources it let go of
+    // are still there (#24).
+    let summary = document["summary"].as_str().expect("a summary");
+    assert!(summary.contains("may still exist remotely"), "{summary}");
+    assert!(!summary.contains("still live"), "{summary}");
+    assert!(
+        document["warnings"]
+            .as_array()
+            .expect("a warning array")
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|warning| warning.contains("may still exist remotely")),
+        "{document}"
+    );
+
     world.project.server.assert_request_count(0);
     assert_eq!(world.deliveries(), 0);
     assert!(

@@ -1309,8 +1309,8 @@ fn every_lifecycle_document_reports_the_phase_its_identity_is_now_in() {
         forgotten
             .warnings()
             .iter()
-            .any(|warning| warning.contains("still live remotely")),
-        "forget releases live resources and says so"
+            .any(|warning| warning.contains("may still exist remotely")),
+        "forget makes no request, so it says what it let go of and no more"
     );
 }
 

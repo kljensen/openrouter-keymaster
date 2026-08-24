@@ -233,8 +233,9 @@ openrouter-keymaster state forget guardrails.cheap
 
 Zero HTTP requests, zero receiver invocations, no configuration and no
 credential needed — it exists to correct state that is wrong, which is exactly
-when those may be unavailable. Everything it releases goes on existing; a later
-`plan` reports it as `unmanaged`.
+when those may be unavailable. Nothing it releases is disabled or deleted, and
+nothing is read either: a later `plan` is what says which of them OpenRouter
+still has, reported as `unmanaged`.
 
 Forgetting a key address releases **every** hash it held, current and retained.
 The result document lists each one before it stops being yours.
