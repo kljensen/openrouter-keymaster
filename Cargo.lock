@@ -914,6 +914,7 @@ dependencies = [
  "percent-encoding",
  "predicates",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

@@ -1,20 +1,41 @@
-//! A fake secret receiver.
+//! A fake secret receiver, and a real one-time plaintext to hand a real one.
 //!
-//! The real receiver interface arrives with issue #15. This fake is
-//! deliberately self-contained: it models the four outcomes a delivery can
-//! have and records what it was told, so tests can assert delivery happened
-//! exactly once without the fake itself becoming a place a secret is kept.
+//! The fake implements the production [`SecretReceiver`] trait, so a test that
+//! scripts a delivery failure is scripting the same interface the file and
+//! command receivers implement. It models the four *situations* a delivery can
+//! be in and maps each to the classification ADR-0002 gives it, which is how a
+//! test asserts that a lost acknowledgement is ambiguous rather than a
+//! rejection.
+//!
+//! [`created_sentinel_key`] exists because there is deliberately no way to
+//! construct a [`KeyPlaintext`] out of thin air: the only source of one is a
+//! create response. So this makes a real one, out of a real response, served
+//! by the local HTTP harness — the same path production takes.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::Duration;
 
-/// How a receiver answered one delivery attempt.
+use keymaster::client::{
+    Client, CreateKeyRequest, CreatedKey, KeyPlaintext, ManagementKey, Options,
+};
+use keymaster::ids::RemoteName;
+use keymaster::receiver::{Acknowledgement, DeliveryMetadata, Outcome, SecretReceiver};
+use wiremock::Mock;
+use wiremock::matchers::{method, path};
+
+use super::fixtures::created_key;
+use super::http::{TestServer, json_response};
+use super::sentinel::SECRET_SENTINEL_KEY;
+
+/// The situation a scripted delivery attempt ends in.
 ///
-/// The distinction that matters is what the outcome proves about the
-/// receiver's side: `Rejected` guarantees nothing was stored, while
-/// `TimedOut` and `AcknowledgementLost` guarantee nothing at all.
+/// The distinction that matters is what each one proves about the receiver's
+/// side: `Rejected` guarantees nothing was stored, while `TimedOut` and
+/// `AcknowledgementLost` guarantee nothing at all and are therefore both
+/// [`Acknowledgement::Ambiguous`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReceiverOutcome {
+pub enum ScriptedOutcome {
     /// Acknowledged: the receiver stored the secret.
     Delivered,
     /// Definite rejection: the receiver refused and stored nothing.
@@ -25,10 +46,35 @@ pub enum ReceiverOutcome {
     AcknowledgementLost,
 }
 
-/// The non-secret metadata of one delivery attempt.
+impl ScriptedOutcome {
+    /// How Keymaster must classify this situation.
+    #[must_use]
+    pub fn acknowledgement(self) -> Acknowledgement {
+        match self {
+            Self::Delivered => Acknowledgement::Delivered,
+            Self::Rejected => Acknowledgement::Rejected,
+            Self::TimedOut | Self::AcknowledgementLost => Acknowledgement::Ambiguous,
+        }
+    }
+
+    /// The outcome a receiver in this situation returns.
+    #[must_use]
+    pub fn outcome(self) -> Outcome {
+        match self {
+            Self::Delivered => Outcome::delivered("the fake receiver stored the key"),
+            Self::Rejected => Outcome::rejected("the fake receiver refused and stored nothing"),
+            Self::TimedOut => Outcome::ambiguous("the fake receiver did not answer in time"),
+            Self::AcknowledgementLost => {
+                Outcome::ambiguous("the fake receiver's acknowledgement was lost")
+            }
+        }
+    }
+}
+
+/// The non-secret metadata of one delivery attempt, as the fake recorded it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Delivery {
-    /// Local resource address, for example `keys.jobfeed`.
+    /// Local resource address, for example `jobfeed`.
     pub address: String,
     /// Immutable hash of the delivered key.
     pub hash: String,
@@ -38,6 +84,19 @@ pub struct Delivery {
     pub operation_id: String,
 }
 
+impl Delivery {
+    /// Records what a delivery was told.
+    #[must_use]
+    pub fn of(metadata: &DeliveryMetadata) -> Self {
+        Self {
+            address: metadata.address().as_str().to_owned(),
+            hash: metadata.hash().as_str().to_owned(),
+            generation: metadata.generation(),
+            operation_id: metadata.operation().as_str().to_owned(),
+        }
+    }
+}
+
 /// A receiver that answers from a script and records what it was called with.
 ///
 /// It records the metadata and the plaintext's length, never the plaintext,
@@ -45,8 +104,8 @@ pub struct Delivery {
 /// a place secrets accumulate.
 #[derive(Debug)]
 pub struct FakeReceiver {
-    scripted: Mutex<VecDeque<ReceiverOutcome>>,
-    trailing: ReceiverOutcome,
+    scripted: Mutex<VecDeque<ScriptedOutcome>>,
+    trailing: ScriptedOutcome,
     deliveries: Mutex<Vec<Delivery>>,
     plaintext_lengths: Mutex<Vec<usize>>,
 }
@@ -54,15 +113,15 @@ pub struct FakeReceiver {
 impl FakeReceiver {
     /// Answers every attempt the same way.
     #[must_use]
-    pub fn always(outcome: ReceiverOutcome) -> Self {
+    pub fn always(outcome: ScriptedOutcome) -> Self {
         Self::scripted([], outcome)
     }
 
     /// Answers each attempt from `outcomes` in turn, then `trailing`.
     #[must_use]
     pub fn scripted(
-        outcomes: impl IntoIterator<Item = ReceiverOutcome>,
-        trailing: ReceiverOutcome,
+        outcomes: impl IntoIterator<Item = ScriptedOutcome>,
+        trailing: ScriptedOutcome,
     ) -> Self {
         Self {
             scripted: Mutex::new(outcomes.into_iter().collect()),
@@ -70,24 +129,6 @@ impl FakeReceiver {
             deliveries: Mutex::new(Vec::new()),
             plaintext_lengths: Mutex::new(Vec::new()),
         }
-    }
-
-    /// Records one delivery attempt and answers it.
-    pub fn receive(&self, delivery: Delivery, plaintext: &str) -> ReceiverOutcome {
-        self.deliveries
-            .lock()
-            .expect("the fake receiver is not poisoned")
-            .push(delivery);
-        self.plaintext_lengths
-            .lock()
-            .expect("the fake receiver is not poisoned")
-            .push(plaintext.len());
-
-        self.scripted
-            .lock()
-            .expect("the fake receiver is not poisoned")
-            .pop_front()
-            .unwrap_or(self.trailing)
     }
 
     /// Every delivery attempt, in order.
@@ -107,4 +148,59 @@ impl FakeReceiver {
             .expect("the fake receiver is not poisoned")
             .clone()
     }
+}
+
+impl SecretReceiver for FakeReceiver {
+    fn describe(&self) -> String {
+        "fake receiver".to_owned()
+    }
+
+    fn receive(&self, metadata: &DeliveryMetadata, plaintext: &KeyPlaintext) -> Outcome {
+        self.deliveries
+            .lock()
+            .expect("the fake receiver is not poisoned")
+            .push(Delivery::of(metadata));
+        self.plaintext_lengths
+            .lock()
+            .expect("the fake receiver is not poisoned")
+            .push(plaintext.expose().len());
+
+        self.scripted
+            .lock()
+            .expect("the fake receiver is not poisoned")
+            .pop_front()
+            .unwrap_or(self.trailing)
+            .outcome()
+    }
+}
+
+/// A key whose plaintext is the secret sentinel, created the way production
+/// creates one: by parsing a create response off a socket.
+///
+/// The server lives only for the duration of the call; what comes back owns
+/// the plaintext and clears it when it is dropped.
+#[must_use]
+pub fn created_sentinel_key() -> CreatedKey {
+    let server = TestServer::start();
+    server.mount(
+        Mock::given(method("POST"))
+            .and(path("/api/v1/keys"))
+            .respond_with(json_response(
+                201,
+                &created_key("keyhash-0001", "golf-jobfeed", SECRET_SENTINEL_KEY),
+            )),
+    );
+
+    let options = Options {
+        connect_timeout: Duration::from_secs(2),
+        request_timeout: Duration::from_secs(10),
+        ..Options::new(server.api_base_url())
+    };
+    let credential = ManagementKey::for_tests(SECRET_SENTINEL_KEY).expect("a usable fake key");
+    Client::new(options, &credential)
+        .expect("a client")
+        .create_key_once(&CreateKeyRequest::new(
+            RemoteName::parse("golf-jobfeed").expect("a valid name"),
+        ))
+        .expect("the harness creates a key")
 }

@@ -12,6 +12,8 @@ use std::io::Read;
 use std::panic::{self, AssertUnwindSafe};
 use std::time::Duration;
 
+use keymaster::ids::{Address, OperationId};
+use keymaster::receiver::{Acknowledgement, DeliveryMetadata, Outcome, SecretReceiver as _};
 use serde_json::{Value, json};
 use support::clock::FakeClock;
 use support::fixtures::{
@@ -22,7 +24,7 @@ use support::http::{
     RemoteCollection, Scripted, TestServer, body_json, connection_lost, delayed, describe_request,
     header, json_response, malformed_json, oversized_body, rate_limited,
 };
-use support::receiver::{Delivery, FakeReceiver, ReceiverOutcome};
+use support::receiver::{FakeReceiver, ScriptedOutcome, created_sentinel_key};
 use support::sentinel::{
     SECRET_SENTINEL_KEY, assert_absent, assert_absent_in_file, assert_absent_under, assert_present,
 };
@@ -373,32 +375,40 @@ fn the_fake_clock_moves_only_when_the_test_moves_it() {
 fn the_fake_receiver_records_every_outcome_without_keeping_plaintext() {
     let receiver = FakeReceiver::scripted(
         [
-            ReceiverOutcome::Delivered,
-            ReceiverOutcome::Rejected,
-            ReceiverOutcome::TimedOut,
+            ScriptedOutcome::Delivered,
+            ScriptedOutcome::Rejected,
+            ScriptedOutcome::TimedOut,
         ],
-        ReceiverOutcome::AcknowledgementLost,
+        ScriptedOutcome::AcknowledgementLost,
     );
 
+    // A real plaintext, out of a real create response: the fake implements the
+    // production receiver interface, so there is nothing else it could take.
+    let created = created_sentinel_key();
     let outcomes: Vec<_> = (0..4)
         .map(|generation| {
-            let delivery = Delivery {
-                address: "keys.jobfeed".to_owned(),
-                hash: "sha256:a".to_owned(),
+            let metadata = DeliveryMetadata::new(
+                Address::parse("jobfeed").expect("a valid address"),
+                created.hash().clone(),
                 generation,
-                operation_id: "op-1".to_owned(),
-            };
-            receiver.receive(delivery, SECRET_SENTINEL_KEY)
+                OperationId::parse("op-1").expect("a valid operation id"),
+            );
+            receiver.receive(&metadata, created.plaintext())
         })
         .collect();
 
     assert_eq!(
-        outcomes,
+        outcomes
+            .iter()
+            .map(Outcome::acknowledgement)
+            .collect::<Vec<_>>(),
         [
-            ReceiverOutcome::Delivered,
-            ReceiverOutcome::Rejected,
-            ReceiverOutcome::TimedOut,
-            ReceiverOutcome::AcknowledgementLost,
+            Acknowledgement::Delivered,
+            Acknowledgement::Rejected,
+            // A timeout and a lost acknowledgement are both ambiguous: neither
+            // proves anything about what the receiver stored (ADR-0002).
+            Acknowledgement::Ambiguous,
+            Acknowledgement::Ambiguous,
         ]
     );
     assert_eq!(receiver.deliveries().len(), 4);
@@ -408,6 +418,9 @@ fn the_fake_receiver_records_every_outcome_without_keeping_plaintext() {
     );
     // The receiver saw the secret; its records must not have kept it.
     assert_absent("the fake receiver's records", &format!("{receiver:?}"));
+    for outcome in &outcomes {
+        assert_absent("a delivery outcome", &outcome.to_string());
+    }
 }
 
 #[test]

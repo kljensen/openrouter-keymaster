@@ -19,6 +19,12 @@ percent-encoding = "2.3"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "charset", "http2", "json", "rustls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# `openat`/`renameat`/`statat` in safe Rust. The file receiver writes a live
+# credential, and a path-based create can be redirected by a directory swapped
+# out between the check and the write; resolving the directory once and working
+# relative to that descriptor is the only fix, and the standard library does not
+# expose those calls. Already in the graph by way of `tempfile`.
+rustix = { version = "1.1", features = ["fs"] }
 # Receiver fingerprints are a digest, so a changed delivery destination is
 # detectable without a collision-prone ad-hoc hash.
 sha2 = "0.10"

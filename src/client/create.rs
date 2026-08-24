@@ -123,6 +123,18 @@ impl KeyPlaintext {
     pub fn expose(&self) -> &str {
         &self.0
     }
+
+    /// Wraps a fake plaintext for a unit test.
+    ///
+    /// Crate-internal and `cfg(test)`, so it exists only while the test
+    /// binaries are being built and cannot become a second way for a secret to
+    /// enter the program. Integration tests have no such constructor: they get
+    /// their plaintext the way production does, out of a create response
+    /// served by the local HTTP harness.
+    #[cfg(test)]
+    pub(crate) fn for_tests(value: &str) -> Self {
+        Self(value.to_owned())
+    }
 }
 
 impl Drop for KeyPlaintext {

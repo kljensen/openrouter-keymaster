@@ -33,26 +33,17 @@
 //! Reads take no lock and never write. Observing remote drift is not a reason
 //! to rewrite state.
 
-use std::fs::{self, File, OpenOptions};
-use std::hash::{BuildHasher, Hasher, RandomState};
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use super::{SCHEMA_VERSION, State, StateError};
-
-/// Mode for the directory holding state, when Keymaster creates it.
-#[cfg(unix)]
-const DIRECTORY_MODE: u32 = 0o700;
-
-/// Mode for every file Keymaster writes here.
-#[cfg(unix)]
-const FILE_MODE: u32 = 0o600;
-
-/// How many temporary names to try before giving up. A collision needs a
-/// 64-bit guess or a deliberate squatter, so one retry is already generous.
-const TEMPORARY_ATTEMPTS: usize = 8;
+use crate::files::{
+    containing_directory, create_private_directory, create_private_new, create_temporary,
+    sync_directory as sync_directory_now,
+};
 
 /// Reads just enough to decide whether this build understands the file.
 #[derive(Debug, Deserialize)]
@@ -213,67 +204,21 @@ impl StateFile {
     }
 
     /// Creates the temporary file to write the next state into, returning it
-    /// and its path.
-    ///
-    /// The file is created with `O_EXCL`, so a name that is already taken —
-    /// by a leftover file, a racing writer, or a symbolic link someone planted
-    /// — makes the open fail rather than truncate whatever is there. The name
-    /// is randomized as well, so it cannot be guessed and pre-created to keep
-    /// Keymaster from writing at all.
+    /// and its path. See [`crate::files::create_temporary`].
     pub(super) fn create_temporary(&self) -> io::Result<(File, PathBuf)> {
-        for _ in 0..TEMPORARY_ATTEMPTS {
-            let path = self.temporary_path();
-            match create_private_new(&path) {
-                Ok(file) => return Ok((file, path)),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "could not claim a temporary file beside {} in {TEMPORARY_ATTEMPTS} attempts",
-                self.path.display()
-            ),
-        ))
+        create_temporary(&self.path)
     }
 
-    /// An unpredictable name for the temporary file, beside the state file so
-    /// the rename stays within one filesystem and is therefore atomic.
-    pub(super) fn temporary_path(&self) -> PathBuf {
-        // `RandomState` is seeded by the operating system, which is enough
-        // randomness for a name; `O_EXCL` is what makes the write correct.
-        let token = RandomState::new().build_hasher().finish();
-        let mut name = self.path.as_os_str().to_owned();
-        name.push(format!(".{token:016x}.tmp"));
-        PathBuf::from(name)
-    }
-
-    /// Creates a directory Keymaster owns, restricted on Unix.
+    /// Creates the directory state lives in, restricted on Unix.
     ///
     /// An existing directory is left as it is: `--state` may point into a
     /// directory that belongs to the operator, and tightening its permissions
     /// would be a surprising side effect of writing a file.
     fn create_private_directory(&self, directory: &Path) -> Result<(), StateError> {
-        if directory.is_dir() {
-            return Ok(());
-        }
-        fs::create_dir_all(directory).map_err(|error| StateError::Write {
+        create_private_directory(directory).map_err(|error| StateError::Write {
             path: directory.to_path_buf(),
             message: error.to_string(),
-        })?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(directory, fs::Permissions::from_mode(DIRECTORY_MODE)).map_err(
-                |error| StateError::Write {
-                    path: directory.to_path_buf(),
-                    message: error.to_string(),
-                },
-            )?;
-        }
-        Ok(())
+        })
     }
 
     fn read_error(&self, error: &io::Error) -> StateError {
@@ -406,32 +351,6 @@ impl Drop for StateLock<'_> {
     }
 }
 
-/// Creates a file that must not already exist and that only its owner can read.
-///
-/// `create_new` is `O_EXCL`, which fails rather than following a symbolic
-/// link. That is the whole defence against a hostile file appearing at a path
-/// Keymaster is about to write: it cannot be talked into truncating whatever
-/// the link points at.
-pub(super) fn create_private_new(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(FILE_MODE);
-    }
-    let file = options.open(path)?;
-
-    // `mode` is masked by the process umask, so the permissions are set again
-    // to be sure of them rather than of the environment.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(FILE_MODE))?;
-    }
-    Ok(file)
-}
-
 /// Writes the bytes and makes them durable.
 fn write_durably(file: &File, bytes: &[u8], faults: Faults) -> io::Result<()> {
     let mut file = file;
@@ -441,31 +360,9 @@ fn write_durably(file: &File, bytes: &[u8], faults: Faults) -> io::Result<()> {
     file.sync_all()
 }
 
-/// The directory a file lives in, as a path that can actually be opened.
-///
-/// `Path::parent` of a bare filename is the empty path, which no system call
-/// accepts. A bare filename names a file in the working directory, so that is
-/// the directory to create and to sync — skipping the sync there would quietly
-/// drop the durability that ADR-0002's journal-before-acting depends on.
-pub(super) fn containing_directory(path: &Path) -> PathBuf {
-    match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => PathBuf::from("."),
-    }
-}
-
-/// Syncs a directory so a rename inside it is durable. A no-op off Unix,
-/// where a directory cannot be opened as a file.
+/// Syncs a directory so a rename inside it is durable, after the fault
+/// injection point that stands in for that sync failing.
 fn sync_directory(directory: &Path, faults: Faults) -> io::Result<()> {
     faults.check(Fault::AfterRename)?;
-
-    #[cfg(unix)]
-    {
-        File::open(directory)?.sync_all()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = directory;
-        Ok(())
-    }
+    sync_directory_now(directory)
 }

@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use super::persist::{Fault, containing_directory, create_private_new};
+use super::persist::Fault;
 use super::*;
+use crate::files::{containing_directory, create_private_new, temporary_path};
 
 /// The sentinel from the shared test harness. Repeated here because unit
 /// tests cannot reach `tests/support`.
@@ -1564,7 +1565,7 @@ fn a_temporary_file_is_never_opened_through_a_symbolic_link() {
 
     let victim = scratch.directory().join("victim");
     fs::write(&victim, b"do not truncate me").expect("writing the victim");
-    let planted = scratch.file().temporary_path();
+    let planted = temporary_path(scratch.file().path());
     symlink(&victim, &planted).expect("planting a symbolic link");
 
     let error = create_private_new(&planted).expect_err("a link is not a new file");
@@ -1593,7 +1594,7 @@ fn temporary_names_are_unpredictable_and_claimed_exclusively() {
     scratch.store(&mut state);
     let file = scratch.file();
 
-    let names: BTreeSet<PathBuf> = (0..8).map(|_| file.temporary_path()).collect();
+    let names: BTreeSet<PathBuf> = (0..8).map(|_| temporary_path(file.path())).collect();
     assert_eq!(names.len(), 8, "temporary names must not repeat");
     for name in &names {
         assert!(!name.exists());
