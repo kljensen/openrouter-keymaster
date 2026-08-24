@@ -23,6 +23,9 @@ name = "cheap-summarization"
 description = "Small, cheap models for background summarization."
 allowed_models = ["google/gemini-2.5-flash", "openai/gpt-4o-mini"]
 denied_providers = ["example-untrusted-provider"]
+# A guardrail budget must name its reset interval: OpenRouter refuses a
+# guardrail limit that has none. A key budget may stand alone, and then never
+# refills.
 limit_usd = 10
 reset_interval = "monthly"
 require_zdr = true

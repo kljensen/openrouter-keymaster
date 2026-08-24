@@ -238,13 +238,16 @@ mod tests {
 
     #[test]
     fn an_update_sends_only_the_fields_the_configuration_manages() {
-        let desired =
-            guardrail("version = 1\n[guardrails.cheap]\nname = \"cheap-rail\"\nlimit_usd = 10\n");
+        let desired = guardrail(
+            "version = 1\n[guardrails.cheap]\nname = \"cheap-rail\"\nlimit_usd = 10\n\
+             reset_interval = \"monthly\"\n",
+        );
         assert_eq!(
             body(&GuardrailBody::update(&desired)),
             json!({
                 "name": "cheap-rail",
                 "limit_usd": 10.0,
+                "reset_interval": "monthly",
                 "include_byok_in_budgets": false,
             }),
             "a field the configuration does not describe must not be sent"

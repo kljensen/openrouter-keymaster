@@ -1435,6 +1435,7 @@ name = "cheap-rail"
 allowed_models = ["a/b", "e/f"]
 denied_providers = ["one"]
 limit_usd = 20
+reset_interval = "monthly"
 require_zdr = false
 include_byok_in_limit = false
 "#;
@@ -1444,6 +1445,7 @@ include_byok_in_limit = false
     guardrail.allowed_models = Some(["a/b".to_owned()].into_iter().collect());
     guardrail.ignored_providers = Some(["one".to_owned(), "two".to_owned()].into_iter().collect());
     guardrail.limit = Some(usd(10.0));
+    guardrail.reset_interval = ResetPolicy::Every(ResetInterval::Monthly);
     guardrail.zero_data_retention.any = Some(true);
     guardrail.include_byok_in_budgets = true;
 

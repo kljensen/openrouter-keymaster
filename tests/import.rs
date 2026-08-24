@@ -33,6 +33,7 @@ path = "/var/lib/keymaster/vault.key"
 [guardrails.cheap]
 name = "cheap-rail"
 limit_usd = 25
+reset_interval = "monthly"
 
 [keys.jobfeed]
 name = "golf-jobfeed"

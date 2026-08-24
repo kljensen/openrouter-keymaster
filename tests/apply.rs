@@ -38,6 +38,7 @@ path = "/var/lib/keymaster/vault.key"
 [guardrails.cheap]
 name = "cheap-rail"
 limit_usd = 25
+reset_interval = "monthly"
 
 [keys.jobfeed]
 name = "golf-jobfeed"
@@ -267,6 +268,7 @@ fn guardrails_then_keys_then_assignments_are_written_once_each_and_verified() {
         json!({
             "name": "cheap-rail",
             "limit_usd": 25.0,
+            "reset_interval": "monthly",
             "include_byok_in_budgets": false,
         }),
         "a create sends only the managed fields"
@@ -310,7 +312,7 @@ fn guardrails_then_keys_then_assignments_are_written_once_each_and_verified() {
 fn converged_rail() -> Value {
     let mut rail = guardrail(NEW_RAIL_ID, "cheap-rail", &[]);
     rail["limit_usd"] = json!(25.0);
-    rail["reset_interval"] = Value::Null;
+    rail["reset_interval"] = json!("monthly");
     rail
 }
 
@@ -547,7 +549,8 @@ fn a_plan_an_operator_read_is_never_the_plan_that_runs() {
 #[test]
 fn a_failed_write_stops_the_apply_and_says_what_was_and_was_not_verified() {
     let project = Project::new(&format!(
-        "{CONFIG}\n[guardrails.spare]\nname = \"spare-rail\"\nlimit_usd = 5\n"
+        "{CONFIG}\n[guardrails.spare]\nname = \"spare-rail\"\nlimit_usd = 5\n\
+         reset_interval = \"monthly\"\n"
     ));
     serve_writes(&project);
     // The first guardrail is created; the second fails with a 500, which

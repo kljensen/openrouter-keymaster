@@ -7,6 +7,13 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- A guardrail with `limit_usd` and no `reset_interval` is now rejected by
+  offline validation, naming `guardrails.NAME.reset_interval`, instead of
+  failing at apply time with an HTTP 400 from OpenRouter. Keys are unchanged: a
+  key limit with no `limit_reset` is a cap that never refills.
+
 ## [0.1.0] - 2026-08-24
 
 First release. Keymaster manages OpenRouter inference keys, guardrails, and the

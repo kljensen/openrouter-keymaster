@@ -88,8 +88,8 @@ require_zdr = true
 | `denied_models` | array of string | no | no (use `[]`) | Model slugs refused. Sent as `ignored_models`. |
 | `allowed_providers` | array of string | no | no (use `[]`) | Provider slugs permitted. |
 | `denied_providers` | array of string | no | no (use `[]`) | Provider slugs refused. Sent as `ignored_providers`. |
-| `limit_usd` | number | no | yes | USD budget. |
-| `reset_interval` | `"daily"`, `"weekly"`, `"monthly"` | no | yes | Needs `limit_usd`. |
+| `limit_usd` | number | no | yes | USD budget. Needs `reset_interval`. |
+| `reset_interval` | `"daily"`, `"weekly"`, `"monthly"` | no | yes | Needs `limit_usd`, and is required whenever `limit_usd` is set. |
 | `include_byok_in_limit` | bool | no | no | Inherits `defaults`. Always managed. |
 | `require_zdr` | bool | no | no | Restrict inference to zero-data-retention providers. Omitted means unmanaged. Sent as `enforce_zdr`. |
 | `clear` | array of string | no | — | `"description"`, `"limit_usd"`, `"reset_interval"`. |
@@ -116,7 +116,7 @@ generation = 1
 | --- | --- | --- | --- | --- |
 | `name` | string | yes | no | Remote display name. |
 | `limit_usd` | number | no | yes | USD spending limit. |
-| `limit_reset` | `"daily"`, `"weekly"`, `"monthly"` | no | yes | Needs `limit_usd`. Note the key-level spelling differs from a guardrail's `reset_interval`. |
+| `limit_reset` | `"daily"`, `"weekly"`, `"monthly"` | no | yes | Needs `limit_usd`, but is optional with it: a key limit with no reset never refills. Note the key-level spelling differs from a guardrail's `reset_interval`. |
 | `expires_at` | RFC 3339 string | no | yes | Quoted string, not a bare TOML datetime. Normalized to UTC. |
 | `disabled` | bool | no (default `false`) | no | Always managed. |
 | `workspace_id` | UUID string | no | no | |
@@ -174,6 +174,12 @@ configuration no longer names.
 a command receiver.
 
 ## Value rules
+
+**Budgets and intervals** go together. A reset interval with no budget is
+rejected everywhere: there is nothing to reset. The other direction differs by
+kind. A guardrail budget must name a `reset_interval` — OpenRouter refuses to
+create or update a guardrail limit that has none. A key budget need not: the
+API defines a key with no `limit_reset` as a spending cap that never refills.
 
 **USD amounts** (`limit_usd`) accept an integer or a float; `10`, `10.50`, and
 `1e1` are all legal. An amount must be non-negative, at most 1 000 000 000, and

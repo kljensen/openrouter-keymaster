@@ -620,6 +620,73 @@ clear = ["limit_usd"]
 }
 
 #[test]
+fn a_guardrail_budget_without_a_reset_interval_is_incompatible() {
+    let problems = problems(
+        r#"
+version = 1
+[guardrails.cheap]
+name = "cheap"
+limit_usd = 10
+"#,
+    );
+    let paths: Vec<&str> = problems.iter().map(|p| p.path.as_str()).collect();
+    assert_eq!(paths, ["guardrails.cheap.reset_interval"]);
+    assert!(
+        problems[0]
+            .message
+            .contains("a budget needs `reset_interval`")
+    );
+}
+
+#[test]
+fn clearing_a_guardrails_reset_interval_still_leaves_its_budget_unpaired() {
+    assert_eq!(
+        paths(
+            r#"
+version = 1
+[guardrails.cheap]
+name = "cheap"
+limit_usd = 10
+clear = ["reset_interval"]
+"#,
+        ),
+        ["guardrails.cheap.reset_interval"]
+    );
+}
+
+#[test]
+fn a_budget_is_accepted_with_its_interval_and_so_is_no_budget_at_all() {
+    // A key budget needs no interval: OpenRouter documents a null
+    // `limit_reset` as a limit that never resets.
+    let config = parse(
+        r#"
+version = 1
+[guardrails.paired]
+name = "paired"
+limit_usd = 10
+reset_interval = "monthly"
+[guardrails.unbudgeted]
+name = "unbudgeted"
+[keys.capped]
+name = "capped"
+limit_usd = 5
+"#,
+    );
+    assert_eq!(
+        config.guardrails[&address("paired")].reset_interval,
+        Managed::Set(ResetInterval::Monthly)
+    );
+    assert_eq!(
+        config.guardrails[&address("unbudgeted")].limit,
+        Managed::Unmanaged
+    );
+    assert_eq!(
+        config.keys[&address("capped")].limit_reset,
+        Managed::Unmanaged
+    );
+}
+
+#[test]
 fn generations_must_be_whole_numbers_of_at_least_one() {
     assert_eq!(
         paths(

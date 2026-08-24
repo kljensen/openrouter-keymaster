@@ -31,6 +31,13 @@ const GUARDRAIL_CLEARABLE: &[&str] = &["description", "limit_usd", "reset_interv
 /// unassigns the key.
 const KEY_CLEARABLE: &[&str] = &["limit_usd", "limit_reset", "expires_at", "guardrail"];
 
+/// Whether a USD limit obliges the block to name a reset interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BudgetPairing {
+    ResetRequired,
+    ResetOptional,
+}
+
 /// Longest accepted description.
 const DESCRIPTION_MAX: usize = 1_000;
 
@@ -250,11 +257,15 @@ impl Validator {
             &cleared,
             "description",
         );
+        // OpenRouter rejects `POST /guardrails` with "Reset interval is
+        // required when setting a budget limit", so the pairing is mandatory
+        // here even though the OpenAPI document only marks `name` required.
         let (limit, reset_interval) = self.budget(
             &path,
             ("limit_usd", block.limit_usd),
             ("reset_interval", block.reset_interval),
             &cleared,
+            BudgetPairing::ResetRequired,
         );
         let allowed_models = self.slugs(&path, "allowed_models", block.allowed_models);
         let denied_models = self.slugs(&path, "denied_models", block.denied_models);
@@ -291,11 +302,16 @@ impl Validator {
         let cleared = self.clears(&path, &block.clear, KEY_CLEARABLE);
 
         let name = self.name(&format!("{path}.name"), block.name);
+        // A key budget stands on its own: the OpenAPI document defines
+        // `limit_reset` as "daily, weekly, monthly, or null for no reset", so
+        // a key limit with no reset interval is a spending cap that never
+        // refills. Only guardrails require the pair.
         let (limit, limit_reset) = self.budget(
             &path,
             ("limit_usd", block.limit_usd),
             ("limit_reset", block.limit_reset),
             &cleared,
+            BudgetPairing::ResetOptional,
         );
 
         let expiring = block.expires_at.is_some();
@@ -366,6 +382,7 @@ impl Validator {
         limit: (&str, Option<wire::Number>),
         reset: (&str, Option<String>),
         cleared: &BTreeSet<String>,
+        pairing: BudgetPairing,
     ) -> (Managed<Usd>, Managed<ResetInterval>) {
         let (limit_field, limit_value) = limit;
         let (reset_field, reset_value) = reset;
@@ -382,8 +399,19 @@ impl Validator {
 
         if matches!(reset, Managed::Set(_)) && !matches!(limit, Managed::Set(_)) {
             self.problem(
-                reset_path,
+                &reset_path,
                 format!("a reset interval needs `{limit_field}`; there is no budget to reset"),
+            );
+        } else if pairing == BudgetPairing::ResetRequired
+            && matches!(limit, Managed::Set(_))
+            && !matches!(reset, Managed::Set(_))
+        {
+            self.problem(
+                &reset_path,
+                format!(
+                    "a budget needs `{reset_field}`; OpenRouter refuses a guardrail limit with \
+                     no reset interval"
+                ),
             );
         }
         (limit, reset)
