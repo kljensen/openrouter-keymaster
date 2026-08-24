@@ -469,9 +469,70 @@ fn a_converged_plan_says_so_and_still_succeeds() {
     assert_eq!(document(&report)["has_changes"], Value::Bool(false));
     assert_eq!(document(&report)["outcome"], "converged");
     assert!(
-        report.to_string().contains("converged: OpenRouter matches"),
+        report
+            .to_string()
+            .contains("converged: everything the configuration describes matches"),
         "{report}"
     );
+}
+
+/// An empty configuration against an organization full of keys nobody
+/// declared: there is nothing to write and nothing for an operator to clear,
+/// so the run is converged and the unmanaged keys are reported as what they
+/// are.
+#[test]
+fn unmanaged_resources_alone_are_converged() {
+    let mut world = World::new();
+    world.observe_key(STRANGER_HASH, "somebody-elses-key");
+    world.observe_guardrail(OTHER_RAIL_ID, "somebody-elses-rail");
+
+    let report = PlanReport::new(&compute(
+        &config("version = 1\n"),
+        &world.state,
+        &world.snapshot,
+    ));
+    let document = document(&report);
+
+    assert_eq!(document["outcome"], "converged");
+    assert!(kinds(&document).contains(&"unmanaged".to_owned()));
+    assert!(report.to_string().contains("unmanaged"), "{report}");
+}
+
+/// The live case that #22 came from: everything the configuration describes
+/// matches, and the organization also holds keys Keymaster will never touch.
+#[test]
+fn a_satisfied_configuration_beside_unmanaged_resources_is_converged() {
+    let mut world = World::new();
+    world.bind_key("jobfeed", JOBFEED_HASH, 1);
+    world.observe_key(JOBFEED_HASH, "golf-jobfeed");
+    world.observe_key(STRANGER_HASH, "somebody-elses-key");
+
+    let document = document(&PlanReport::new(&compute(
+        &config(NARROW),
+        &world.state,
+        &world.snapshot,
+    )));
+
+    assert_eq!(document["outcome"], "converged");
+    assert!(kinds(&document).contains(&"unmanaged".to_owned()));
+}
+
+/// An orphaned binding is a report, not work: the configuration dropped the
+/// address, and only an explicit command ends the resource.
+#[test]
+fn an_orphaned_binding_with_nothing_pending_is_converged() {
+    let mut world = World::new();
+    world.bind_key("dropped", JOBFEED_HASH, 1);
+    world.observe_key(JOBFEED_HASH, "golf-jobfeed");
+
+    let document = document(&PlanReport::new(&compute(
+        &config("version = 1\n"),
+        &world.state,
+        &world.snapshot,
+    )));
+
+    assert_eq!(document["outcome"], "converged");
+    assert!(kinds(&document).contains(&"orphaned_binding".to_owned()));
 }
 
 #[test]
@@ -1049,6 +1110,52 @@ fn an_apply_renders_every_outcome_in_both_formats() {
             .count()
             / 2
     );
+}
+
+#[test]
+fn an_apply_that_only_reported_unmanaged_resources_is_converged() {
+    let mut world = World::new();
+    world.bind_key("jobfeed", JOBFEED_HASH, 1);
+    world.observe_key(JOBFEED_HASH, "golf-jobfeed");
+    world.observe_key(STRANGER_HASH, "somebody-elses-key");
+    let plan = compute(&config(NARROW), &world.state, &world.snapshot);
+    let outcomes: Vec<ActionOutcome> = plan
+        .actions()
+        .iter()
+        .map(|_| ActionOutcome::reported())
+        .collect();
+
+    let report = ApplyReport::new(&plan, &outcomes, None);
+    let document: Value = serde_json::to_value(&report).expect("the report serializes");
+
+    assert_eq!(document["outcome"], "converged");
+    assert!(report.succeeded());
+    assert!(
+        report
+            .to_string()
+            .contains("converged: everything the configuration describes already matches"),
+        "{report}"
+    );
+}
+
+#[test]
+fn an_apply_that_wrote_nothing_because_a_write_is_blocked_is_held_back() {
+    // The key carries the configured name and nothing binds it: the plan's
+    // only work is an adoption, which apply never performs.
+    let mut world = World::new();
+    world.observe_key(JOBFEED_HASH, "golf-jobfeed");
+    let plan = compute(&config(NARROW), &world.state, &world.snapshot);
+    let outcomes: Vec<ActionOutcome> = plan
+        .actions()
+        .iter()
+        .map(|_| ActionOutcome::reported())
+        .collect();
+
+    let report = ApplyReport::new(&plan, &outcomes, None);
+    let document: Value = serde_json::to_value(&report).expect("the report serializes");
+
+    assert_eq!(document["outcome"], "held_back");
+    assert!(report.to_string().contains("held back:"), "{report}");
 }
 
 #[test]

@@ -200,24 +200,16 @@ impl PlanReport {
                 .to_owned();
         }
         match self.outcome {
-            Outcome::Converged => "converged: OpenRouter matches the configuration, and there \
-                                   is nothing to apply."
+            Outcome::Converged => "converged: everything the configuration describes matches \
+                                   OpenRouter, and there is nothing to apply."
                 .to_owned(),
             Outcome::ChangesPending => {
                 format!("{} to apply.", plural(self.executable(), "change"))
             }
-            Outcome::HeldBack => format!(
-                "held back: nothing can be applied, and {} an operator's attention or name a \
-                 resource Keymaster will not change.",
-                plural(self.reported(), "action needs"),
-            ),
+            Outcome::HeldBack => "held back: there is work to do and none of it can run until \
+                                  an operator resolves what it waits on."
+                .to_owned(),
         }
-    }
-
-    /// How many actions are neither executable nor a no-op: the things an
-    /// operator has to read.
-    fn reported(&self) -> usize {
-        self.actions.len() - self.count_of(ActionKind::NoOp) - self.executable()
     }
 }
 
@@ -229,11 +221,16 @@ impl PlanReport {
 /// unfinished operation, or a dependency on one of those — is not finished at
 /// all, and reporting it as a match would be telling an operator the opposite
 /// of what is true.
+///
+/// A pure report is neither. An unmanaged remote resource, an orphaned binding
+/// with nothing pending, and a no-op leave nothing for anyone to do, so a plan
+/// made only of those is converged and the actions themselves say what an
+/// operator may still want to look at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Outcome {
-    /// Every action is a no-op: what the configuration describes is what
-    /// OpenRouter has.
+    /// Nothing to write and nothing an operator has to clear: what the
+    /// configuration describes is what OpenRouter has.
     Converged,
     /// An apply would execute at least one action.
     ChangesPending,
@@ -246,14 +243,10 @@ impl Outcome {
         if has_changes {
             return Self::ChangesPending;
         }
-        if plan
-            .actions()
-            .iter()
-            .all(|action| action.kind == ActionKind::NoOp)
-        {
-            return Self::Converged;
+        if plan.actions().iter().any(Action::holds_back) {
+            return Self::HeldBack;
         }
-        Self::HeldBack
+        Self::Converged
     }
 }
 

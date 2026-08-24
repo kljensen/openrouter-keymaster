@@ -91,7 +91,7 @@ fn a_converged_project_plans_no_changes_and_exits_zero() {
     assert!(
         human
             .out
-            .contains("converged: OpenRouter matches the configuration"),
+            .contains("converged: everything the configuration describes matches OpenRouter"),
         "{}",
         human.out
     );
@@ -233,6 +233,33 @@ fn a_remote_resource_no_address_owns_is_reported_as_unmanaged() {
             format!("remote guardrail {OTHER_FAKE_GUARDRAIL_ID}"),
         ]
     );
+    assert_eq!(document["has_changes"], Value::Bool(false));
+    assert_eq!(
+        document["outcome"], "converged",
+        "a resource Keymaster will never touch is a report, not work held back"
+    );
+}
+
+/// An organization full of keys nobody declared, and a configuration that
+/// declares none of them: there is nothing to do, so the plan says so.
+#[test]
+fn an_empty_configuration_beside_unmanaged_resources_is_converged() {
+    let project = Project::new("version = 1\n");
+    let (keys, guardrails) = converged_remote();
+    project.observe(keys, guardrails, Vec::new());
+
+    let human = project.succeed(&["plan"]);
+    assert!(human.out.contains("unmanaged"), "{}", human.out);
+    assert!(
+        human
+            .out
+            .contains("converged: everything the configuration"),
+        "{}",
+        human.out
+    );
+
+    let document = project.succeed(&["--json", "plan"]).document();
+    assert_eq!(document["outcome"], "converged");
     assert_eq!(document["has_changes"], Value::Bool(false));
 }
 

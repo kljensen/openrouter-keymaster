@@ -178,7 +178,9 @@ fn a_converged_project_writes_nothing_at_all() {
 
     let human = project.succeed(&["apply"]);
     assert!(
-        human.out.contains("converged: OpenRouter already matches"),
+        human
+            .out
+            .contains("converged: everything the configuration describes already matches"),
         "{}",
         human.out
     );
@@ -216,6 +218,10 @@ fn a_remote_resource_no_address_owns_is_never_written_to() {
     assert_eq!(
         action(&document, &format!("remote key {STRAY_HASH}"))["status"],
         "reported"
+    );
+    assert_eq!(
+        document["outcome"], "converged",
+        "an unmanaged resource is reported, and holds nothing back"
     );
     assert!(project.write_trace().is_empty());
 }

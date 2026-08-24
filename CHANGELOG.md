@@ -9,6 +9,12 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Fixed
 
+- `plan` and `apply` report `converged` when there is nothing to write and
+  nothing an operator has to clear. An `unmanaged` remote resource, an
+  `orphaned_binding` with no operation pending, and a `no_op` no longer make a
+  run `held_back`, which is now reserved for a write that cannot run and for a
+  blocker only an operator can resolve.
+
 - A guardrail with `limit_usd` and no `reset_interval` is now rejected by
   offline validation, naming `guardrails.NAME.reset_interval`, instead of
   failing at apply time with an HTTP 400 from OpenRouter. Keys are unchanged: a

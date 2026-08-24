@@ -55,9 +55,11 @@ organization you mean to change. See
    ```
 
    Read the outcome on the last line. `converged` means OpenRouter already
-   matches the file. `changes_pending` means an apply would write something —
-   read every action before you run one. `held_back` means there is work that
-   only you can unblock, usually an `adoption_required` (see below).
+   matches the file — it can still list `unmanaged` resources and orphaned
+   bindings, which are reports rather than work. `changes_pending` means an
+   apply would write something — read every action before you run one.
+   `held_back` means there is work that only you can unblock, usually an
+   `adoption_required` (see below).
 
 `plan` writes nothing: no API write, no receiver, no change to the state file,
 not even when it observes drift. Run it as often as you like.

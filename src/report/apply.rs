@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use super::plan::{ChangeReport, ExpansionReport, ReasonReport};
 use super::plural;
-use crate::plan::{Action, ActionKind, Identity, Plan};
+use crate::plan::{Action, Identity, Plan};
 
 /// What happened to one planned action.
 ///
@@ -302,7 +302,7 @@ impl ApplyReport {
             warnings: Vec::new(),
             actions,
         };
-        report.outcome = Outcome::of(&report);
+        report.outcome = Outcome::of(plan, &report);
         report.warnings = report.build_warnings();
         report
     }
@@ -414,15 +414,6 @@ impl ApplyReport {
         warnings
     }
 
-    /// How many actions are neither a write nor a no-op: the things an
-    /// operator has to read.
-    fn reported(&self) -> usize {
-        self.actions
-            .iter()
-            .filter(|action| action.status == Status::Reported && !action.is_no_op())
-            .count()
-    }
-
     /// The addresses of the writes the plan held back.
     fn held_back_addresses(&self) -> Vec<&str> {
         self.actions
@@ -495,10 +486,9 @@ impl ApplyReport {
             Outcome::Blocked => "blocked: an unfinished operation of unknown outcome stops this \
                                  run; nothing was applied."
                 .to_owned(),
-            Outcome::Converged => {
-                "converged: OpenRouter already matches the configuration; nothing was written."
-                    .to_owned()
-            }
+            Outcome::Converged => "converged: everything the configuration describes already \
+                                   matches OpenRouter; nothing was written."
+                .to_owned(),
             Outcome::Applied => format!(
                 "applied {applied}, all verified.",
                 applied = plural(self.applied, "change")
@@ -515,11 +505,9 @@ impl ApplyReport {
                 applied = plural(self.applied, "change"),
                 held = plural(self.held_back, "planned write is"),
             ),
-            Outcome::HeldBack => format!(
-                "held back: nothing was applied, and {} an operator's attention or name a \
-                 resource Keymaster will not change.",
-                plural(self.reported(), "action needs"),
-            ),
+            Outcome::HeldBack => "held back: nothing was applied, and work remains that an \
+                                  operator has to resolve first."
+                .to_owned(),
             Outcome::Failed => format!(
                 "incomplete: {failed} and {unverified}.",
                 failed = plural(self.failed, "write failed"),
@@ -553,13 +541,16 @@ enum Outcome {
 impl Outcome {
     /// Classifies an apply from what became of every action in its plan.
     ///
-    /// `converged` is the strict one, and deliberately so: it means the plan
-    /// held nothing but no-ops, which is the same thing `openrouter-keymaster plan` calls
-    /// converged. An apply that wrote nothing because everything it wanted to
-    /// write was held back behind an adoption, a missing resource, or an
-    /// unfinished operation has *not* converged anything, and saying so would
-    /// tell an operator the opposite of what is true.
-    fn of(report: &ApplyReport) -> Self {
+    /// `converged` means the same thing here as it does in
+    /// `openrouter-keymaster plan`: nothing was written, and the plan held no
+    /// write and nothing an operator has to clear. An apply that wrote nothing
+    /// because everything it wanted to write was held back behind an adoption,
+    /// a missing resource, or an unfinished operation has *not* converged
+    /// anything, and saying so would tell an operator the opposite of what is
+    /// true. A pure report — an unmanaged remote resource, an orphaned binding
+    /// with nothing pending, a no-op — asks nothing of anyone and does not
+    /// stand in the way of convergence.
+    fn of(plan: &Plan, report: &ApplyReport) -> Self {
         if report.blocked {
             return Self::Blocked;
         }
@@ -575,13 +566,12 @@ impl Outcome {
         if report.applied > 0 {
             return Self::Applied;
         }
-        if report.actions.iter().all(ActionReport::is_no_op) {
-            return Self::Converged;
+        if plan.actions().iter().any(Action::holds_back) {
+            // Nothing was written and nothing could be: what is left needs an
+            // operator.
+            return Self::HeldBack;
         }
-        // Nothing to write and nothing written, but the plan is not made of
-        // no-ops: what is left needs an operator, or names a resource
-        // Keymaster will not change.
-        Self::HeldBack
+        Self::Converged
     }
 }
 
@@ -653,11 +643,6 @@ impl ActionReport {
             changes: action.changes.iter().map(ChangeReport::new).collect(),
             reasons: action.rationale.iter().map(ReasonReport::new).collect(),
         }
-    }
-
-    /// Whether this action is one the planner had nothing to say about.
-    fn is_no_op(&self) -> bool {
-        self.kind == ActionKind::NoOp.as_str()
     }
 
     fn lines(&self) -> Vec<String> {

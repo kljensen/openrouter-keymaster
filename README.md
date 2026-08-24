@@ -132,11 +132,18 @@ recorded anywhere. While an operation of unknown outcome stands, the plan is
 `blocked` and nothing is executable.
 
 **"Nothing to apply" has two causes and they are not the same**, so a plan ends
-in one of three outcomes: `converged` (every action is a no-op — OpenRouter
-matches the configuration), `changes_pending` (an apply would execute at least
-one action), or `held_back` (there is work and none of it can run, behind an
-adoption, a missing resource, an unfinished operation, or a dependency on one
-of those). The outcome is a field in JSON and the last line of human output.
+in one of three outcomes: `converged` (nothing to write and nothing an operator
+has to clear — everything the configuration describes matches OpenRouter),
+`changes_pending` (an apply would execute at least one action), or `held_back`
+(there is work and none of it can run, behind an adoption, a missing resource,
+an unfinished operation, or a dependency on one of those). The outcome is a
+field in JSON and the last line of human output.
+
+**A report is not work.** An `unmanaged` remote resource, an `orphaned_binding`
+with no operation pending, and a `no_op` ask nothing of Keymaster or of an
+operator, so a run holding only those is `converged` and the actions still say
+what is there. An orphaned binding that carries an unfinished operation is
+different — that operation is unsettled — and it holds the run back.
 
 `status` reports the same underlying facts from the other direction: which
 local address owns which remote resource and where the binding came from,
@@ -281,13 +288,13 @@ replace a key rather than to patch one. An assignment write names one key,
 never a guardrail's whole key list — a guardrail can carry keys no local
 address owns.
 
-An apply's outcome is one of six, and `converged` is the strict one — it means
-the plan held nothing but no-ops, exactly what `openrouter-keymaster plan`
-calls converged:
+An apply's outcome is one of six, and `converged` means what
+`openrouter-keymaster plan` means by it — nothing was written, and the plan held
+no write and nothing an operator has to clear:
 
 | Outcome | Meaning | Exit |
 | ------- | ------- | ---- |
-| `converged` | The plan was all no-ops; nothing was written | 0 |
+| `converged` | Nothing to write and nothing to clear; nothing was written | 0 |
 | `applied` | Every planned write was made and verified | 0 |
 | `incomplete` | Nothing failed, but a write apply deliberately did not make was skipped | 0 |
 | `held_back` | Nothing failed, and work remains that only an operator can unblock | 0 |

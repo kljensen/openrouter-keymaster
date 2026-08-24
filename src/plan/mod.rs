@@ -185,6 +185,22 @@ impl Action {
         })
     }
 
+    /// Whether this action keeps the run from being finished.
+    ///
+    /// A write is work the configuration asks for. A blocker — an adoption, a
+    /// missing resource, an unfinished operation — is work only an operator
+    /// can clear. An action waiting on either is in the same position.
+    ///
+    /// Everything else is a pure report: an unmanaged remote resource, an
+    /// orphaned binding with nothing pending, a no-op. None of those is work
+    /// Keymaster or an operator owes the configuration, so none of them keeps
+    /// a run out of convergence. An orphaned binding that still carries an
+    /// unfinished operation does, because that operation is unsettled.
+    #[must_use]
+    pub fn holds_back(&self) -> bool {
+        self.kind.writes() || self.kind.blocks_dependents() || self.is_blocked()
+    }
+
     /// Whether apply may execute this action, given whether the plan it
     /// belongs to is blocked.
     ///
