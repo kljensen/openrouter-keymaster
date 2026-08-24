@@ -10,7 +10,7 @@ mod support;
 use std::time::Duration;
 
 use keymaster::api::pagination::PageLimits;
-use keymaster::api::{ObservedKey, Reader, ResetPolicy};
+use keymaster::api::{ObservedKey, Reader, ResetPolicy, Writer};
 use keymaster::client::{Client, ManagementKey, Options, RetryPolicy};
 use keymaster::config::{ResetInterval, Usd};
 use keymaster::ids::{KeyHash, Uuid};
@@ -513,4 +513,50 @@ fn reading_never_writes() {
     for request in server.requests() {
         assert_eq!(request.method.as_str(), "GET", "a read must not write");
     }
+}
+
+#[test]
+fn deleting_a_key_sends_one_bodiless_delete_addressed_by_hash() {
+    let server = TestServer::start();
+    server.mount(
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/keys/hash-jobfeed-1"))
+            .respond_with(json_response(200, &json!({}))),
+    );
+
+    let client = client(&server);
+    Writer::new(&client)
+        .delete_key(&KeyHash::parse("hash-jobfeed-1").expect("a valid hash"))
+        .expect("the delete is accepted");
+
+    server.assert_request_count(1);
+    let request = server.request(0);
+    assert_eq!(request.method.as_str(), "DELETE");
+    assert_eq!(request.url.path(), "/api/v1/keys/hash-jobfeed-1");
+    assert!(
+        request.body.is_empty(),
+        "the resource is named in the path; a body would be a second statement of it"
+    );
+}
+
+#[test]
+fn a_delete_that_is_refused_reports_the_status_and_is_never_repeated() {
+    let server = TestServer::start();
+    server.mount(Mock::given(method("DELETE")).respond_with(
+        ResponseTemplate::new(404).set_body_json(json!({
+            "error": { "code": 404, "message": "no such key" }
+        })),
+    ));
+
+    let client = client(&server);
+    let error = Writer::new(&client)
+        .delete_key(&KeyHash::parse("hash-gone").expect("a valid hash"))
+        .expect_err("OpenRouter has no such key");
+
+    assert_eq!(
+        error.status(),
+        Some(404),
+        "the caller decides what a 404 means for a delete: {error}"
+    );
+    server.assert_request_count(1);
 }

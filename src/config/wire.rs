@@ -78,6 +78,7 @@ pub(super) struct Key {
     pub(super) expires_at: Option<String>,
     pub(super) disabled: Option<bool>,
     pub(super) workspace_id: Option<String>,
+    pub(super) creator_user_id: Option<String>,
     pub(super) guardrail: Option<String>,
     pub(super) receiver: Option<String>,
     pub(super) generation: Option<i64>,

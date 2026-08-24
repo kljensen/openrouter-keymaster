@@ -147,45 +147,31 @@ fn recover_resolve_requires_exactly_one_finding() {
 
 #[test]
 fn a_parsed_command_fails_with_an_application_error_on_stderr() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
     keymaster()
-        .arg("rotate")
-        .arg("jobfeed")
+        .arg("--config")
+        .arg(directory.path().join("nowhere.toml"))
+        .arg("--state")
+        .arg(directory.path().join("state.json"))
+        .args(["rotate", "jobfeed"])
         .assert()
         .code(APPLICATION_ERROR)
         .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("not implemented"));
+        .stderr(predicate::str::contains("cannot read"));
 }
 
-#[test]
-fn every_unimplemented_command_parses_and_reaches_its_handler() {
-    let commands: [&[&str]; 4] = [
-        &["rotate", "jobfeed"],
-        &["retire", "jobfeed", "--hash", "sha256:aaaa"],
-        &["delete", "key", "--hash", "sha256:aaaa"],
-        &["state", "forget", "keys.jobfeed"],
-    ];
-
-    for command in commands {
-        keymaster()
-            .args(command)
-            .assert()
-            .code(APPLICATION_ERROR)
-            .stdout(predicate::str::is_empty())
-            .stderr(predicate::str::contains("not implemented"));
-    }
-}
-
-/// `plan`, `status`, `import`, `apply`, and `recover replace` are implemented,
-/// so "reaching the handler" means reading the configuration. Each is given a
-/// path that does not exist, which stops it before a client is built and
-/// therefore before any network call. `import` validates its identifier first,
-/// so the identifiers here are well formed.
+/// Every v0.1 command is implemented, so "reaching the handler" means failing
+/// in that handler's own vocabulary. A `usage` kind would mean clap stopped the
+/// run before it started, and a shared kind would mean it stopped somewhere
+/// generic; each case below names the refusal that belongs to exactly one
+/// command.
 ///
-/// `recover inspect` and `recover resolve` are absent because neither reads the
-/// configuration: they act on the journal, which the configuration does not
-/// describe. `tests/recover.rs` covers them.
+/// The configuration path does not exist, which stops the commands that read
+/// one before any client is built and therefore before any network call. The
+/// three that do not read a configuration — retire, delete, and forget act on
+/// the state file's own record — get as far as looking for the hash.
 #[test]
-fn the_implemented_commands_reach_their_handler_and_stop_at_the_configuration() {
+fn every_command_reaches_its_own_handler_before_any_network_call() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let missing = directory.path().join("nowhere.toml");
     // A writing command takes the state lock before it reads the
@@ -193,38 +179,80 @@ fn the_implemented_commands_reach_their_handler_and_stop_at_the_configuration() 
     // default one, relative to wherever the test runner happens to be.
     let state = directory.path().join("state.json");
 
-    let commands: [&[&str]; 6] = [
-        &["plan"],
-        &["status"],
-        &["apply"],
-        &["recover", "replace", "jobfeed"],
-        &["import", "key", "jobfeed", "--hash", "sha256:aaaa"],
-        &[
-            "import",
-            "guardrail",
-            "cheap",
-            "--id",
-            "00000000-0000-4000-8000-000000000000",
-        ],
+    let cases: [(&[&str], &str); 9] = [
+        (&["plan"], "config_read"),
+        (&["status"], "config_read"),
+        (&["apply"], "config_read"),
+        (&["rotate", "jobfeed"], "config_read"),
+        (&["recover", "replace", "jobfeed"], "config_read"),
+        (
+            &["import", "key", "jobfeed", "--hash", "sha256:aaaa"],
+            "config_read",
+        ),
+        (
+            &[
+                "import",
+                "guardrail",
+                "cheap",
+                "--id",
+                "00000000-0000-4000-8000-000000000000",
+            ],
+            "config_read",
+        ),
+        (
+            &["retire", "jobfeed", "--hash", "sha256:aaaa"],
+            "retire_not_bound",
+        ),
+        (
+            &["delete", "key", "--hash", "sha256:aaaa"],
+            "delete_untracked",
+        ),
     ];
 
-    for command in commands {
-        keymaster()
+    for (command, kind) in cases {
+        let output = keymaster()
+            .arg("--json")
             .arg("--config")
             .arg(&missing)
             .arg("--state")
             .arg(&state)
             .args(command)
-            .assert()
-            .code(APPLICATION_ERROR)
-            .stdout(predicate::str::is_empty())
-            .stderr(predicate::str::contains("cannot read"));
+            .output()
+            .expect("the binary runs");
+
+        assert_eq!(output.status.code(), Some(APPLICATION_ERROR), "{command:?}");
+        assert!(output.stdout.is_empty(), "{command:?} wrote a result");
+        let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+        let document: serde_json::Value =
+            serde_json::from_str(&stderr).expect("one JSON diagnostic");
+        assert_eq!(document["error"]["kind"], kind, "{command:?}: {stderr}");
     }
 
     assert!(
         !state.exists(),
-        "a run that stopped at the configuration writes no state"
+        "none of these got far enough to write state"
     );
+}
+
+/// `state forget` is the exception: an address bound to nothing is a clean
+/// no-op rather than an error, so it succeeds and still writes no state.
+#[test]
+fn forgetting_an_unbound_address_succeeds_and_writes_nothing() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let state = directory.path().join("state.json");
+
+    keymaster()
+        .arg("--config")
+        .arg(directory.path().join("nowhere.toml"))
+        .arg("--state")
+        .arg(&state)
+        .args(["state", "forget", "keys.jobfeed"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("nothing to forget"))
+        .stderr(predicate::str::is_empty());
+
+    assert!(!state.exists(), "a no-op forget writes no state");
 }
 
 #[test]
@@ -239,8 +267,11 @@ fn plan_help_documents_that_exit_zero_covers_a_plan_with_changes() {
 
 #[test]
 fn json_diagnostics_are_one_uncolored_json_document() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
     let output = keymaster()
-        .args(["--json", "rotate", "jobfeed"])
+        .arg("--config")
+        .arg(directory.path().join("nowhere.toml"))
+        .args(["--json", "status"])
         .output()
         .expect("the binary runs");
 
@@ -250,7 +281,7 @@ fn json_diagnostics_are_one_uncolored_json_document() {
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     let document: serde_json::Value =
         serde_json::from_str(&stderr).expect("stderr is exactly one JSON document");
-    assert_eq!(document["error"]["kind"], "not_implemented");
+    assert_eq!(document["error"]["kind"], "config_read");
     assert!(
         !stderr.contains('\u{1b}'),
         "JSON output must never be colored"

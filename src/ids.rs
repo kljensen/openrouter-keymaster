@@ -23,6 +23,10 @@ const REMOTE_NAME_MAX: usize = 200;
 /// Longest accepted key hash. Generous: the hash is OpenRouter's to choose.
 const KEY_HASH_MAX: usize = 256;
 
+/// Longest accepted organization member identifier. Generous for the same
+/// reason as a hash: the format is OpenRouter's, not Keymaster's.
+const USER_ID_MAX: usize = 128;
+
 /// Longest accepted operation identifier.
 const OPERATION_ID_MAX: usize = 64;
 
@@ -57,6 +61,22 @@ pub enum IdError {
          characters"
     )]
     RemoteName,
+
+    /// An organization member identifier was empty, oversized, or not one line
+    /// of text.
+    #[error(
+        "a user id must be 1 to {USER_ID_MAX} characters and must not contain whitespace or \
+         control characters; it is OpenRouter's identifier for an organization member, such as \
+         `user_2dHFtVWx2n56w6HkM0000000000`"
+    )]
+    UserId,
+
+    /// A user identifier carried something credential-shaped.
+    #[error(
+        "a user id names an organization member and must carry no secret material; it is sent to \
+         OpenRouter and printed in plans and reports"
+    )]
+    UserIdIsSecret,
 
     /// A remote display name carried something credential-shaped.
     #[error(
@@ -207,6 +227,53 @@ impl RemoteName {
     }
 
     /// The name as it is sent to OpenRouter.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// An OpenRouter organization member, as OpenRouter identifies one.
+///
+/// The only place this appears is a key's `creator_user_id`: an
+/// organization-owned key records which member created it, `POST /keys` accepts
+/// it, and `PATCH /keys/{hash}` has no field for it. So it is a managed field
+/// that is fixed at creation, and changing it is a reason to replace a key
+/// rather than to patch one.
+///
+/// The format is OpenRouter's, so this checks only that the value is one line
+/// of printable text of a sane length. It is not a secret and it is not a
+/// credential, but it is operator-supplied text that reaches a request body and
+/// a report, so the same two rules every other identifier here obeys apply:
+/// nothing credential-shaped, and nothing that can rewrite a terminal line.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct UserId(String);
+
+impl UserId {
+    /// Parses an organization member identifier, trimming surrounding
+    /// whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IdError::UserIdIsSecret`] for credential-shaped input, or
+    /// [`IdError::UserId`] unless the trimmed value is 1 to
+    /// [`USER_ID_MAX`] characters with no whitespace or control characters.
+    pub fn parse(value: &str) -> Result<Self, IdError> {
+        if crate::redaction::looks_like_credential(value) {
+            return Err(IdError::UserIdIsSecret);
+        }
+        let value = value.trim();
+        let shaped = !value.is_empty()
+            && value.chars().count() <= USER_ID_MAX
+            && !value.chars().any(|c| c.is_control() || c.is_whitespace());
+        if !shaped {
+            return Err(IdError::UserId);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    /// The identifier as it is sent to OpenRouter.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -402,6 +469,7 @@ macro_rules! string_newtype_conversions {
 string_newtype_conversions!(Address);
 string_newtype_conversions!(Uuid);
 string_newtype_conversions!(RemoteName);
+string_newtype_conversions!(UserId);
 string_newtype_conversions!(KeyHash);
 string_newtype_conversions!(OperationId);
 string_newtype_conversions!(ReceiverFingerprint);
@@ -508,6 +576,39 @@ mod tests {
         assert_eq!(
             RemoteName::parse("sk-or-v1-leaked"),
             Err(IdError::RemoteNameIsSecret)
+        );
+    }
+
+    #[test]
+    fn user_ids_are_one_opaque_printable_token() {
+        assert_eq!(
+            UserId::parse("  user_2dHFtVWx2n56w6HkM0000000000  ")
+                .expect("a valid user id")
+                .as_str(),
+            "user_2dHFtVWx2n56w6HkM0000000000",
+            "the format is OpenRouter's; only the surrounding space is Keymaster's to drop"
+        );
+        for rejected in [
+            "",
+            "   ",
+            // An identifier is one token: an inner space or a newline is a
+            // pasted mistake, and a control character can rewrite the line a
+            // plan is printed on.
+            "user_one two",
+            "user\nbreak",
+            "user\u{1b}[31m",
+            &"u".repeat(USER_ID_MAX + 1),
+        ] {
+            assert_eq!(
+                UserId::parse(rejected),
+                Err(IdError::UserId),
+                "{rejected:?}"
+            );
+        }
+        assert_eq!(
+            UserId::parse("sk-or-v1-leaked"),
+            Err(IdError::UserIdIsSecret),
+            "a creator is sent to OpenRouter and printed in every plan that mentions the key"
         );
     }
 

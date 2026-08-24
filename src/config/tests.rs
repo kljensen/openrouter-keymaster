@@ -515,6 +515,38 @@ workspace_id = "not-a-uuid"
 }
 
 #[test]
+fn a_creator_is_an_opaque_member_identifier() {
+    let config = parse(
+        r#"
+version = 1
+[keys.jobfeed]
+name = "jobfeed"
+creator_user_id = "user_2dHFtVWx2n56w6HkM0000000000"
+"#,
+    );
+    assert_eq!(
+        config.keys[&address("jobfeed")]
+            .creator_user_id
+            .as_ref()
+            .map(|user| user.as_str()),
+        Some("user_2dHFtVWx2n56w6HkM0000000000")
+    );
+
+    // Not one token, so it is a pasted mistake rather than an identifier.
+    assert_eq!(
+        paths(
+            r#"
+version = 1
+[keys.jobfeed]
+name = "jobfeed"
+creator_user_id = "user one"
+"#,
+        ),
+        ["keys.jobfeed.creator_user_id"]
+    );
+}
+
+#[test]
 fn budgets_must_be_non_negative_and_representable() {
     let problems = problems(
         r#"

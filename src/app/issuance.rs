@@ -772,6 +772,9 @@ impl Prepared<'_> {
     ///
     /// `disabled` is absent because `POST /keys` has no such field; the
     /// update-only restrictions that follow carry it, before delivery.
+    ///
+    /// `creator_user_id` is the opposite case: `POST /keys` is the only place
+    /// that accepts it, so it has to be right here or never.
     fn request(&self) -> CreateKeyRequest {
         CreateKeyRequest {
             name: self.desired.name.clone(),
@@ -780,6 +783,7 @@ impl Prepared<'_> {
             include_byok_in_limit: self.desired.include_byok_in_limit,
             expires_at: self.desired.expires_at.value().copied(),
             workspace_id: self.desired.workspace_id.clone(),
+            creator_user_id: self.desired.creator_user_id.clone(),
         }
     }
 }
@@ -838,6 +842,51 @@ mod tests {
             next_generation(&address, &owning(&address, 4), &higher.keys[&address]),
             Ok(9),
             "and a configuration asking for more than that gets what it asked for"
+        );
+    }
+
+    #[test]
+    fn a_generation_a_deleted_key_used_is_never_offered_again() {
+        // `delete key` drops a retained hash once OpenRouter confirms the key is
+        // gone. The generation it held does not come back with it: handing the
+        // number to a successor would give two different remote keys the same
+        // generation at one address, and the record of the first has just been
+        // deleted.
+        let (address, config) = configured(1);
+        let mut state = State::new();
+        state
+            .begin_create(
+                &address,
+                BeginCreate {
+                    operation: OperationId::mint(OffsetDateTime::UNIX_EPOCH),
+                    generation: 2,
+                    name: config.keys[&address].name.clone(),
+                    workspace: None,
+                    receiver: ReceiverFingerprint::from_digest([1; 32]),
+                },
+                OffsetDateTime::UNIX_EPOCH,
+            )
+            .expect("starting a create");
+        state
+            .advance_key(
+                &address,
+                Transition::Created {
+                    hash: KeyHash::parse("hash-two").expect("a valid hash"),
+                },
+                OffsetDateTime::UNIX_EPOCH,
+            )
+            .expect("the create returned a hash");
+        state
+            .retire_candidate(&address, OffsetDateTime::UNIX_EPOCH)
+            .expect("the attempt is dead");
+        state
+            .drop_retained(&address, &KeyHash::parse("hash-two").expect("a valid hash"))
+            .expect("deleting the dead key");
+
+        assert_eq!(
+            next_generation(&address, &state, &config.keys[&address]),
+            Ok(3),
+            "the address holds no key at all now, and generation 2 is still spent"
         );
     }
 

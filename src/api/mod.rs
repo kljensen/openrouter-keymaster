@@ -25,7 +25,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::client::{ApiError, Client};
 use crate::config::{ResetInterval, Usd};
-use crate::ids::{KeyHash, Uuid};
+use crate::ids::{KeyHash, UserId, Uuid};
 use pagination::{Page, PageLimits};
 
 pub use write::{AssignKeys, DisableKey, GuardrailBody, UpdateKey};
@@ -88,6 +88,8 @@ pub struct ObservedKey {
     pub include_byok_in_limit: bool,
     pub expires_at: Option<OffsetDateTime>,
     pub workspace_id: Option<Uuid>,
+    /// The organization member OpenRouter records as the key's creator.
+    pub creator_user_id: Option<UserId>,
     pub usage: KeyUsage,
     pub timestamps: RemoteTimestamps,
 }
@@ -377,6 +379,27 @@ impl<'client> Writer<'client> {
             .patch_once_discarding_body(&["keys", hash.as_str()], &DisableKey::new())
     }
 
+    /// Permanently deletes one key, by its immutable identity.
+    ///
+    /// The one irreversible write Keymaster makes, and the only one it will
+    /// never send on its own initiative: nothing plans a delete, and no
+    /// convergence performs one. It exists for `keymaster delete key`, where an
+    /// operator names a hash Keymaster already tracks.
+    ///
+    /// Sent once, like every write here, and its success is established by
+    /// reading the key back and getting a 404 — not by the status this returns.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_guardrail`]. A 404 means OpenRouter has no such key,
+    /// which for a delete is the desired end state rather than a failure; the
+    /// caller decides that, because only the caller knows whether it expected
+    /// the key to be there.
+    pub fn delete_key(&self, hash: &KeyHash) -> Result<(), ApiError> {
+        self.client
+            .delete_once_discarding_body(&["keys", hash.as_str()])
+    }
+
     /// Attaches one key to one guardrail.
     ///
     /// # Errors
@@ -430,6 +453,7 @@ impl ObservedKey {
             include_byok_in_limit: key.include_byok_in_limit,
             expires_at: managed_timestamp(key.expires_at.as_deref(), "expires_at", &identity)?,
             workspace_id: workspace(key.workspace_id.as_deref(), &identity)?,
+            creator_user_id: creator(key.creator_user_id.as_deref(), &identity)?,
             usage: KeyUsage {
                 total: key.usage,
                 daily: key.usage_daily,
@@ -555,6 +579,23 @@ fn timestamps(created_at: Option<&str>, updated_at: Option<&str>) -> RemoteTimes
         created_at: lenient_timestamp(created_at),
         updated_at: lenient_timestamp(updated_at),
     }
+}
+
+/// Reads a key's creator, which must be a usable member identifier if it is
+/// anything.
+///
+/// Strict rather than lenient, like [`managed_timestamp`] and unlike the
+/// read-only fields: `creator_user_id` is a managed field fixed at creation, so
+/// a value that cannot be read would look like a key with no creator, and a
+/// configuration naming one would plan a replacement for a live credential.
+fn creator(value: Option<&str>, identity: &str) -> Result<Option<UserId>, ApiError> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            UserId::parse(value)
+                .map_err(|error| unusable(identity, "creator_user_id", &error.to_string()))
+        })
+        .transpose()
 }
 
 /// Reads a workspace identifier, which must be a UUID if it is anything.

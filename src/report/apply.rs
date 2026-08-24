@@ -328,8 +328,8 @@ impl ApplyReport {
     /// operation stopping it.
     ///
     /// True for an apply that left work behind, as long as nothing went wrong:
-    /// a write apply cannot make yet and a write an operator has to unblock
-    /// are both reported, conspicuously, and neither is a failure of this run.
+    /// a write apply deliberately skipped and a write an operator has to
+    /// unblock are both reported, conspicuously, and neither is a failure of this run.
     #[must_use]
     pub const fn succeeded(&self) -> bool {
         matches!(
@@ -539,7 +539,8 @@ enum Outcome {
     Converged,
     /// Every planned write was made and verified.
     Applied,
-    /// Nothing failed, but a write apply cannot make yet was skipped.
+    /// Nothing failed, but a write apply deliberately did not make was
+    /// skipped.
     Incomplete,
     /// Nothing failed, and work remains that only an operator can unblock —
     /// an adoption, a missing resource, an unfinished operation, or a

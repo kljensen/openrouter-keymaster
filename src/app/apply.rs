@@ -20,9 +20,9 @@
 //! guardrail that exists and is not recorded is one only its mutable name could
 //! find again, which is exactly the situation ADR-0001 exists to avoid.
 //!
-//! # Creating a key is its own transaction
+//! # Issuing a key is its own transaction
 //!
-//! A planned key `create` runs the journaled transaction in
+//! A planned key `create` or `replace` runs the journaled transaction in
 //! [`super::issuance`], which is the only thing here that issues secret
 //! material. It sits inside the key phase like any other write, but it obeys
 //! ADR-0002's rules rather than this module's: exactly one `POST /keys`, a
@@ -31,12 +31,18 @@
 //! ends the whole run, because an unresolved operation may have made a live
 //! credential no local record names.
 //!
-//! A `replace` is still skipped. Staging a successor beside a live predecessor
-//! is #19's, and the transaction it will use is the one already here.
+//! A `replace` differs from a `create` in one respect and one only: the address
+//! already owns a key. That key is *not* touched. It is not disabled, not
+//! deleted, and not unassigned; the successor is created, secured, verified,
+//! and delivered first, and only the promotion that follows a confirmed
+//! delivery moves the predecessor to `retained.awaiting_retirement`, where it
+//! stays enabled until an operator runs `keymaster retire`. So a rotation that
+//! fails at any phase leaves the working credential working.
 //!
 //! # What apply will not do
 //!
-//! - **Replace an inference key.** See above: #19 owns rotation.
+//! - **Retire, disable, or delete a predecessor.** Rotation stages; retirement
+//!   is always explicit. See `keymaster retire` and `keymaster delete key`.
 //! - **Resolve what holds a write back.** An action whose dependency needs an
 //!   operator — an adoption, a missing resource, an unfinished operation — is
 //!   reported as held back, naming what it waits on. An apply that wrote
@@ -69,25 +75,13 @@ use crate::cli::Cli;
 use crate::client::Client;
 use crate::config::Config;
 use crate::error::Error;
-use crate::ids::Address;
+use crate::ids::{Address, KeyHash};
 use crate::output::Renderer;
 use crate::plan::{self, Action, ActionKind, Identity, Plan, Reason, ResourceAddress};
 use crate::report::{ActionOutcome, ApplyReport};
 use crate::state::{KeyBinding, Phase as JournalPhase, State, StateFile, StateLock};
 
 use super::issuance::Issuer;
-
-/// Why a planned key replacement is not made.
-const REPLACEMENT_SKIPPED: &str = "skipped: `keymaster apply` does not replace an inference key \
-                                   yet. Staging a successor beside a live predecessor is #19's; \
-                                   the journaled transaction it will use is already here, and \
-                                   `keymaster recover replace` runs it for a key whose plaintext \
-                                   is gone.";
-
-/// Why an assignment planned beside a skipped replacement is not made.
-const ASSIGNMENT_AWAITING_ISSUANCE: &str = "not attempted: this assignment belongs to the key the skipped replacement would have \
-     produced, and #19 owns that. Assigning what the address holds now would point a key the \
-     configuration is replacing at its successor's guardrail.";
 
 /// Why an assignment beside a completed creation needs no separate write.
 const ASSIGNMENT_ISSUED: &str = "the key was attached to its guardrail as part of the journaled \
@@ -142,7 +136,6 @@ pub(super) fn run<O: Write, E: Write>(
         writer: &writer,
         lock: &lock,
         stopped: false,
-        awaiting_issuance: BTreeSet::new(),
         issued: BTreeSet::new(),
     };
     let mut outcomes = apply.execute(&plan, &mut state);
@@ -245,15 +238,7 @@ struct Apply<'a> {
     /// merely tidy: ADR-0002 stops the whole apply at the first operation whose
     /// outcome nobody knows.
     stopped: bool,
-    /// Key addresses whose replacement was skipped.
-    ///
-    /// The assignment an issuance is planned with belongs to the key that
-    /// issuance would produce, not to whatever the address holds now. For a
-    /// replacement that is a live predecessor, and assigning *it* to the
-    /// successor's guardrail would change what an existing credential may do —
-    /// on the strength of a key that was never created.
-    awaiting_issuance: BTreeSet<Address>,
-    /// Key addresses whose creation completed during this run.
+    /// Key addresses whose issuance completed during this run.
     ///
     /// Their assignment was made and verified inside the transaction, before
     /// the plaintext was delivered, so the assignment action beside the create
@@ -317,10 +302,8 @@ impl Apply<'_> {
             (ResourceAddress::Guardrail(address), ActionKind::Update) => {
                 self.update_guardrail(address, action)
             }
-            (ResourceAddress::Key(address), ActionKind::Create) => self.create_key(address, state),
-            (ResourceAddress::Key(address), ActionKind::Replace) => {
-                self.awaiting_issuance.insert(address.clone());
-                Ok(ActionOutcome::skipped(REPLACEMENT_SKIPPED))
+            (ResourceAddress::Key(address), ActionKind::Create | ActionKind::Replace) => {
+                self.issue_key(address, state)
             }
             (ResourceAddress::Key(address), ActionKind::Update) => self.update_key(address, action),
             (ResourceAddress::Assignment(address), ActionKind::Assign) => {
@@ -341,11 +324,13 @@ impl Apply<'_> {
     /// convenience: while an operation stands, the state API refuses to start
     /// another, and an attempt whose outcome nobody knows must not be buried
     /// under a second one.
-    fn create_key(
-        &mut self,
-        address: &Address,
-        state: &mut State,
-    ) -> Result<ActionOutcome, String> {
+    ///
+    /// This is also how a planned `replace` runs, and the predecessor's hash is
+    /// read *before* the transaction so the report can name what the promotion
+    /// moved aside. Nothing here retires it: the successor's creation and the
+    /// predecessor's retirement are separate operator-visible steps, and only
+    /// the first is Keymaster's to take.
+    fn issue_key(&mut self, address: &Address, state: &mut State) -> Result<ActionOutcome, String> {
         let issuer = Issuer {
             config: self.config,
             client: self.client,
@@ -353,9 +338,21 @@ impl Apply<'_> {
             writer: self.writer,
             lock: self.lock,
         };
+        let predecessor = state
+            .key(address)
+            .and_then(KeyBinding::current)
+            .map(|current| current.hash.clone());
+
         let issued = issuer.issue(address, state, now())?;
         self.issued.insert(address.clone());
-        Ok(ActionOutcome::applied(issued.detail))
+        Ok(ActionOutcome::applied(match predecessor {
+            None => issued.detail,
+            Some(hash) => format!(
+                "{detail} {predecessor}",
+                detail = issued.detail,
+                predecessor = predecessor_note(address, &hash, issued.promoted)
+            ),
+        }))
     }
 
     /// Creates a guardrail and records its identity before anything else runs.
@@ -446,16 +443,13 @@ impl Apply<'_> {
     /// assignment — which would leave the key unrestricted in between.
     ///
     /// The assignment planned beside a create or a replace belongs to the key
-    /// that issuance would produce. While issuance is skipped, so is this: the
-    /// hash at the address is either absent or the predecessor's, and pointing
-    /// a live predecessor at the successor's guardrail would change what an
-    /// existing credential may do for a key that does not exist.
+    /// that issuance produces, and the transaction already made and verified it
+    /// before the plaintext went anywhere — so there is nothing left to send.
+    /// An issuance that failed stopped the run, so this is never reached with a
+    /// predecessor standing in for a successor that does not exist.
     fn assign(&self, address: &Address, state: &State) -> Result<ActionOutcome, String> {
         if self.issued.contains(address) {
             return Ok(ActionOutcome::applied(ASSIGNMENT_ISSUED));
-        }
-        if self.awaiting_issuance.contains(address) {
-            return Ok(ActionOutcome::not_attempted(ASSIGNMENT_AWAITING_ISSUANCE));
         }
         let desired = self
             .config
@@ -600,6 +594,29 @@ fn blockers(action: &Action) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// What became of the key a replacement moved aside.
+///
+/// Promotion is a durable write of its own, after the one recording the
+/// delivery, and it can fail on its own. Until it lands the predecessor is
+/// still the address's current key — so the confident sentence would be telling
+/// an operator that a hash is retired when it is in service, and pointing them
+/// at `retire` for the key everything is using. The two sentences differ in
+/// exactly the one thing that must not be guessed.
+fn predecessor_note(address: &Address, hash: &KeyHash, promoted: bool) -> String {
+    if !promoted {
+        return format!(
+            "Key {hash} is untouched and is still `{address}`'s current key, because the \
+             promotion did not land; do not retire it until the next `keymaster apply` completes \
+             that and reports it as `awaiting_retirement`."
+        );
+    }
+    format!(
+        "Key {hash} is untouched — still enabled, now tracked as `awaiting_retirement` — because \
+         rotation never disables a predecessor; retire it with `keymaster retire {address} \
+         --hash {hash}` once every consumer holds the new key."
+    )
 }
 
 /// An address the plan named and the configuration does not describe.

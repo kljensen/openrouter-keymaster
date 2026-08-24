@@ -34,6 +34,11 @@ limit_reset = "monthly"
 expires_at = "2027-01-01T00:00:00Z"
 disabled = false
 workspace_id = "6c7f5f5a-4f1b-4e2d-9a3c-1b2d3e4f5a6b"
+# The organization member the key is created on behalf of. Only meaningful for
+# organization-owned keys, and — like `expires_at` and `workspace_id` — fixed
+# when the key is created: `POST /keys` accepts it and `PATCH /keys/{hash}` has
+# no field for it, so changing it here plans a replacement rather than a patch.
+# creator_user_id = "user_2dHFtVWx2n56w6HkM0000000000"
 guardrail = "cheap_summarization"
 receiver = "jobfeed_vault"
 # Raise this to ask for a replacement key. It only ever moves upward.

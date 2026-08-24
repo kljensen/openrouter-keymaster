@@ -52,6 +52,8 @@ pub(super) struct Key {
     #[serde(default)]
     pub workspace_id: Option<String>,
     #[serde(default)]
+    pub creator_user_id: Option<String>,
+    #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,

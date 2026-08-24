@@ -21,7 +21,7 @@ use super::{
     Config, Defaults, Guardrail, Key, Managed, Problem, Receiver, ResetInterval, SCHEMA_VERSION,
     Usd,
 };
-use crate::ids::{Address, RemoteName, Uuid};
+use crate::ids::{Address, RemoteName, UserId, Uuid};
 use crate::redaction::{looks_like_credential, printable};
 
 /// Guardrail fields whose remote value can be cleared.
@@ -314,6 +314,8 @@ impl Validator {
         let guardrail = self.managed(&guardrail_path, guarded, guardrail, &cleared, "guardrail");
 
         let workspace_id = self.uuid(&format!("{path}.workspace_id"), block.workspace_id);
+        let creator_user_id =
+            self.user_id(&format!("{path}.creator_user_id"), block.creator_user_id);
         let receiver = self.reference(
             &format!("{path}.receiver"),
             block.receiver,
@@ -329,6 +331,7 @@ impl Validator {
             expires_at,
             disabled: block.disabled.unwrap_or(false),
             workspace_id,
+            creator_user_id,
             guardrail,
             receiver,
             generation,
@@ -511,6 +514,18 @@ impl Validator {
         let value = value?;
         match Uuid::parse(&value) {
             Ok(uuid) => Some(uuid),
+            Err(error) => {
+                self.problem(path, error.to_string());
+                None
+            }
+        }
+    }
+
+    /// An OpenRouter organization member identifier.
+    fn user_id(&mut self, path: &str, value: Option<String>) -> Option<UserId> {
+        let value = value?;
+        match UserId::parse(&value) {
+            Ok(user) => Some(user),
             Err(error) => {
                 self.problem(path, error.to_string());
                 None

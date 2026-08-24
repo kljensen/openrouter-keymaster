@@ -350,6 +350,31 @@ pub struct KeyBinding {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     retained: Vec<RetainedKey>,
+
+    /// The highest generation this address has ever recorded, including keys it
+    /// no longer holds.
+    ///
+    /// A high-water mark, because the entries the other three fields hold are
+    /// not one: `delete key` drops a retained hash once OpenRouter confirms the
+    /// key is gone, and without this the highest generation on record would
+    /// fall back down with it. The next create would then hand a *different*
+    /// remote key a number an earlier one already used at this address —
+    /// silently, and in exactly the place an audit would go looking.
+    ///
+    /// It only ever grows, and it is deliberately not checked against the
+    /// generations the binding holds: it outranks them by design, and a
+    /// binding whose keys have all been deleted keeps nothing else.
+    ///
+    /// Absent from a file written before this field existed, and zero is the
+    /// right answer there: every such file's floor is whatever its own entries
+    /// say, which is what [`KeyBinding::highest_generation`] already computes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    generation_floor: u32,
+}
+
+/// Whether a generation is unset, for `skip_serializing_if`.
+const fn is_zero(generation: &u32) -> bool {
+    *generation == 0
 }
 
 impl KeyBinding {
@@ -402,14 +427,33 @@ impl KeyBinding {
             .unwrap_or(0)
     }
 
-    /// The highest generation this address has recorded in any role.
+    /// The highest generation this address has ever recorded, whether or not it
+    /// still holds the key.
+    ///
+    /// This is the number every new key at the address must exceed. It counts
+    /// the keys the binding holds now, the unfinished operation, and the
+    /// high-water mark left by keys that have been deleted — because a
+    /// generation names one remote key at one address for good, and a key
+    /// leaving state does not release its number.
     #[must_use]
     pub fn highest_generation(&self) -> u32 {
-        self.settled_generation().max(
-            self.pending
-                .as_ref()
-                .map_or(0, |pending| pending.generation),
-        )
+        self.settled_generation()
+            .max(
+                self.pending
+                    .as_ref()
+                    .map_or(0, |pending| pending.generation),
+            )
+            .max(self.generation_floor)
+    }
+
+    /// The high-water mark left by keys this address no longer holds.
+    ///
+    /// Zero until a key is deleted. Public because it is part of what an
+    /// address records: a generation at or below it is unavailable even though
+    /// nothing the binding holds is using it.
+    #[must_use]
+    pub const fn generation_floor(&self) -> u32 {
+        self.generation_floor
     }
 
     /// Every hash this binding names, in any role.
@@ -574,11 +618,19 @@ impl State {
         }
 
         // An address can hold retained hashes with nothing current — it still
-        // owns them, so binding must not drop them on the floor.
-        let retained = self
+        // owns them, so binding must not drop them on the floor. The
+        // high-water mark comes with them: it is the record of keys this
+        // address has already spent generations on, and rebuilding the binding
+        // without it would release those numbers.
+        let (retained, floor) = self
             .keys
             .get_mut(address)
-            .map(|binding| std::mem::take(&mut binding.retained))
+            .map(|binding| {
+                (
+                    std::mem::take(&mut binding.retained),
+                    binding.generation_floor,
+                )
+            })
             .unwrap_or_default();
         self.keys.insert(
             address.clone(),
@@ -594,6 +646,7 @@ impl State {
                 }),
                 pending: None,
                 retained,
+                generation_floor: floor,
             },
         );
         Ok(())
@@ -780,6 +833,7 @@ impl State {
             current: None,
             pending: None,
             retained: Vec::new(),
+            generation_floor: 0,
         });
         binding.pending = Some(PendingOperation {
             id: begin.operation,
@@ -1092,6 +1146,83 @@ impl State {
             receiver: Some(pending.receiver),
         });
         Ok(())
+    }
+
+    /// Stops tracking a retained hash, after its remote key is confirmed gone.
+    ///
+    /// The last step of `keymaster delete key`, and only ever that. A hash
+    /// leaves state when OpenRouter no longer has the key and a read has said
+    /// so; dropping it on the strength of a delete response would be how a live
+    /// spending credential ends up with no local record naming it.
+    ///
+    /// Returns the entry it removed, so the caller can report what it released.
+    ///
+    /// The removed generation is kept as a high-water mark
+    /// ([`KeyBinding::generation_floor`]). The key is gone, but the number is
+    /// spent: handing it to a successor would give two different remote keys the
+    /// same generation at one address, and the evidence that the first one ever
+    /// existed has just been deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransitionError::HashNotRetained`] when the address does not
+    /// retain that hash. A current hash and an operation's hash are deliberately
+    /// out of reach here: neither is a key whose life is over.
+    pub fn drop_retained(
+        &mut self,
+        address: &Address,
+        hash: &KeyHash,
+    ) -> Result<RetainedKey, TransitionError> {
+        let position = self
+            .keys
+            .get(address)
+            .and_then(|binding| binding.retained.iter().position(|r| &r.hash == hash));
+
+        let (Some(binding), Some(position)) = (self.keys.get_mut(address), position) else {
+            return Err(TransitionError::HashNotRetained {
+                address: address.clone(),
+                hash: hash.clone(),
+            });
+        };
+        let removed = binding.retained.remove(position);
+        binding.generation_floor = binding.generation_floor.max(removed.generation);
+        Ok(removed)
+    }
+
+    /// Relinquishes every key this address owns, recording nothing in its place.
+    ///
+    /// This is `keymaster state forget`, and it is purely local: the remote keys
+    /// go on existing, enabled, and are simply no longer Keymaster's. Returns
+    /// the binding it removed so the caller can list what it released, or
+    /// `None` when the address owned nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransitionError::AlreadyPending`] when an operation is in
+    /// progress at the address. An unfinished attempt may have made a key whose
+    /// hash nobody has yet, and forgetting the journal would destroy the only
+    /// record that the attempt happened — the exact outcome ADR-0002's recovery
+    /// exists to prevent. Resolve it first.
+    pub fn forget_key(&mut self, address: &Address) -> Result<Option<KeyBinding>, TransitionError> {
+        if let Some(pending) = self
+            .keys
+            .get(address)
+            .and_then(|binding| binding.pending.as_ref())
+        {
+            return Err(TransitionError::AlreadyPending {
+                address: address.clone(),
+                phase: pending.phase,
+            });
+        }
+        Ok(self.keys.remove(address))
+    }
+
+    /// Relinquishes the guardrail this address owns.
+    ///
+    /// As [`State::forget_key`], and with nothing to refuse: a guardrail has no
+    /// journal and no one-time secret.
+    pub fn forget_guardrail(&mut self, address: &Address) -> Option<GuardrailBinding> {
+        self.guardrails.remove(address)
     }
 
     /// Records why a retained hash is still tracked.
@@ -1555,8 +1686,17 @@ pub enum BindError {
         owner: Address,
     },
 
-    /// The address has an incomplete operation, which must be resolved first.
-    #[error("`{address}` has an operation in progress; resolve it with `keymaster recover` first")]
+    /// The address has an incomplete operation, which must be closed first.
+    ///
+    /// The message names `recover inspect` rather than a resolution, because
+    /// which one applies depends on the phase and this layer does not carry it:
+    /// one phase, `delivered`, needs no recovery at all. `inspect` reads the
+    /// journal, needs no credential once a hash is known, and reports the
+    /// command that phase actually takes.
+    #[error(
+        "`{address}` has an operation in progress; close it first, and `keymaster recover \
+         inspect {address}` names the one command that does"
+    )]
     OperationInProgress {
         /// The local address.
         address: Address,

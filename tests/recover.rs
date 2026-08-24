@@ -88,11 +88,32 @@ impl Recovery {
             .map(|(_, operation)| operation.phase)
     }
 
+    /// The fingerprint of the receiver this project configures.
+    ///
+    /// A journal fixture has to record the destination the configuration names,
+    /// or a plan computed after the operation is promoted reads the difference
+    /// as "the receiver moved" and rotates a key that is perfectly good. A
+    /// project with no receiver at all gets a fixed stand-in; nothing in those
+    /// cases ever plans against it.
+    fn receiver_fingerprint(&self) -> ReceiverFingerprint {
+        let source = fs::read_to_string(self.project.config_path()).expect("the configuration");
+        keymaster::config::Config::parse(&source)
+            .expect("a valid test configuration")
+            .receivers
+            .values()
+            .next()
+            .map_or_else(
+                || ReceiverFingerprint::from_digest([42; 32]),
+                |spec| spec.fingerprint(),
+            )
+    }
+
     /// Writes a journal fixture whose operation stops at `phase`.
     ///
     /// The transitions are replayed through the production state API, so a
     /// fixture is exactly a shape a real run could have left.
     fn journal(&self, phase: Phase, workspace: bool) {
+        let fingerprint = self.receiver_fingerprint();
         self.project.write_state(|state| {
             let jobfeed = address("jobfeed");
             state
@@ -105,7 +126,7 @@ impl Recovery {
                         workspace: workspace.then(|| {
                             keymaster::ids::Uuid::parse(FAKE_WORKSPACE_ID).expect("a UUID")
                         }),
-                        receiver: ReceiverFingerprint::from_digest([42; 32]),
+                        receiver: fingerprint.clone(),
                     },
                     at(600),
                 )
@@ -232,7 +253,7 @@ fn inspect_reports_the_journal_and_never_writes_anything() {
     assert_eq!(operation["generation"], 1);
     assert_eq!(
         operation["receiver_fingerprint"],
-        ReceiverFingerprint::from_digest([42; 32]).as_str(),
+        world.receiver_fingerprint().as_str(),
         "the non-secret digest of where the plaintext was bound for"
     );
     assert!(

@@ -7,7 +7,11 @@
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use super::{ActionOutcome, ApplyReport, ImportReport, PlanReport, StatusReport};
+use super::recover::Successor;
+use super::{
+    ActionOutcome, ApplyReport, DeleteOutcome, DeleteReport, ForgetReport, ImportReport,
+    PlanReport, Predecessor, Released, RetireReport, RotateReport, StatusReport,
+};
 use crate::api::{
     KeyUsage, ObservedAssignment, ObservedGuardrail, ObservedKey, RemoteTimestamps, ResetPolicy,
     ZeroDataRetention,
@@ -17,7 +21,7 @@ use crate::ids::{Address, KeyHash, OperationId, ReceiverFingerprint, RemoteName,
 use crate::plan::{
     Expansion, FieldValue, Identity, Reason, ResourceAddress, Snapshot, plan as compute,
 };
-use crate::state::{BeginCreate, Origin, Phase, State, Transition};
+use crate::state::{BeginCreate, Origin, Phase, RetainedKey, RetainedStatus, State, Transition};
 
 const JOBFEED_HASH: &str = "hash-jobfeed-1";
 const STEADY_HASH: &str = "hash-steady-1";
@@ -185,6 +189,7 @@ impl World {
             include_byok_in_limit: false,
             expires_at: None,
             workspace_id: None,
+            creator_user_id: None,
             usage: KeyUsage {
                 total: 1.25,
                 daily: 0.25,
@@ -1070,4 +1075,235 @@ fn an_apply_that_could_not_verify_says_so() {
     );
     let document: Value = serde_json::to_value(&report).expect("the report serializes");
     assert!(document["verification_failure"].is_string());
+}
+
+// --- rotate, retire, delete, forget ------------------------------------------
+
+/// One document of each lifecycle command, all acting on `OLD_HASH`.
+fn lifecycle_documents() -> (RotateReport, RetireReport, DeleteReport, ForgetReport) {
+    let jobfeed = address("jobfeed");
+    (
+        RotateReport::new(
+            &jobfeed,
+            Predecessor {
+                hash: OLD_HASH.to_owned(),
+                generation: 1,
+                status: Some(RetainedStatus::AwaitingRetirement),
+            },
+            Successor {
+                operation: "op-0002".to_owned(),
+                hash: JOBFEED_HASH.to_owned(),
+                generation: 2,
+                receiver: "the file /var/lib/keymaster/vault.key".to_owned(),
+                promoted: true,
+            },
+        ),
+        RetireReport::new(
+            &jobfeed,
+            &hash(OLD_HASH),
+            1,
+            RetainedStatus::Retired,
+            true,
+            "Keymaster disabled it, and confirmed that by reading it back.".to_owned(),
+        ),
+        DeleteReport::new(
+            &jobfeed,
+            &hash(OLD_HASH),
+            1,
+            DeleteOutcome::Deleted,
+            "a read returned 404".to_owned(),
+        ),
+        ForgetReport::released(
+            "keys.jobfeed",
+            "key",
+            &jobfeed,
+            vec![
+                Released::current(&hash(JOBFEED_HASH), 2),
+                Released::retained(&RetainedKey {
+                    hash: hash(OLD_HASH),
+                    generation: 1,
+                    status: RetainedStatus::AwaitingRetirement,
+                    recorded_at: at(0),
+                }),
+            ],
+        ),
+    )
+}
+
+/// The four lifecycle documents, in both formats, with a hash in every one and
+/// a plaintext in none.
+///
+/// One test rather than four because they share the property that matters: each
+/// says which immutable identity it acted on, and none of them has anywhere to
+/// put a secret.
+#[test]
+fn every_lifecycle_document_reports_its_hash_in_both_formats() {
+    let (rotated, retired, deleted, forgotten) = lifecycle_documents();
+
+    let documents: [(&str, String, Value); 4] = [
+        (
+            "rotate",
+            rotated.to_string(),
+            serde_json::to_value(&rotated).expect("the report serializes"),
+        ),
+        (
+            "retire",
+            retired.to_string(),
+            serde_json::to_value(&retired).expect("the report serializes"),
+        ),
+        (
+            "delete key",
+            deleted.to_string(),
+            serde_json::to_value(&deleted).expect("the report serializes"),
+        ),
+        (
+            "state forget",
+            forgotten.to_string(),
+            serde_json::to_value(&forgotten).expect("the report serializes"),
+        ),
+    ];
+
+    for (command, human, document) in documents {
+        assert_eq!(document["command"], command);
+        assert!(
+            human.contains(OLD_HASH),
+            "{command} must name the hash it acted on:\n{human}"
+        );
+        assert!(
+            !human.contains("sk-or"),
+            "{command} rendered something credential-shaped:\n{human}"
+        );
+    }
+}
+
+/// Each document also says what phase the identity it names is now in, which is
+/// what an operator reads to decide what to do next.
+#[test]
+fn every_lifecycle_document_reports_the_phase_its_identity_is_now_in() {
+    let (rotated, retired, deleted, forgotten) = lifecycle_documents();
+
+    assert_eq!(rotated.predecessor_status(), "awaiting_retirement");
+    assert!(rotated.to_string().contains("awaiting_retirement"));
+    assert!(retired.confirmed());
+    assert_eq!(
+        serde_json::to_value(&retired).expect("the report serializes")["status"],
+        "retired"
+    );
+    assert!(deleted.settled());
+    assert_eq!(
+        serde_json::to_value(&deleted).expect("the report serializes")["tracked"],
+        Value::Bool(false)
+    );
+    assert_eq!(
+        serde_json::to_value(&forgotten).expect("the report serializes")["released"][1]["role"],
+        "awaiting_retirement"
+    );
+    assert!(
+        forgotten
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("still live remotely")),
+        "forget releases live resources and says so"
+    );
+}
+
+/// A rotation whose promotion landed says the successor is in use.
+#[test]
+fn a_promoted_rotation_says_the_address_now_uses_the_successor() {
+    let (rotated, ..) = lifecycle_documents();
+    let summary = serde_json::to_value(&rotated).expect("the report serializes")["summary"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+
+    assert!(
+        summary.contains(&format!("now uses key {JOBFEED_HASH}")),
+        "{summary}"
+    );
+    assert!(
+        summary.contains(&format!("keymaster retire keys.jobfeed --hash {OLD_HASH}"))
+            || summary.contains(&format!("--hash {OLD_HASH}")),
+        "the summary names the command that ends the predecessor: {summary}"
+    );
+    assert!(rotated.warnings().is_empty(), "{:?}", rotated.warnings());
+}
+
+/// And one whose promotion did not must not say it, because it is not true:
+/// the address is still using the predecessor, and telling an operator
+/// otherwise invites them to retire the key in service.
+#[test]
+fn an_unpromoted_rotation_says_the_predecessor_is_still_the_key_in_use() {
+    let rotated = RotateReport::new(
+        &address("jobfeed"),
+        Predecessor {
+            hash: OLD_HASH.to_owned(),
+            generation: 1,
+            status: None,
+        },
+        Successor {
+            operation: "op-0002".to_owned(),
+            hash: JOBFEED_HASH.to_owned(),
+            generation: 2,
+            receiver: "a file".to_owned(),
+            promoted: false,
+        },
+    );
+    let summary = serde_json::to_value(&rotated).expect("the report serializes")["summary"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+
+    assert_eq!(rotated.predecessor_status(), "still_current");
+    assert!(
+        !summary.contains("now uses"),
+        "the successor is not in use yet: {summary}"
+    );
+    assert!(summary.contains("delivered"), "{summary}");
+    assert!(
+        summary.contains("could not be written"),
+        "the summary says which write failed: {summary}"
+    );
+    assert!(
+        summary.contains(&format!("still using key {OLD_HASH}")),
+        "{summary}"
+    );
+    assert!(summary.contains("do not retire it yet"), "{summary}");
+
+    let warnings = rotated.warnings().join("\n");
+    assert!(warnings.contains("not promoted to current"), "{warnings}");
+    assert!(warnings.contains("do not retire it"), "{warnings}");
+}
+
+#[test]
+fn forgetting_an_unbound_address_renders_as_a_no_op_in_both_formats() {
+    let report = ForgetReport::nothing("keys.jobfeed");
+    let document: Value = serde_json::to_value(&report).expect("the report serializes");
+
+    assert_eq!(document["forgotten"], Value::Bool(false));
+    assert!(document["resource"].is_null());
+    assert!(
+        document["released"]
+            .as_array()
+            .expect("an array")
+            .is_empty()
+    );
+    assert!(report.warnings().is_empty());
+    assert!(report.to_string().contains("nothing to forget"));
+}
+
+#[test]
+fn a_delete_that_is_not_confirmed_keeps_the_hash_tracked_in_both_formats() {
+    let report = DeleteReport::new(
+        &address("jobfeed"),
+        &hash(OLD_HASH),
+        1,
+        DeleteOutcome::Unconfirmed,
+        "the key still reads back".to_owned(),
+    );
+    let document: Value = serde_json::to_value(&report).expect("the report serializes");
+
+    assert_eq!(document["outcome"], "unconfirmed");
+    assert_eq!(document["tracked"], Value::Bool(true));
+    assert!(!report.settled());
+    assert!(report.to_string().contains("still tracks it"));
 }

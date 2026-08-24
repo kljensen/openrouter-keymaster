@@ -298,6 +298,269 @@ fn rotating_an_imported_key_leaves_a_binding_that_reads_back() {
     assert_eq!(scratch.file().read().expect("reading back"), state);
 }
 
+/// State whose address holds `h1` at generation 2 and retains `h0`.
+fn after_a_rotation() -> (State, Address) {
+    let (mut state, jobfeed) = (State::new(), address("jobfeed"));
+    state
+        .bind_key(&jobfeed, hash("h0"), 1, at(0))
+        .expect("importing the predecessor");
+    state
+        .begin_create(&jobfeed, begin(2), at(1))
+        .expect("starting a rotation");
+    for transition in [
+        Transition::Created { hash: hash("h1") },
+        Transition::Secured,
+        Transition::DeliveryStarted,
+        Transition::Delivered,
+    ] {
+        state
+            .advance_key(&jobfeed, transition, at(2))
+            .expect("advancing");
+    }
+    state.promote_key(&jobfeed, at(3)).expect("promoting");
+    (state, jobfeed)
+}
+
+#[test]
+fn a_retained_hash_can_be_dropped_and_only_a_retained_one_can() {
+    let (mut state, jobfeed) = after_a_rotation();
+
+    let dropped = state
+        .drop_retained(&jobfeed, &hash("h0"))
+        .expect("dropping a retained hash");
+    assert_eq!(dropped.hash, hash("h0"));
+    assert_eq!(dropped.generation, 1);
+    assert!(
+        state
+            .key(&jobfeed)
+            .expect("the binding")
+            .retained()
+            .is_empty()
+    );
+
+    // The current key is deliberately out of reach: dropping it would leave a
+    // live spending credential nothing names.
+    assert_eq!(
+        state.drop_retained(&jobfeed, &hash("h1")),
+        Err(TransitionError::HashNotRetained {
+            address: jobfeed.clone(),
+            hash: hash("h1"),
+        })
+    );
+    assert_eq!(
+        state.drop_retained(&address("nowhere"), &hash("h0")),
+        Err(TransitionError::HashNotRetained {
+            address: address("nowhere"),
+            hash: hash("h0"),
+        })
+    );
+    assert!(
+        state
+            .key(&jobfeed)
+            .expect("the binding")
+            .current()
+            .is_some()
+    );
+}
+
+#[test]
+fn a_deleted_generation_stays_spent_at_the_address() {
+    // The retained candidate outranks the current key, which is what an
+    // abandoned rotation leaves. Deleting it removes the only entry recording
+    // that generation 2 was ever used here — so without a high-water mark the
+    // next create would hand a different remote key the same number.
+    let (mut state, jobfeed) = (State::new(), address("jobfeed"));
+    state
+        .bind_key(&jobfeed, hash("h1"), 1, at(0))
+        .expect("binding the working key");
+    state
+        .begin_create(&jobfeed, begin(2), at(1))
+        .expect("starting a rotation");
+    state
+        .advance_key(&jobfeed, Transition::Created { hash: hash("h2") }, at(2))
+        .expect("the create returned a hash");
+    state
+        .retire_candidate(&jobfeed, at(3))
+        .expect("the rotation is abandoned, and its key retained");
+    assert_eq!(
+        state
+            .key(&jobfeed)
+            .expect("the binding")
+            .highest_generation(),
+        2
+    );
+
+    state
+        .drop_retained(&jobfeed, &hash("h2"))
+        .expect("OpenRouter confirmed the key is gone");
+
+    let binding = state.key(&jobfeed).expect("the binding");
+    assert_eq!(binding.settled_generation(), 1, "only h1 is still held");
+    assert_eq!(binding.generation_floor(), 2);
+    assert_eq!(
+        binding.highest_generation(),
+        2,
+        "the number is spent even though nothing holds it any more"
+    );
+    assert_eq!(
+        state.begin_create(&jobfeed, begin(2), at(4)),
+        Err(TransitionError::GenerationNotMonotonic {
+            address: jobfeed.clone(),
+            recorded: 2,
+            requested: 2,
+        }),
+        "reusing a deleted key's generation is refused"
+    );
+    state
+        .begin_create(&jobfeed, begin(3), at(5))
+        .expect("the next free generation is 3");
+}
+
+#[test]
+fn a_generation_floor_survives_a_write_and_an_import_over_it() {
+    let scratch = Scratch::new();
+    let (mut state, jobfeed) = (State::new(), address("jobfeed"));
+    state
+        .begin_create(&jobfeed, begin(2), at(0))
+        .expect("starting a create");
+    state
+        .advance_key(&jobfeed, Transition::Created { hash: hash("h2") }, at(1))
+        .expect("the create returned a hash");
+    state
+        .retire_candidate(&jobfeed, at(2))
+        .expect("the attempt is dead");
+    state
+        .drop_retained(&jobfeed, &hash("h2"))
+        .expect("deleting it");
+
+    scratch.store(&mut state);
+    let reloaded = scratch.file().read().expect("reading back");
+    assert_eq!(reloaded, state, "the high-water mark round-trips");
+    assert_eq!(
+        reloaded
+            .key(&jobfeed)
+            .expect("the binding")
+            .generation_floor(),
+        2
+    );
+
+    // Rebuilding lost state by importing must not release the number either:
+    // `bind_key` replaces the binding wholesale, and the floor comes with it.
+    let mut state = reloaded;
+    assert!(
+        state.bind_key(&jobfeed, hash("h9"), 2, at(3)).is_err(),
+        "generation 2 is spent"
+    );
+    state
+        .bind_key(&jobfeed, hash("h9"), 3, at(3))
+        .expect("importing above the floor");
+    assert_eq!(
+        state.key(&jobfeed).expect("the binding").generation_floor(),
+        2
+    );
+}
+
+#[test]
+fn a_state_file_written_before_the_floor_existed_defaults_to_none() {
+    // The field is absent from every file an earlier build wrote, and zero is
+    // the right answer: such a file's floor is whatever its own entries say.
+    let document = r#"{
+        "version": 1,
+        "serial": 3,
+        "keys": {
+            "jobfeed": {
+                "origin": "imported",
+                "current": { "hash": "h1", "generation": 4,
+                             "bound_at": "2026-01-01T00:00:00Z" }
+            }
+        },
+        "guardrails": {}
+    }"#;
+
+    let state = read_document(document).expect("an older state file still reads");
+    let binding = state.key(&address("jobfeed")).expect("the binding");
+    assert_eq!(binding.generation_floor(), 0);
+    assert_eq!(binding.highest_generation(), 4);
+
+    // And a binding with no floor serializes without the field, so a file this
+    // build writes is no larger than the one it read.
+    let json = serde_json::to_string(&state).expect("serializing");
+    assert!(!json.contains("generation_floor"), "{json}");
+}
+
+#[test]
+fn forgetting_a_key_hands_back_every_hash_it_released() {
+    let (mut state, jobfeed) = after_a_rotation();
+
+    let forgotten = state
+        .forget_key(&jobfeed)
+        .expect("nothing is pending")
+        .expect("a binding was there");
+
+    assert_eq!(
+        forgotten.current().expect("a current key").hash,
+        hash("h1"),
+        "the caller can report what it let go of"
+    );
+    assert_eq!(forgotten.retained()[0].hash, hash("h0"));
+    assert!(state.key(&jobfeed).is_none());
+    assert_eq!(
+        state.forget_key(&jobfeed),
+        Ok(None),
+        "forgetting an address that owns nothing is a no-op, not an error"
+    );
+}
+
+#[test]
+fn forgetting_a_key_is_refused_while_an_operation_is_in_progress() {
+    let (mut state, jobfeed) = in_phase(Phase::CreateAmbiguous);
+
+    assert_eq!(
+        state.forget_key(&jobfeed),
+        Err(TransitionError::AlreadyPending {
+            address: jobfeed.clone(),
+            phase: Phase::CreateAmbiguous,
+        }),
+        "the journal is the only record that the attempt happened"
+    );
+    assert!(
+        state
+            .key(&jobfeed)
+            .expect("the binding")
+            .pending()
+            .is_some()
+    );
+}
+
+#[test]
+fn forgetting_a_guardrail_removes_only_that_binding() {
+    let mut state = State::new();
+    let cheap = address("cheap");
+    state
+        .bind_guardrail(
+            &cheap,
+            uuid("6c7f5f5a-4f1b-4e2d-9a3c-1b2d3e4f5a6b"),
+            Origin::Imported,
+            at(0),
+        )
+        .expect("binding a guardrail");
+    state
+        .bind_key(&cheap, hash("h1"), 1, at(0))
+        .expect("binding a key at the same local name");
+
+    let forgotten = state
+        .forget_guardrail(&cheap)
+        .expect("a guardrail was there");
+
+    assert_eq!(forgotten.id, uuid("6c7f5f5a-4f1b-4e2d-9a3c-1b2d3e4f5a6b"));
+    assert!(state.guardrail(&cheap).is_none());
+    assert!(
+        state.key(&cheap).is_some(),
+        "a key and a guardrail can share a local name, and forgetting one keeps the other"
+    );
+    assert!(state.forget_guardrail(&cheap).is_none());
+}
+
 #[test]
 fn a_current_key_whose_origin_and_delivery_record_disagree_is_refused() {
     // The planner reads the delivery record to decide whether a changed

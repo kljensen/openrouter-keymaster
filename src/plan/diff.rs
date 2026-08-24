@@ -23,13 +23,14 @@ use time::OffsetDateTime;
 use super::{Expansion, FieldChange, FieldValue};
 use crate::api::{ObservedGuardrail, ObservedKey, ResetPolicy};
 use crate::config::{Guardrail, Key, Managed, ResetInterval, Usd};
-use crate::ids::{RemoteName, Uuid};
+use crate::ids::{RemoteName, UserId, Uuid};
 
 /// Key fields OpenRouter fixes when the key is created.
 ///
 /// A difference in one of these cannot be patched, so it is a reason to
 /// replace the key rather than to update it.
-pub(super) const IMMUTABLE_KEY_FIELDS: [&str; 2] = ["expires_at", "workspace_id"];
+pub(super) const IMMUTABLE_KEY_FIELDS: [&str; 3] =
+    ["expires_at", "workspace_id", "creator_user_id"];
 
 /// Every managed difference between a desired key and the observed one.
 ///
@@ -69,6 +70,11 @@ pub fn key_changes(desired: &Key, observed: Option<&ObservedKey>) -> Vec<FieldCh
         "workspace_id",
         observed.and_then(|key| key.workspace_id.as_ref()),
         desired.workspace_id.as_ref(),
+    );
+    diff.user(
+        "creator_user_id",
+        observed.and_then(|key| key.creator_user_id.as_ref()),
+        desired.creator_user_id.as_ref(),
     );
     diff.changes
 }
@@ -263,6 +269,22 @@ impl Diff {
             field,
             from.map_or(FieldValue::Absent, |id| FieldValue::Guardrail(id.clone())),
             FieldValue::Guardrail(to.clone()),
+            None,
+        );
+    }
+
+    /// An organization member, compared only when the configuration names one.
+    ///
+    /// Like `uuid`: an unmanaged field is skipped rather than compared against
+    /// nothing, because a configuration that says nothing about a key's creator
+    /// must not read as "this key should have none" — which, the field being
+    /// immutable, would propose replacing a live credential.
+    fn user(&mut self, field: &'static str, from: Option<&UserId>, to: Option<&UserId>) {
+        let Some(to) = to else { return };
+        self.push(
+            field,
+            from.map_or(FieldValue::Absent, |user| FieldValue::text(user.as_str())),
+            FieldValue::text(to.as_str()),
             None,
         );
     }

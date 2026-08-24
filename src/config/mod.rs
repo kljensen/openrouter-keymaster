@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
-use crate::ids::{Address, ReceiverFingerprint, RemoteName, Uuid};
+use crate::ids::{Address, ReceiverFingerprint, RemoteName, UserId, Uuid};
 
 /// The only schema version this build understands.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -157,6 +157,10 @@ pub struct Key {
     pub disabled: bool,
     /// Workspace the key belongs to. Immutable once the key exists.
     pub workspace_id: Option<Uuid>,
+    /// The organization member the key is created on behalf of. `POST /keys`
+    /// accepts it and `PATCH /keys/{hash}` has no field for it, so it is
+    /// immutable once the key exists: changing it replaces the key.
+    pub creator_user_id: Option<UserId>,
     /// The guardrail assigned to this key. Clearing it unassigns.
     pub guardrail: Managed<Address>,
     /// Where this key's plaintext is delivered. A key with no receiver can be

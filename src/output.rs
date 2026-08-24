@@ -143,7 +143,7 @@ mod tests {
         let mut renderer = Renderer::new(format, &mut out, &mut err);
         renderer.result(report).expect("writing to a vector");
         renderer
-            .error(&Error::NotImplemented { command: "plan" })
+            .error(&Error::output(&io::Error::other("the pipe closed")))
             .expect("writing to a vector");
         (
             String::from_utf8(out).expect("utf-8"),
@@ -155,7 +155,7 @@ mod tests {
     fn human_output_separates_results_from_diagnostics() {
         let (out, err) = render(Format::Human, &Example { address: "jobfeed" });
         assert_eq!(out, "address jobfeed\n");
-        assert_eq!(err, "error: `plan` is not implemented yet\n");
+        assert_eq!(err, "error: cannot write output: the pipe closed\n");
     }
 
     #[test]
@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(result["address"], "jobfeed");
 
         let diagnostic: serde_json::Value = serde_json::from_str(&err).expect("one JSON document");
-        assert_eq!(diagnostic["error"]["kind"], "not_implemented");
+        assert_eq!(diagnostic["error"]["kind"], "output");
 
         assert!(!out.contains('\u{1b}'), "JSON results must not be colored");
         assert!(

@@ -7,7 +7,7 @@
 use super::*;
 use crate::api::{KeyUsage, RemoteTimestamps, ResetPolicy, ZeroDataRetention};
 use crate::config::Usd;
-use crate::ids::{OperationId, ReceiverFingerprint, RemoteName};
+use crate::ids::{OperationId, ReceiverFingerprint, RemoteName, UserId};
 use crate::state::{BeginCreate, Origin, Transition};
 
 /// An observed key's hash. Printable ASCII, as OpenRouter's hashes are.
@@ -81,6 +81,7 @@ impl World {
             include_byok_in_limit: false,
             expires_at: None,
             workspace_id: None,
+            creator_user_id: None,
             usage: KeyUsage {
                 total: 0.0,
                 daily: 0.0,
@@ -342,6 +343,71 @@ expires_at = "2027-01-01T00:00:00Z"
             ("guardrails.cheap", ActionKind::NoOp),
             ("keys.jobfeed", ActionKind::Replace),
             ("keys.jobfeed.guardrail", ActionKind::Assign),
+        ],
+    },
+    Case {
+        // `creator_user_id` is accepted by `POST /keys` and by nothing else, so
+        // a key created for one member can never be moved to another: the only
+        // way to honour a changed creator is a replacement.
+        name: "a changed creator replaces the key",
+        config: r#"
+version = 1
+
+[receivers.vault]
+type = "file"
+path = "/var/lib/keymaster/vault.key"
+
+[guardrails.cheap]
+name = "cheap-rail"
+
+[keys.jobfeed]
+name = "golf-jobfeed"
+receiver = "vault"
+guardrail = "cheap"
+creator_user_id = "user_2dHFtVWx2n56w6HkM0000000000"
+"#,
+        build: converged,
+        expect: &[
+            ("guardrails.cheap", ActionKind::NoOp),
+            ("keys.jobfeed", ActionKind::Replace),
+            ("keys.jobfeed.guardrail", ActionKind::Assign),
+        ],
+    },
+    Case {
+        // The mirror of the case above, and the one that matters more: a
+        // creator that already matches must not read as drift, or every plan
+        // for an organization-owned key would propose replacing it.
+        name: "a creator that already matches is no reason to replace anything",
+        config: r#"
+version = 1
+
+[receivers.vault]
+type = "file"
+path = "/var/lib/keymaster/vault.key"
+
+[guardrails.cheap]
+name = "cheap-rail"
+
+[keys.jobfeed]
+name = "golf-jobfeed"
+receiver = "vault"
+guardrail = "cheap"
+creator_user_id = "user_2dHFtVWx2n56w6HkM0000000000"
+"#,
+        build: |world| {
+            converged(world);
+            world
+                .snapshot
+                .keys
+                .last_mut()
+                .expect("the observed key")
+                .creator_user_id =
+                Some(UserId::parse("user_2dHFtVWx2n56w6HkM0000000000").expect("a valid user id"));
+        },
+        expect: &[
+            ("guardrails.cheap", ActionKind::NoOp),
+            ("keys.jobfeed", ActionKind::NoOp),
+            ("keys.jobfeed.guardrail", ActionKind::NoOp),
         ],
     },
     Case {

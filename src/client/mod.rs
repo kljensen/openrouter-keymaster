@@ -292,6 +292,23 @@ impl Client {
             .map(|_| ())
     }
 
+    /// Sends one `DELETE` and reads its response without interpreting it.
+    ///
+    /// No body: the resource is named in the path, and a permanent removal
+    /// should say what it removes exactly once. Like every other write here it
+    /// is sent once and never repeated — a 404 on a resend would be
+    /// indistinguishable from a 404 that proves the resource was never there.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::post_json_once`]. A 404 arrives as [`ApiError::Status`]
+    /// with that status, which a caller may read as "already absent"; no other
+    /// failure proves anything about whether the resource is gone.
+    pub(crate) fn delete_once_discarding_body(&self, segments: &[&str]) -> Result<(), ApiError> {
+        self.send_once(reqwest::Method::DELETE, segments, |request| request)
+            .map(|_| ())
+    }
+
     /// Sends one write and never repeats it.
     ///
     /// There is no retry loop here and no parameter that would enable one. A
@@ -303,18 +320,28 @@ impl Client {
         self.write_once(reqwest::Method::POST, segments, body)
     }
 
-    /// One write request, sent exactly once.
+    /// One write request carrying a JSON body, sent exactly once.
     fn write_once<B: Serialize>(
         &self,
         method: reqwest::Method,
         segments: &[&str],
         body: &B,
     ) -> Result<Vec<u8>, ApiError> {
+        self.send_once(method, segments, |request| request.json(body))
+    }
+
+    /// One write request, sent exactly once, shaped by the caller.
+    ///
+    /// The shaping closure is what lets a bodiless `DELETE` and a JSON `PATCH`
+    /// share the single place that sends a non-idempotent request.
+    fn send_once(
+        &self,
+        method: reqwest::Method,
+        segments: &[&str],
+        shape: impl FnOnce(reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder,
+    ) -> Result<Vec<u8>, ApiError> {
         let url = url::build(&self.base_url, segments, &[]);
-        let sent = self
-            .http
-            .request(method, &url)
-            .json(body)
+        let sent = shape(self.http.request(method, &url))
             .send()
             .map_err(|error| error::from_reqwest(&error, self.options.request_timeout))?;
         self.consume(sent).result

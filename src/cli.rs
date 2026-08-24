@@ -83,9 +83,13 @@ journal entry before and after every non-idempotent step, exactly one \
 `POST /keys` with retries disabled, restrictions and the guardrail applied and \
 verified before the plaintext goes anywhere, and the configured receiver \
 invoked exactly once. Any outcome other than a delivered key stops the whole \
-run and is resolved with `keymaster recover`, never by trying again. Apply does \
-not yet replace an inference key; a planned replacement is skipped, and the run \
-reports that the configuration is not fully converged.
+run and is resolved with `keymaster recover`, never by trying again.
+
+A planned replacement — a raised generation, a moved receiver, a changed \
+immutable field — runs that same transaction. The key the address already holds \
+is not disabled, deleted, or unassigned: promotion moves it to \
+`retained.awaiting_retirement`, where it stays enabled until an explicit \
+`keymaster retire`.
 
 Exit code 0 means nothing went wrong, which is not the same as converged: a \
 write apply cannot make yet, or one the plan holds back until an operator \
@@ -115,6 +119,35 @@ it could not be — a configuration, credential, state, or API error.")]
     },
 
     /// Stage a replacement key for a local address.
+    #[command(long_about = "\
+Stage a replacement key for a local address.
+
+Rotate runs the journaled transaction of ADR-0002 on your word, exactly as a \
+planned replacement does: one `POST /keys`, restrictions and the guardrail \
+applied and verified, the receiver invoked once, and the new hash promoted to \
+current only after a confirmed delivery.
+
+The key the address already holds is never touched. It is not disabled, not \
+deleted, not unassigned, and not read. Promotion moves it to \
+`retained.awaiting_retirement`, where it stays enabled until you run \
+`keymaster retire`, because Keymaster cannot know when the consumers of a \
+credential have adopted its successor. A rotation that fails at any phase \
+therefore leaves the working credential working.
+
+Everything the successor needs is checked before anything is sent: the address \
+owns a key, no operation is in progress anywhere, the configuration still \
+describes the key and names a receiver, and its guardrail is bound and \
+converged. A failure there costs a read and changes nothing, and each refusal \
+names the one command that clears it: an unresolved attempt goes to `keymaster \
+recover`, and a delivered one goes to `keymaster apply`, which completes the \
+outstanding local promotion.
+
+The successor takes the higher of the configured generation and the next free \
+number at the address; a generation names one remote key and only ever moves \
+upward.
+
+Exit code 0 means the successor was created and delivered. Exit code 1 means it \
+was not, and the diagnostic says what the address still holds.")]
     Rotate {
         /// Local key address, as written in the configuration.
         name: String,
@@ -164,6 +197,29 @@ replacement is the resolution.")]
     },
 
     /// Disable a tracked retained key hash and verify the result.
+    #[command(long_about = "\
+Disable a tracked retained key hash and verify the result.
+
+Retirement is always explicit. Nothing plans it, no rotation performs it, and \
+a configuration block disappearing does not cause it: only this command \
+disables a key Keymaster owns.
+
+The hash is an immutable identity and must be one the address retains. \
+Retiring the key an address is *using* is refused — Keymaster cannot know that \
+nothing still holds it, and v0.1 defines no policy that permits the shortcut. \
+Rotate first, then retire the predecessor.
+
+The key is read before anything is sent; one OpenRouter already has disabled is \
+reported as retired with no write at all, which is what makes repeating this \
+free. Otherwise the disable is sent once and confirmed by reading the key back. \
+A disable that cannot be confirmed leaves the hash tracked as \
+`retirement_failed` so it can be retried.
+
+The hash stays in state either way: a retired key is still visible to an audit \
+and to a later `keymaster delete key`.
+
+Exit code 0 means a read proved the key is disabled. Exit code 1 means it did \
+not; the result document on stdout says what the attempt established.")]
     Retire {
         /// Local key address, as written in the configuration.
         name: String,
@@ -174,12 +230,61 @@ replacement is the resolution.")]
     },
 
     /// Permanently delete a tracked remote resource.
+    #[command(long_about = "\
+Permanently delete a tracked remote resource.
+
+`delete key --hash HASH` removes the key OpenRouter holds under that immutable \
+identity, and then stops tracking it. Deletion is irreversible and is never \
+planned, proposed, or performed as a side effect of anything.
+
+The hash must be one a local address already tracks: a key Keymaster does not \
+own belongs to whoever made it, and the tool that reports a stray key as \
+unmanaged must not also be the tool that deletes it. There is no address \
+argument, so the owner is looked up rather than asserted. The key an address is \
+using is refused, as is one belonging to an unfinished operation.
+
+The request is sent exactly once. A 2xx is not the answer on its own: the key \
+is read back, and only a 404 proves it is gone. A 404 on the delete itself \
+means it was already absent, which is the same end state. Anything else — a \
+refusal, a timeout, or a read that still finds the key — leaves the hash \
+tracked as `retirement_failed`, because the local record is the one thing that \
+can still find a live credential. State is never dropped ahead of the \
+confirmation.
+
+Exit code 0 means OpenRouter is known not to have the key. Exit code 1 means \
+that is not established; the result document says what happened.")]
     Delete {
         #[command(subcommand)]
         resource: DeleteResource,
     },
 
     /// Local state maintenance.
+    #[command(long_about = "\
+Local state maintenance.
+
+`state forget ADDRESS` relinquishes local ownership of everything an address \
+is bound to. It makes no API call and invokes no receiver: nothing is disabled, \
+nothing is deleted, and every remote resource it releases goes on existing \
+exactly as it was. It needs no management credential, no network, and no \
+configuration, because it exists to correct state that is wrong — which is when \
+those may all be unavailable.
+
+The result lists every identity being released, so you can see what you are \
+letting go of. Afterwards `keymaster plan` reports them as unmanaged, and no \
+Keymaster command will touch them again.
+
+ADDRESS is `keys.NAME` or `guardrails.NAME`. A bare NAME is accepted when only \
+one of the two is bound, and refused when both are.
+
+Forgetting an address with an operation in progress is refused: the journal is \
+the only record that the attempt happened, and in the create phases the only \
+evidence that a live key may exist. Close it first — the refusal names the one \
+command that does, which is `keymaster recover` for the phases only an operator \
+can settle and `keymaster apply` for a delivered key whose promotion is still \
+outstanding.
+
+Forgetting an address that is bound to nothing is a clean no-op that writes no \
+state, so repeating the command is safe.")]
     State {
         #[command(subcommand)]
         action: StateAction,
@@ -266,7 +371,8 @@ pub enum DeleteResource {
 pub enum StateAction {
     /// Relinquish local ownership of an address. Makes no remote call.
     Forget {
-        /// Local resource address, as written in the configuration.
+        /// Local address: `keys.NAME`, `guardrails.NAME`, or an unambiguous
+        /// bare NAME.
         address: String,
     },
 }

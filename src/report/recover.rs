@@ -173,6 +173,39 @@ impl RetainedReport {
             status: status.as_str(),
         }
     }
+
+    /// Describes the key a rotation moved aside.
+    ///
+    /// The status is optional because promotion is a separate durable write
+    /// from the delivery that earns it. A run that delivered and then failed to
+    /// promote leaves the old hash still current, and `still_current` says so
+    /// rather than inviting an operator to retire the key in use.
+    #[must_use]
+    pub fn rotated(hash: &str, generation: u32, status: Option<RetainedStatus>) -> Self {
+        Self {
+            hash: hash.to_owned(),
+            generation,
+            status: status.map_or("still_current", RetainedStatus::as_str),
+        }
+    }
+
+    /// The key's immutable identity.
+    #[must_use]
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    /// The generation it was created as.
+    #[must_use]
+    pub const fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// Why it is still tracked.
+    #[must_use]
+    pub const fn status(&self) -> &'static str {
+        self.status
+    }
 }
 
 /// What `recover inspect` found. Reads only.

@@ -2,7 +2,9 @@
 
 use crate::app::apply::ApplyError;
 use crate::app::import::ImportError;
+use crate::app::lifecycle::LifecycleError;
 use crate::app::recover::RecoverError;
+use crate::app::rotate::RotateError;
 use crate::client::ApiError;
 use crate::config::ConfigError;
 use crate::state::StateError;
@@ -16,14 +18,6 @@ use crate::state::StateError;
 /// and either from a configuration that does not parse.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The command parses and is part of the v0.1 surface, but its feature
-    /// issue has not landed yet.
-    #[error("`{command}` is not implemented yet")]
-    NotImplemented {
-        /// The canonical command path, for example `import key`.
-        command: &'static str,
-    },
-
     /// The command line could not be parsed. Carries clap's own rendered
     /// message so `--json` can report it without inventing a second wording.
     #[error("{message}")]
@@ -54,10 +48,19 @@ pub enum Error {
     #[error(transparent)]
     Apply(#[from] ApplyError),
 
+    /// A rotation could not be staged. The key the address holds is untouched.
+    #[error(transparent)]
+    Rotate(#[from] RotateError),
+
     /// An unfinished operation could not be inspected or resolved. State is
     /// unchanged unless the message says otherwise.
     #[error(transparent)]
     Recover(#[from] RecoverError),
+
+    /// A retirement, deletion, or forget could not be performed, or could not
+    /// be confirmed. The result document on stdout says what was established.
+    #[error(transparent)]
+    Lifecycle(#[from] LifecycleError),
 
     /// A result could not be written to stdout or stderr.
     #[error("cannot write output: {message}")]
@@ -73,14 +76,15 @@ impl Error {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::NotImplemented { .. } => "not_implemented",
             Self::Usage { .. } => "usage",
             Self::Config(error) => error.kind(),
             Self::State(error) => error.kind(),
             Self::Api(error) => error.kind(),
             Self::Import(error) => error.kind(),
             Self::Apply(error) => error.kind(),
+            Self::Rotate(error) => error.kind(),
             Self::Recover(error) => error.kind(),
+            Self::Lifecycle(error) => error.kind(),
             Self::Output { .. } => "output",
         }
     }

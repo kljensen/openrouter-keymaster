@@ -15,9 +15,11 @@
 //! managed list is sent as `null`, because "no restriction" is how an absent
 //! list reads back and sending `[]` would ask for the opposite.
 //!
-//! **No immutable field appears in an update.** `expires_at` and `workspace_id`
-//! are fixed when a key is created; a difference in one is a replacement, not a
-//! patch, so [`UpdateKey`] has nowhere to put them.
+//! **No immutable field appears in an update.** `expires_at`, `workspace_id`,
+//! and `creator_user_id` are fixed when a key is created — `POST /keys` accepts
+//! all three and `PATCH /keys/{hash}` accepts none of them — so a difference in
+//! one is a replacement, not a patch, and [`UpdateKey`] has nowhere to put
+//! them.
 
 use serde::Serialize;
 
@@ -97,9 +99,9 @@ impl GuardrailBody {
 
 /// The body of `PATCH /keys/{hash}`.
 ///
-/// Deliberately without `expires_at` and `workspace_id`: OpenRouter fixes both
-/// when the key is created, and a difference in one is planned as a
-/// replacement.
+/// Deliberately without `expires_at`, `workspace_id`, and `creator_user_id`:
+/// OpenRouter fixes all three when the key is created, and a difference in one
+/// is planned as a replacement.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UpdateKey {
     /// Display name. Always managed, so always sent.
@@ -285,7 +287,8 @@ mod tests {
         let desired = key(
             "version = 1\n[keys.jobfeed]\nname = \"golf-jobfeed\"\nlimit_usd = 5\n\
              limit_reset = \"monthly\"\nexpires_at = \"2027-01-01T00:00:00Z\"\n\
-             workspace_id = \"00000000-0000-4000-8000-000000000001\"\n",
+             workspace_id = \"00000000-0000-4000-8000-000000000001\"\n\
+             creator_user_id = \"user_2dHFtVWx2n56w6HkM0000000000\"\n",
         );
         assert_eq!(
             body(&UpdateKey::new(&desired)),
@@ -296,7 +299,8 @@ mod tests {
                 "include_byok_in_limit": false,
                 "disabled": false,
             }),
-            "expires_at and workspace_id are fixed at creation and are never patched"
+            "expires_at, workspace_id, and creator_user_id are fixed at creation and are never \
+             patched"
         );
     }
 

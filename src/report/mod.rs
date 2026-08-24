@@ -20,6 +20,7 @@
 
 mod apply;
 mod import;
+mod lifecycle;
 mod plan;
 mod recover;
 mod status;
@@ -36,6 +37,9 @@ use crate::state::Phase;
 
 pub use apply::{ActionOutcome, ApplyReport};
 pub use import::ImportReport;
+pub use lifecycle::{
+    DeleteOutcome, DeleteReport, ForgetReport, Predecessor, Released, RetireReport, RotateReport,
+};
 pub use plan::PlanReport;
 pub use recover::{
     CandidateReport, InspectReport, ReplaceReport, ResolveReport, RetainedReport, Retired,

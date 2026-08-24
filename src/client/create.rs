@@ -45,7 +45,7 @@ use zeroize::Zeroize as _;
 
 use super::error::ApiError;
 use crate::config::ResetInterval;
-use crate::ids::{KeyHash, RemoteName, Uuid};
+use crate::ids::{KeyHash, RemoteName, UserId, Uuid};
 
 /// The body of `POST /keys`.
 ///
@@ -78,6 +78,11 @@ pub struct CreateKeyRequest {
     /// The workspace to create the key in. Immutable once it exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<Uuid>,
+    /// The organization member to record as the key's creator, when the
+    /// configuration names one. Accepted only here: there is no field for it on
+    /// `PATCH /keys/{hash}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creator_user_id: Option<UserId>,
 }
 
 impl CreateKeyRequest {
@@ -91,6 +96,7 @@ impl CreateKeyRequest {
             include_byok_in_limit: false,
             expires_at: None,
             workspace_id: None,
+            creator_user_id: None,
         }
     }
 }
@@ -549,6 +555,11 @@ mod tests {
             workspace_id: Some(
                 Uuid::parse("00000000-0000-4000-8000-000000000001").expect("a valid UUID"),
             ),
+            // The one endpoint that accepts a creator. `PATCH /keys/{hash}` has
+            // no field for it, so a key created without it can never gain one.
+            creator_user_id: Some(
+                UserId::parse("user_2dHFtVWx2n56w6HkM0000000000").expect("a valid user id"),
+            ),
             ..CreateKeyRequest::new(RemoteName::parse("jobfeed").expect("a valid name"))
         };
         assert_eq!(
@@ -560,6 +571,7 @@ mod tests {
                 "include_byok_in_limit": true,
                 "expires_at": "2027-01-15T08:00:00Z",
                 "workspace_id": "00000000-0000-4000-8000-000000000001",
+                "creator_user_id": "user_2dHFtVWx2n56w6HkM0000000000",
             })
         );
     }

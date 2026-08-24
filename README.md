@@ -3,11 +3,11 @@
 A declarative OpenRouter management CLI, written in Rust.
 
 Keymaster is an early work in progress. The command-line surface below is
-final for v0.1. `plan`, `status`, `import`, `apply`, and `recover` are
-implemented end to end; every remaining command still fails with a "not
-implemented yet" error and exits 1. `apply` converges guardrails, existing keys, and assignments, and
-creates inference keys through the journaled transaction of ADR-0002. It does
-not replace one yet — that is #19.
+final for v0.1, and every command on it is implemented end to end: `apply`
+converges guardrails, keys, and assignments, and creates *and replaces*
+inference keys through the journaled transaction of ADR-0002; `rotate`,
+`retire`, `delete key`, and `state forget` are the explicit lifecycle
+operations nothing else ever performs.
 
 ## Build, run, and test
 
@@ -20,15 +20,15 @@ cargo test
 ## Commands
 
 ```text
-keymaster plan                          show the changes an apply would make   [works]
-keymaster status                        report bindings and incomplete operations [works]
-keymaster apply                         converge OpenRouter with the configuration [partly]
-keymaster import key NAME --hash HASH   bind an existing key by its hash      [works]
-keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID [works]
+keymaster plan                          show the changes an apply would make
+keymaster status                        report bindings and incomplete operations
+keymaster apply                         converge OpenRouter with the configuration
+keymaster import key NAME --hash HASH   bind an existing key by its hash
+keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID
 keymaster rotate NAME                   stage a replacement key
-keymaster recover inspect NAME          report an interrupted key operation   [works]
-keymaster recover resolve NAME ...      attest what an ambiguous operation did [works]
-keymaster recover replace NAME          replace a key after resolving ambiguity [works]
+keymaster recover inspect NAME          report an interrupted key operation
+keymaster recover resolve NAME ...      attest what an ambiguous operation did
+keymaster recover replace NAME          replace a key after resolving ambiguity
 keymaster retire NAME --hash HASH       disable a tracked retained key
 keymaster delete key --hash HASH        permanently delete a tracked key
 keymaster state forget ADDRESS          relinquish local ownership of an address
@@ -200,13 +200,10 @@ section.
 
 What apply will not do:
 
-- **Replace an inference key.** Staging a successor beside a live predecessor
-  is #19. A planned replacement is skipped with a reason naming the issue, and
-  the outcome is `incomplete` rather than `applied`. The assignment planned
-  beside it is held back too, because that assignment belongs to the key the
-  replacement would have produced: the address still owns the live predecessor,
-  and assigning *it* to the successor's guardrail would change what an existing
-  credential may do on the strength of a key that was never created.
+- **Retire, disable, or delete a predecessor.** A planned replacement runs the
+  journaled transaction and stops at the promotion. The key the address held
+  stays enabled, tracked as `awaiting_retirement`, until an explicit
+  `keymaster retire`. See [Rotation and retirement](#rotation-and-retirement).
 - **Touch anything unmanaged.** Only actions the planner produced are executed,
   and the planner never proposes a write to a remote object no local address
   owns.
@@ -235,7 +232,7 @@ the plan held nothing but no-ops, exactly what `keymaster plan` calls converged:
 | ------- | ------- | ---- |
 | `converged` | The plan was all no-ops; nothing was written | 0 |
 | `applied` | Every planned write was made and verified | 0 |
-| `incomplete` | Nothing failed, but a write apply cannot make yet was skipped | 0 |
+| `incomplete` | Nothing failed, but a write apply deliberately did not make was skipped | 0 |
 | `held_back` | Nothing failed, and work remains that only an operator can unblock | 0 |
 | `failed` | A write failed, or one that was made could not be confirmed | 1 |
 | `blocked` | An unfinished operation of unknown outcome stopped the run | 1 |
@@ -257,7 +254,9 @@ Creating an inference key is the one operation Keymaster cannot make
 repeatable. OpenRouter returns the plaintext in the create response and nowhere
 else, and documents no idempotency token, so a request whose response is lost
 can never be told apart from one that was never applied. ADR-0002 answers that
-with a journal, and `apply` runs it for every planned key `create`:
+with a journal, and it is the one path that issues secret material: `apply` runs
+it for every planned key `create` and `replace`, and so do `keymaster rotate`
+and `keymaster recover replace`.
 
 ```text
 validate ─▶ create_started ─▶ POST /keys ─▶ created ─▶ PATCH + assign
@@ -314,6 +313,168 @@ handled by `keymaster recover`.
 One phase needs no operator: `delivered`. The transaction is over and only the
 local promotion is outstanding, so `apply` completes it under its lock before it
 plans, and says so in a warning.
+
+## Rotation and retirement
+
+Replacing a credential is four commands, not one, and the split is the whole
+design. Keymaster can create a new key and put it where the configuration says.
+It cannot know when the deployment that reads from there has picked it up. So
+it stages the successor and stops; ending the predecessor's life is always
+something an operator asks for by name.
+
+```text
+rotate ──▶ successor current, predecessor `awaiting_retirement`  (still enabled)
+             │
+retire ──────▶ predecessor disabled, confirmed by a read, still tracked
+             │
+delete ──────▶ predecessor gone from OpenRouter, then dropped from state
+```
+
+`state forget` is the fifth door and leads out of the building: it relinquishes
+ownership without touching anything remote.
+
+All four stand aside for an operation in progress — `rotate` will not stage a
+successor beside one, `retire` and `delete key` will not touch the key one is
+about to produce, and `state forget` will not throw away the journal recording
+it — and every one of those refusals names the command that clears it. That is
+`keymaster recover` for the phases only an operator can settle, and `keymaster
+apply` for `delivered`, which needs no operator at all: the transaction is over
+and the outstanding promotion is local. `recover replace` refuses `delivered`
+outright, so being sent there would be being sent to a command that turns you
+away.
+
+### rotate
+
+```sh
+keymaster rotate jobfeed
+```
+
+A rotation is the journaled transaction of ADR-0002 with a different trigger.
+`apply` runs the same one when the configuration demands it, and `rotate` runs
+it when you want a fresh credential now, for a reason no file records.
+`recover replace` runs it too, for a key whose plaintext is already gone.
+
+`apply` plans a replacement when:
+
+- `generation` rises;
+- the key's `receiver` changes, or that receiver's non-secret fingerprint does;
+- an immutable key field changes — `expires_at`, `workspace_id`, or
+  `creator_user_id`.
+
+Those three are immutable because `POST /keys` accepts them and
+`PATCH /keys/{hash}` does not, so there is no way to move an existing key to a
+new expiry, workspace, or creator. A `PATCH` body never carries one.
+
+Whichever triggered it, the predecessor is not touched: not disabled, not
+deleted, not unassigned, not even read. Only the promotion that follows a
+*confirmed* delivery moves it to `retained.awaiting_retirement`, and it stays
+enabled there. A rotation that fails at any phase — an ambiguous create,
+restrictions that do not verify, a receiver that refuses — leaves the working
+credential working and its consumers untouched.
+
+Everything the successor needs is checked before anything is sent: the address
+owns a key, no operation is in progress anywhere, the configuration still
+describes the key and names a receiver, and its guardrail is bound and
+converged. A failure there costs a read and changes nothing at all.
+
+The successor takes the higher of the configured `generation` and the next free
+number at the address. A generation names one remote key at one address and only
+ever moves upward, so rotating a key at generation 3 whose configuration still
+says 1 produces generation 4 rather than a collision; a number the address has
+already used is refused outright by the state API.
+
+**Deleting a key does not release its generation.** State keeps a per-address
+high-water mark, so a number stays spent after the key that held it is gone.
+Otherwise deleting the highest-generation key an address records — an abandoned
+rotation's dead candidate, say — would let the next create hand that number to a
+different remote key, right after the evidence of the first one was destroyed.
+
+### retire
+
+```sh
+keymaster retire jobfeed --hash <PREDECESSOR-HASH>
+```
+
+Disables one hash the address retains, and proves it by reading the key back.
+The hash is an immutable identity: there is no retire-by-name, and no search.
+
+`keymaster status` lists the hashes an address holds and why each is still
+tracked. Run `retire` when every consumer has the new credential — that is the
+judgement Keymaster cannot make.
+
+- **The current hash is refused.** Keymaster cannot know that nothing is still
+  using it. Rotate first; the predecessor is what you retire. v0.1 defines no
+  policy that permits the shortcut, so there is no flag for it.
+- **Already disabled is a success that sends nothing.** The key is read first,
+  so a repeated `retire` costs one read, writes no state, and reports `retired`.
+- **A failed disable stays tracked.** The hash becomes `retirement_failed` so it
+  can be retried, and the run exits 1 after writing its result document.
+- **A retired hash stays in state.** It is still visible to an audit and to a
+  later `delete key`. Nothing prunes it.
+
+### delete key
+
+```sh
+keymaster delete key --hash <HASH>
+```
+
+Permanent, irreversible, and never planned. There is no address argument: the
+hash identifies the key, and the owning address is looked up rather than
+asserted, so you cannot delete one address's key by typing another's name.
+
+- **Only a hash Keymaster tracks.** A stray key belongs to whoever made it;
+  `plan` reports it as unmanaged and this command refuses it.
+- **The key an address is using is refused**, as is one belonging to an
+  unfinished operation.
+- **A 2xx is not the answer.** The key is read back, and only a 404 proves it is
+  gone. A 404 on the delete itself means it was already absent — the same end
+  state — and settles the hash.
+- **State is never dropped ahead of the confirmation.** A refusal, a timeout, or
+  a read that still finds the key leaves the hash tracked as
+  `retirement_failed` and exits 1. The local record is the one thing that can
+  still find a live spending credential, so it is the last thing to go.
+
+### state forget
+
+```sh
+keymaster state forget keys.jobfeed
+keymaster state forget guardrails.cheap
+```
+
+Relinquishes local ownership. **Zero HTTP requests and zero receiver
+invocations**: nothing is disabled, nothing is deleted, and every resource it
+releases goes on existing exactly as it was. It needs no management credential,
+no network, and no configuration — it exists to correct state that is wrong,
+which is precisely when those may be unavailable.
+
+Forgetting a key address releases every hash it held: the current key *and*
+every retained one, because relinquishing ownership means relinquishing all of
+it. The result document lists each identity and its role, so you can see what
+you are letting go of before it stops being yours. Afterwards `keymaster plan`
+reports them as unmanaged.
+
+`ADDRESS` is `keys.NAME` or `guardrails.NAME`. A bare `NAME` is accepted when
+only one of the two is bound and refused when both are — the same word can name
+a key and a guardrail.
+
+- **An address with an operation in progress is refused.** The journal is the
+  only record that the attempt happened, and in the create phases the only
+  evidence that a live key may exist. Resolve it with `keymaster recover` first.
+- **An address bound to nothing is a clean no-op.** It writes no state and exits
+  0, so repeating the command is safe.
+
+### What none of this does
+
+Removing a `[keys.*]` block from the configuration performs no lifecycle action
+whatsoever. The binding becomes an `orphaned_binding`: reported by every `plan`
+and `apply`, tracked, and otherwise left alone. Nothing is retired, deleted, or
+forgotten because a block disappeared — Keymaster does not read a deletion in
+one file as authority to destroy a credential in another system. Use `retire`,
+`delete key`, and `state forget` explicitly.
+
+There is also no scheduled rotation, no automatic smoke test of a downstream
+application, no automatic retirement of a predecessor, no pruning, and no
+delete-by-name.
 
 ## Recovering an interrupted operation
 
