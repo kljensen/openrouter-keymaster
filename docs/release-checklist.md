@@ -8,9 +8,9 @@ Status as of the commit that adds this file.
 
 | # | Item | Status |
 | --- | --- | --- |
-| 1 | [All milestone issues closed](#1-all-milestone-issues-closed) | ☐ **#20 closes with this work** |
+| 1 | [All milestone issues closed](#1-all-milestone-issues-closed) | ✓ |
 | 2 | [ADRs accepted and reconciled with the code](#2-adrs-accepted-and-reconciled-with-the-code) | ✓ |
-| 3 | [`just check` passes](#3-just-check-passes) | ☐ **offline pass recorded; online advisory check pending** |
+| 3 | [`just check` passes](#3-just-check-passes) | ✓ |
 | 4 | [The live suite passes](#4-the-live-suite-passes) | ☐ **not yet executed** |
 | 5 | [No secret plaintext in history, fixtures, or artifacts](#5-no-secret-plaintext-in-history-fixtures-or-artifacts) | ✓ |
 | 6 | [CLI help and output reviewed as a compatibility surface](#6-cli-help-and-output-reviewed-as-a-compatibility-surface) | ✓ |
@@ -18,10 +18,14 @@ Status as of the commit that adds this file.
 | 8 | [License chosen](#8-license-chosen) | ☐ **open — owner decision** |
 | 9 | [Version set to 0.1.0 and changelog written](#9-version-set-to-010-and-changelog-written) | ✓ |
 
-Four items are open. Item 1 closes when the commit adding this file lands and
-closes #20; item 3 needs one online `cargo deny` run; item 4 needs a dedicated
-test organization that does not exist yet; item 8 is the repository owner's to
-decide. None is a defect, and none is quietly checked.
+Two items are open. Item 4 needs a dedicated test organization that does not
+exist yet; item 8 is the repository owner's to decide. Neither is a defect, and
+neither is quietly checked.
+
+Items 1 and 3 were verified after the #20 commit landed: all twenty milestone
+issues are closed, and CI run 32699016227 on commit `736941d` ran the full
+battery online — including the `cargo deny` advisories check against a fresh
+RustSec database — and succeeded.
 
 ---
 
@@ -54,10 +58,10 @@ sections are untouched.
 
 ## 3. `just check` passes
 
-**Status: open.** Four of the five steps pass. The fifth, `cargo deny`, has been
-run only against a stale local copy of the advisory database, because the
-machine this was verified on cannot reach it. A release must not go out on an
-advisory database of unknown age.
+**Status: verified.** All five steps passed in CI run 32699016227 on commit
+`736941d`, where `cargo deny` fetched a fresh advisory database. Locally the
+same battery passes with `cargo deny --offline` on machines that cannot reach
+the RustSec repository.
 
 ```sh
 just check
@@ -235,6 +239,6 @@ head -20 CHANGELOG.md
 **Expected:** `version = "0.1.0"` in `Cargo.toml`, and a `0.1.0` section in
 [`CHANGELOG.md`](../CHANGELOG.md) summarizing the milestone. Both verified.
 
-Note that a release tag should not be cut while items 3, 4, and 8 are open. The
+Note that a release tag should not be cut while items 4 and 8 are open. The
 version is set so that what ships and what the changelog describes are the same
-thing; tagging is the owner's call once the three open items are settled.
+thing; tagging is the owner's call once the two open items are settled.
