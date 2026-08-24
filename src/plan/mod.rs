@@ -228,8 +228,8 @@ pub enum ActionKind {
     /// Bring an existing remote resource's managed fields to the desired
     /// values.
     Update,
-    /// Create a successor key and deliver it. The predecessor stays enabled
-    /// until an explicit retirement.
+    /// Create a successor key and deliver it. The predecessor is left as it
+    /// is until an explicit retirement.
     Replace,
     /// Remove a key's assignment to a guardrail, because the configuration
     /// asks for none.

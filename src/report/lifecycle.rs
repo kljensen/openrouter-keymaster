@@ -51,7 +51,7 @@ pub struct RotateReport {
     receiver: String,
     /// Whether the new hash became the address's current key.
     promoted: bool,
-    /// The key the address held, which is still enabled.
+    /// The key the address held. Rotation leaves it exactly as it was.
     predecessor: RetainedReport,
     /// What this run established.
     summary: String,
@@ -115,10 +115,14 @@ fn rotation_summary(address: &Address, predecessor: &Predecessor, successor: &Su
             old = predecessor.hash,
         );
     }
+    // Never "still enabled". Rotation does not read the predecessor, so this
+    // run observed nothing about it; a key created disabled would make the
+    // confident sentence false (#23).
     format!(
         "`{address}` now uses key {hash} at generation {generation}, delivered to {receiver}. Key \
-         {old} is untouched and still enabled: Keymaster cannot know when the consumers of a \
-         credential have adopted its successor, so it never retires one for you. Retire it with \
+         {old} is unchanged: Keymaster neither disabled nor deleted it, and did not read it, so \
+         it is whatever it already was. Keymaster cannot know when the consumers of a credential \
+         have adopted its successor, so it never retires one for you. Retire it with \
          `openrouter-keymaster retire {address} --hash {old}` once they have.",
         address = address.as_str(),
         hash = successor.hash,

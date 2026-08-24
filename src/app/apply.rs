@@ -36,7 +36,7 @@
 //! deleted, and not unassigned; the successor is created, secured, verified,
 //! and delivered first, and only the promotion that follows a confirmed
 //! delivery moves the predecessor to `retained.awaiting_retirement`, where it
-//! stays enabled until an operator runs `openrouter-keymaster retire`. So a rotation that
+//! stays as it was until an operator runs `openrouter-keymaster retire`. So a rotation that
 //! fails at any phase leaves the working credential working.
 //!
 //! # What apply will not do
@@ -77,7 +77,7 @@ use crate::config::Config;
 use crate::error::Error;
 use crate::ids::{Address, KeyHash};
 use crate::output::Renderer;
-use crate::plan::{self, Action, ActionKind, Identity, Plan, Reason, ResourceAddress};
+use crate::plan::{self, Action, ActionKind, Identity, Plan, Reason, ResourceAddress, Snapshot};
 use crate::report::{ActionOutcome, ApplyReport};
 use crate::state::{KeyBinding, Phase as JournalPhase, State, StateFile, StateLock};
 
@@ -135,6 +135,7 @@ pub(super) fn run<O: Write, E: Write>(
         reader: &reader,
         writer: &writer,
         lock: &lock,
+        snapshot: &snapshot,
         stopped: false,
         issued: BTreeSet::new(),
     };
@@ -230,6 +231,10 @@ struct Apply<'a> {
     reader: &'a Reader<'a>,
     writer: &'a Writer<'a>,
     lock: &'a StateLock<'a>,
+    /// The read this run planned from. Kept so a report can state what was
+    /// observed about a key apply does not write — a replacement's
+    /// predecessor — instead of asserting it.
+    snapshot: &'a Snapshot,
     /// Set by the first failed write. Nothing is attempted after it: a later
     /// action may depend on the one that failed, and a run that pressed on
     /// would report a second failure caused by the first.
@@ -350,9 +355,28 @@ impl Apply<'_> {
             Some(hash) => format!(
                 "{detail} {predecessor}",
                 detail = issued.detail,
-                predecessor = predecessor_note(address, &hash, issued.promoted)
+                predecessor = predecessor_note(
+                    address,
+                    &hash,
+                    issued.promoted,
+                    self.observed_disabled(&hash),
+                )
             ),
         }))
+    }
+
+    /// What this run's read said about a key's `disabled`, if it saw the key.
+    ///
+    /// The only caller is the predecessor note, and the snapshot is the one
+    /// this run planned from — taken under the lock, before any write, and a
+    /// replacement writes nothing to the predecessor. `None` means the key was
+    /// not in the snapshot, and then the report says nothing about it.
+    fn observed_disabled(&self, hash: &KeyHash) -> Option<bool> {
+        self.snapshot
+            .keys
+            .iter()
+            .find(|key| key.hash == *hash)
+            .map(|key| key.disabled)
     }
 
     /// Creates a guardrail and records its identity before anything else runs.
@@ -604,19 +628,41 @@ fn blockers(action: &Action) -> Vec<String> {
 /// an operator that a hash is retired when it is in service, and pointing them
 /// at `retire` for the key everything is using. The two sentences differ in
 /// exactly the one thing that must not be guessed.
-fn predecessor_note(address: &Address, hash: &KeyHash, promoted: bool) -> String {
+fn predecessor_note(
+    address: &Address,
+    hash: &KeyHash,
+    promoted: bool,
+    disabled: Option<bool>,
+) -> String {
     if !promoted {
         return format!(
-            "Key {hash} is untouched and is still `{address}`'s current key, because the promotion \
+            "Key {hash} is unchanged and is still `{address}`'s current key, because the promotion \
              did not land; do not retire it until the next `openrouter-keymaster apply` completes \
              that and reports it as `awaiting_retirement`."
         );
     }
     format!(
-        "Key {hash} is untouched — still enabled, now tracked as `awaiting_retirement` — because \
-         rotation never disables a predecessor; retire it with `openrouter-keymaster retire \
-         {address} --hash {hash}` once every consumer holds the new key."
+        "Key {hash} is unchanged — a replacement never disables or deletes a predecessor — and is \
+         now tracked as `awaiting_retirement`.{observed} Retire it with \
+         `openrouter-keymaster retire {address} --hash {hash}` once every consumer holds the new \
+         key.",
+        observed = observed_note(disabled),
     )
+}
+
+/// What the run's read said about the predecessor, and nothing when it did not
+/// see it.
+///
+/// Keymaster does not touch a predecessor, which is not the same as knowing it
+/// is enabled: a key created disabled stays disabled, and a report that
+/// asserted otherwise would be wrong (#23). So the sentence exists only when an
+/// observation backs it, and it says which read made it.
+fn observed_note(disabled: Option<bool>) -> String {
+    match disabled {
+        None => String::new(),
+        Some(true) => " The read this run planned from showed it disabled.".to_owned(),
+        Some(false) => " The read this run planned from showed it enabled.".to_owned(),
+    }
 }
 
 /// An address the plan named and the configuration does not describe.

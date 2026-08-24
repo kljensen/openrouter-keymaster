@@ -247,8 +247,8 @@ pub struct CurrentKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetainedStatus {
-    /// A predecessor, still enabled. Rotation never disables one; an explicit
-    /// `retire` does.
+    /// A predecessor Keymaster left alone. Rotation never disables one; an
+    /// explicit `retire` does.
     AwaitingRetirement,
     /// Disabled, and the disable was verified.
     Retired,

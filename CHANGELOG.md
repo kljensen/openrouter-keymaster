@@ -9,6 +9,11 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Fixed
 
+- `rotate` and a planned replacement no longer describe the predecessor as
+  "still enabled". Rotation does not read it, so the summary says it is
+  unchanged — neither disabled nor deleted — and `apply` reports the `disabled`
+  value its own read observed, or says nothing about it.
+
 - `plan` and `apply` report `converged` when there is nothing to write and
   nothing an operator has to clear. An `unmanaged` remote resource, an
   `orphaned_binding` with no operation pending, and a `no_op` no longer make a

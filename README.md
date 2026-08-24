@@ -264,7 +264,7 @@ What apply will not do:
 
 - **Retire, disable, or delete a predecessor.** A planned replacement runs the
   journaled transaction and stops at the promotion. The key the address held
-  stays enabled, tracked as `awaiting_retirement`, until an explicit
+  is left exactly as it was, tracked as `awaiting_retirement`, until an explicit
   `openrouter-keymaster retire`. See
   [Rotation and retirement](#rotation-and-retirement).
 - **Touch anything unmanaged.** Only actions the planner produced are executed,
@@ -387,7 +387,7 @@ it stages the successor and stops; ending the predecessor's life is always
 something an operator asks for by name.
 
 ```text
-rotate ──▶ successor current, predecessor `awaiting_retirement`  (still enabled)
+rotate ──▶ successor current, predecessor `awaiting_retirement`  (never touched)
              │
 retire ──────▶ predecessor disabled, confirmed by a read, still tracked
              │

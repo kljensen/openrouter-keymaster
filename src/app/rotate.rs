@@ -12,8 +12,8 @@
 //! unassigned, and not even read. The successor is created, restricted,
 //! guardrailed, verified, and delivered first; only the promotion that follows
 //! a *confirmed* delivery moves the old hash to
-//! `retained.awaiting_retirement`, where it stays enabled until an operator
-//! runs `openrouter-keymaster retire`.
+//! `retained.awaiting_retirement`, where it stays exactly as it was until an
+//! operator runs `openrouter-keymaster retire`.
 //!
 //! That ordering is the whole value of the command. Keymaster cannot know when
 //! a downstream deployment has read the new secret out of wherever the receiver

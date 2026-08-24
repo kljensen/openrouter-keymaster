@@ -194,7 +194,7 @@ a rotation that began the journaled transaction leaves an operation behind, and
   operator at all, because only a local promotion is left and the next
   `openrouter-keymaster apply` records it.
 
-Either way the predecessor is untouched and still serving.
+Either way Keymaster neither disabled nor deleted the predecessor.
 [Recovering an interrupted operation](#recovering-an-interrupted-operation) is
 the full procedure.
 

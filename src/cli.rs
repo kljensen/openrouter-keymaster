@@ -88,8 +88,8 @@ run and is resolved with `openrouter-keymaster recover`, never by trying again.
 A planned replacement — a raised generation, a moved receiver, a changed \
 immutable field — runs that same transaction. The key the address already holds \
 is not disabled, deleted, or unassigned: promotion moves it to \
-`retained.awaiting_retirement`, where it stays enabled until an explicit \
-`openrouter-keymaster retire`.
+`retained.awaiting_retirement`, where it stays exactly as it was until an \
+explicit `openrouter-keymaster retire`.
 
 Exit code 0 means nothing went wrong, which is not the same as converged: a \
 write apply cannot make yet, or one the plan holds back until an operator \
@@ -129,7 +129,7 @@ current only after a confirmed delivery.
 
 The key the address already holds is never touched. It is not disabled, not \
 deleted, not unassigned, and not read. Promotion moves it to \
-`retained.awaiting_retirement`, where it stays enabled until you run \
+`retained.awaiting_retirement`, where it stays exactly as it was until you run \
 `openrouter-keymaster retire`, because Keymaster cannot know when the consumers of a \
 credential have adopted its successor. A rotation that fails at any phase \
 therefore leaves the working credential working.

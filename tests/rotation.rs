@@ -223,7 +223,7 @@ fn first(trace: &[String], request: &str) -> usize {
 // --- rotate ------------------------------------------------------------------
 
 #[test]
-fn rotate_stages_a_successor_and_leaves_the_predecessor_enabled_and_tracked() {
+fn rotate_stages_a_successor_and_leaves_the_predecessor_unchanged_and_tracked() {
     let world = World::new("record");
     world.owning_a_working_key();
     serve_rotation(&world.project);
@@ -243,9 +243,11 @@ fn rotate_stages_a_successor_and_leaves_the_predecessor_enabled_and_tracked() {
     assert_eq!(document["predecessor"]["generation"], 1);
     assert_eq!(document["predecessor"]["status"], "awaiting_retirement");
     assert!(
-        document["summary"]
-            .as_str()
-            .is_some_and(|text| text.contains("still enabled")),
+        document["summary"].as_str().is_some_and(|text| {
+            // Rotation never reads the predecessor, so the summary may not say
+            // anything about whether it is enabled (#23).
+            text.contains("is unchanged") && !text.contains("enabled")
+        }),
         "{document}"
     );
 
@@ -603,6 +605,11 @@ fn current_and_retained_identities_survive_a_crash_before_the_promotion() {
 /// A guardrailed project whose predecessor is bound at generation 1, and a
 /// server that answers everything a replacement needs.
 fn a_guardrailed_rotation() -> World {
+    a_guardrailed_rotation_observing(api_key(OLD_HASH, "golf-jobfeed"))
+}
+
+/// The same project, with the predecessor observed as `predecessor` says.
+fn a_guardrailed_rotation_observing(predecessor: Value) -> World {
     let world = World::with(
         "record",
         "generation = 2\nguardrail = \"cheap\"\n\n[guardrails.cheap]\n\
@@ -652,8 +659,8 @@ fn a_guardrailed_rotation() -> World {
     );
     world.project.observe_sequence(
         vec![
-            vec![api_key(OLD_HASH, "golf-jobfeed")],
-            vec![api_key(OLD_HASH, "golf-jobfeed"), secured_key(NEW_HASH)],
+            vec![predecessor.clone()],
+            vec![predecessor, secured_key(NEW_HASH)],
         ],
         vec![vec![guardrail(FAKE_GUARDRAIL_ID, "cheap-rail", &[])]],
         vec![
@@ -676,10 +683,12 @@ fn a_planned_replacement_runs_the_transaction_and_assigns_only_the_successor() {
     assert_eq!(key["kind"], "replace");
     assert_eq!(key["status"], "applied");
     assert!(
-        key["detail"]
-            .as_str()
-            .is_some_and(|detail| detail.contains(OLD_HASH) && detail.contains("untouched")),
-        "the outcome names the predecessor it left alone: {key}"
+        key["detail"].as_str().is_some_and(|detail| {
+            detail.contains(OLD_HASH)
+                && detail.contains("is unchanged")
+                && detail.contains("showed it enabled")
+        }),
+        "the outcome names the predecessor it left alone, and only what it read: {key}"
     );
 
     let assigned = action(&document, "keys.jobfeed.guardrail");
@@ -776,6 +785,27 @@ fn a_changed_creator_replaces_the_key_and_the_create_body_carries_the_new_one() 
 /// A replacement whose promotion did not persist must not report the
 /// predecessor as retired.
 ///
+/// A predecessor that was already disabled must not be reported as enabled.
+///
+/// This is the live case #23 came from: nothing about a rotation establishes
+/// that the key it moved aside is in service, and the only thing that may be
+/// said about it is what the run's own read saw.
+#[test]
+fn a_replacement_reports_the_predecessor_it_observed_rather_than_one_it_assumed() {
+    let mut disabled = api_key(OLD_HASH, "golf-jobfeed");
+    disabled["disabled"] = json!(true);
+    let world = a_guardrailed_rotation_observing(disabled);
+
+    let document = world.project.succeed(&["--json", "apply"]).document();
+
+    let detail = action(&document, "keys.jobfeed")["detail"]
+        .as_str()
+        .expect("the replacement's detail")
+        .to_owned();
+    assert!(detail.contains("showed it disabled"), "{detail}");
+    assert!(!detail.contains("showed it enabled"), "{detail}");
+}
+
 /// Promotion is a durable write of its own. Until it lands the predecessor is
 /// still the address's current key, so an outcome saying it is
 /// `awaiting_retirement` — and naming the `retire` command for it — would be

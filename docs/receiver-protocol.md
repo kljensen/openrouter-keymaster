@@ -133,7 +133,7 @@ a live credential. ADR-0002 chooses the expensive-but-safe answer by default.
 
 - **delivered** — Keymaster marks the operation delivered, promotes the new key
   to current, and moves the previous key to `awaiting_retirement`. The
-  predecessor stays enabled until an explicit `openrouter-keymaster retire`.
+  predecessor is left as it is until an explicit `openrouter-keymaster retire`.
 - **rejected** — the plaintext is discarded, the new key is disabled if
   possible and kept tracked, and the operator is told the address needs
   replacement. Your adapter is not called again for that key.

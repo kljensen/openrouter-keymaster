@@ -2,7 +2,7 @@
 //! `state forget`.
 //!
 //! Nothing here is ever planned, proposed, or performed as a side effect of
-//! something else. A predecessor left behind by a rotation stays enabled
+//! something else. A predecessor left behind by a rotation stays untouched
 //! forever unless an operator names it; a configuration block that disappears
 //! is an orphaned binding and nothing more. Keymaster cannot know when a
 //! downstream deployment stopped using a credential, so it never decides that
