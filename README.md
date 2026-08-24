@@ -2,20 +2,54 @@
 
 A declarative OpenRouter management CLI, written in Rust.
 
-Keymaster is an early work in progress. The command-line surface below is
-final for v0.1, and every command on it is implemented end to end: `apply`
+Keymaster is at v0.1.0. The command-line surface below is final for that
+version, and every command on it is implemented end to end: `apply`
 converges guardrails, keys, and assignments, and creates *and replaces*
 inference keys through the journaled transaction of ADR-0002; `rotate`,
 `retire`, `delete key`, and `state forget` are the explicit lifecycle
 operations nothing else ever performs.
 
-## Build, run, and test
+## Install and build
+
+Keymaster is built from source. It needs the Rust toolchain pinned in
+[`rust-toolchain.toml`](rust-toolchain.toml), which `rustup` installs on its own
+the first time you build, and a Unix system — the durability and permission
+guarantees are built on Unix primitives, so v0.1 fails to build elsewhere rather
+than offering a weaker version of them.
 
 ```sh
-cargo build
-cargo run -- --help
-cargo test
+git clone https://github.com/kljensen/openrouter-keymaster
+cd openrouter-keymaster
+cargo build --release
+./target/release/keymaster --version
 ```
+
+Put the binary somewhere on your `PATH`, or run it from `target/release`. There
+is no installer, no package, and no published crate.
+
+For development, `cargo build`, `cargo run -- --help`, and `cargo test` work as
+usual; [`just check`](#checks) runs the same battery CI does.
+
+Then read [Credentials](#credentials) and
+[the first-run runbook](docs/operations.md#first-run).
+
+## Documentation
+
+This README is the reference for what each command does and why. The pages under
+[`docs/`](docs/README.md) are the material it links to:
+
+| Page | What it is for |
+| --- | --- |
+| [operations.md](docs/operations.md) | Runbooks: first run, adoption, changes, key creation, rotation, retirement, recovery, and looking after state. |
+| [configuration.md](docs/configuration.md) | Every field of the desired-state file. |
+| [threat-model.md](docs/threat-model.md) | Supplying the management credential, and what Keymaster does and does not protect. |
+| [receiver-protocol.md](docs/receiver-protocol.md) | The contract for writing a command receiver. |
+| [compatibility.md](docs/compatibility.md) | v0.1 non-goals, which surfaces are contracts, and how state migrations will work. |
+| [live-tests.md](docs/live-tests.md) | The opt-in acceptance suite that runs against a real organization. |
+| [release-checklist.md](docs/release-checklist.md) | The v0.1 release gate, with the command that verifies each item. |
+| [adr/](docs/adr/) | The decisions that are expensive to reverse. |
+
+[`CHANGELOG.md`](CHANGELOG.md) records what each release changed.
 
 ## Commands
 
@@ -40,6 +74,9 @@ Global options: `--config PATH` (default `keymaster.toml`), `--state PATH`
 `recover resolve` requires exactly one attested finding, either
 `--no-resource-created` or `--leaked-hash HASH`. Keymaster never guesses which
 one is true.
+
+[`docs/operations.md`](docs/operations.md) is the same list as procedures: what
+to type, in what order, and what to check afterwards.
 
 ## Plan and status
 
@@ -474,7 +511,10 @@ one file as authority to destroy a credential in another system. Use `retire`,
 
 There is also no scheduled rotation, no automatic smoke test of a downstream
 application, no automatic retirement of a predecessor, no pruning, and no
-delete-by-name.
+delete-by-name. [`docs/compatibility.md`](docs/compatibility.md) is the full
+list of what v0.1 deliberately does not do, alongside the surfaces that *are*
+contracts — the command tree, the exit codes, the JSON field names, and the
+configuration schema.
 
 ## Recovering an interrupted operation
 
@@ -482,6 +522,11 @@ Any create or delivery that ends without an answer leaves a journal entry and
 stops the whole apply. `keymaster recover` is the only way to close one, and it
 never guesses: it does not retry a create, adopt a remote key because its
 display name matches, or invoke a receiver a second time.
+
+What follows is why each step is shaped the way it is.
+[`docs/operations.md`](docs/operations.md#recovering-an-interrupted-operation)
+is the same thing as a procedure, with a table that maps each phase to the one
+command it accepts.
 
 Start by reading the journal:
 
@@ -580,6 +625,10 @@ stops the run rather than falling back, because quietly reverting to
 production would send the management credential somewhere the operator did not
 name. Unset, or set to nothing at all, means production.
 
+[`docs/threat-model.md`](docs/threat-model.md) covers how to supply the
+credential without putting it in a shell history or a process list, and what the
+design does and does not defend against.
+
 ## Configuration
 
 Desired state is one TOML file. [`examples/keymaster.toml`](examples/keymaster.toml)
@@ -601,6 +650,9 @@ Three properties are worth knowing before editing one:
 - **Validation runs before anything else.** Parsing and validation read one
   file and nothing else — no credential, no network, no write — and report
   every problem in one pass, each named by its configuration path.
+
+[`docs/configuration.md`](docs/configuration.md) is the field-by-field
+reference: every key, its type, its default, and the rules that reject it.
 
 ## Receivers
 
@@ -667,6 +719,10 @@ Operating notes:
 - **Unix only.** These durability and permission guarantees are implemented
   with Unix primitives, so v0.1 fails to build on other platforms rather than
   offering a weaker version of them.
+
+[`docs/operations.md`](docs/operations.md#looking-after-state) has the
+procedures: backing state up, restoring it, and clearing a lock a killed run
+left behind.
 
 ## OpenRouter client
 
@@ -797,6 +853,12 @@ The Rust toolchain is pinned in `rust-toolchain.toml` and must match
 `package.rust-version` in `Cargo.toml`; `tests/toolchain_pin.rs` fails if they
 drift apart.
 
+`just live` is the one thing `just check` does not run and CI never will. It is
+an opt-in acceptance suite against a **real** OpenRouter organization, gated by
+`#[ignore]` and by `KEYMASTER_LIVE_TESTS=1`, and it creates and deletes real
+resources with a real management credential. Read
+[`docs/live-tests.md`](docs/live-tests.md) before running it.
+
 ## Test harness
 
 `tests/support/` is shared test support that any integration test picks up
@@ -885,3 +947,10 @@ dependency graph stays small and auditable.
 - Advisory or license failures are fixed by upgrading or removing the
   dependency; an exception must be a narrow, dated, explained entry in
   `deny.toml`.
+
+## License
+
+None yet. The crate is `publish = false` and carries no license expression, so
+`deny.toml` ignores the private crate while still holding every dependency to
+the allow-list. Choosing one is an open item on
+[the release checklist](docs/release-checklist.md#8-license-chosen).

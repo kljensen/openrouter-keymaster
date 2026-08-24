@@ -165,22 +165,29 @@ possible outcome for an operation that may have produced an unknown live key.
 
 ### Implementation checks
 
-These checks do not exist yet. This decision will be enforced by:
+As of v0.1 these checks exist and run in `just check`. The decision above is
+unchanged; this section records where each part of it is enforced.
 
-- [#10](https://github.com/kljensen/openrouter-keymaster/issues/10) — versioned,
-  locked, atomic, non-secret local state. Tests will enforce that state carries
-  identity and lifecycle phases only, that it rejects secret-bearing fields and
-  unknown future versions, and that the exclusive lock and atomic write hold.
-- [#11](https://github.com/kljensen/openrouter-keymaster/issues/11) — the pure
-  desired/state/observed planner. Table-driven tests will enforce that planning
-  is pure and deterministic, that state-bound identity is resolved before names,
-  that an unbound desired object with a matching remote name yields
-  `adoption_required` rather than adoption, that a config-removed binding yields
-  `orphaned_binding`, that a missing delivered key yields `missing` rather than
-  `create`, and that unknown remote resources are reported as `unmanaged`.
-- [#13](https://github.com/kljensen/openrouter-keymaster/issues/13) — explicit
-  import by hash or UUID, enforcing the one-to-one binding rule and performing
-  no name lookup.
-- [#14](https://github.com/kljensen/openrouter-keymaster/issues/14) — sequential
-  apply, enforcing that a no-op plan sends no writes, that `unmanaged` objects
-  are never touched, and that the plan is recomputed after the lock is held.
+- **Versioned, locked, atomic, non-secret state** — `src/state/`, with
+  `src/state/tests.rs` and `tests/state.rs`. State carries identity and
+  lifecycle phases only, refuses credential-shaped input and unrecognized schema
+  versions, and holds its exclusive lock and atomic write under fault injection.
+- **The pure planner** — `src/plan/`, with the table-driven cases in
+  `src/plan/tests.rs`. Planning takes no clock, environment, filesystem,
+  network, or output; state-bound identity is resolved before any name; an
+  unbound desired object with a matching remote name yields `adoption_required`;
+  a config-removed binding yields `orphaned_binding`; a missing delivered key
+  yields `missing` rather than `create`; unknown remote resources are
+  `unmanaged` and never written to.
+- **Explicit import** — `src/app/import.rs`, covered by `tests/import.rs`:
+  identity lookup only, never a name search, and the one-to-one binding rule
+  refused from both directions with state left untouched.
+- **Sequential apply** — `src/app/apply.rs`, covered by `tests/apply.rs`: a
+  no-op plan sends no writes, `unmanaged` objects are never touched, and the
+  plan is recomputed after the lock is taken so nothing carries a stale
+  observation across that boundary.
+
+The local single-writer model and the absence of remote locking are consequences
+this ADR accepts, not gaps these checks close;
+[`docs/operations.md`](../operations.md#looking-after-state) is the operator's
+side of that.
