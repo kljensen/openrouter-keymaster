@@ -51,6 +51,7 @@ with a one-line note saying why.
 | --- | --- | --- |
 | [0001](0001-native-reconciliation.md) | Native declarative reconciliation | Accepted |
 | [0002](0002-journaled-key-creation.md) | Journaled key creation and delivery | Accepted |
+| [0003](0003-core-library-split.md) | Core library and CLI split | Proposed |
 
 ## Review
 
