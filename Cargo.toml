@@ -5,7 +5,9 @@ edition = "2024"
 # Must equal `toolchain.channel` in rust-toolchain.toml.
 # tests/toolchain_pin.rs fails if the two ever disagree.
 rust-version = "1.92.0"
-# Keymaster is an application, not a crates.io library.
+license = "Unlicense"
+# Keymaster is an application, not a crates.io library; the Unlicense
+# covers use, and publishing to crates.io stays a separate decision.
 publish = false
 # `src/bin/openrouter-keymaster-test-receiver.rs` is a second binary, so
 # `cargo run` needs to be told which one is the program.

@@ -2,8 +2,6 @@
 yanked = "deny"
 
 [licenses]
-# Keymaster is an unpublished application; it carries no license expression yet.
-private = { ignore = true }
 unused-allowed-license = "allow"
 allow = [
     "Apache-2.0",
@@ -14,6 +12,7 @@ allow = [
     "MIT",
     "MPL-2.0",
     "Unicode-3.0",
+    "Unlicense",
     "Zlib",
 ]
 

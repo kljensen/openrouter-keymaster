@@ -9,6 +9,9 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Added
 
+- The Unlicense: a `LICENSE` file and `license = "Unlicense"` in `Cargo.toml`.
+  `deny.toml` no longer exempts the crate from the license policy.
+
 - `decommission NAME --hash HASH [--delete]` ends the key an address is using,
   which `retire` and `delete key` refuse and rotation cannot express — it always
   issues a successor. The hash must be the address's current one. The key is

@@ -1029,7 +1029,7 @@ dependency graph stays small and auditable.
 
 ## License
 
-None yet. The crate is `publish = false` and carries no license expression, so
-`deny.toml` ignores the private crate while still holding every dependency to
-the allow-list. Choosing one is an open item on
-[the release checklist](docs/release-checklist.md#8-license-chosen).
+[The Unlicense](LICENSE): public domain, no conditions. The crate declares
+`license = "Unlicense"` and `deny.toml` holds it to the same allow-list as
+every dependency. It is still `publish = false`; publishing to crates.io is a
+separate decision.

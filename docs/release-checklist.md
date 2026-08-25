@@ -15,12 +15,11 @@ Status as of the commit that adds this file.
 | 5 | [No secret plaintext in history, fixtures, or artifacts](#5-no-secret-plaintext-in-history-fixtures-or-artifacts) | ✓ |
 | 6 | [CLI help and output reviewed as a compatibility surface](#6-cli-help-and-output-reviewed-as-a-compatibility-surface) | ✓ |
 | 7 | [Dependency policy reviewed](#7-dependency-policy-reviewed) | ✓ |
-| 8 | [License chosen](#8-license-chosen) | ☐ **open — owner decision** |
+| 8 | [License chosen](#8-license-chosen) | ✓ |
 | 9 | [Version set to 0.1.0 and changelog written](#9-version-set-to-010-and-changelog-written) | ✓ |
 
-Two items are open. Item 4 needs a dedicated test organization that does not
-exist yet; item 8 is the repository owner's to decide. Neither is a defect, and
-neither is quietly checked.
+One item is open: item 4 needs a dedicated test organization that does not
+exist yet. It is not a defect, and it is not quietly checked.
 
 Items 1 and 3 were verified after the #20 commit landed: all twenty milestone
 issues are closed, and CI run 32699016227 on commit `736941d` ran the full
@@ -215,26 +214,17 @@ is scoped to that crate and explained in place.
 
 ## 8. License chosen
 
-**Status: open. This is the repository owner's decision and is not made here.**
+**Status: verified.** The owner chose the Unlicense on 2026-08-24.
 
-The crate is `publish = false` and carries no license expression. `deny.toml`
-holds the matching exception:
-
-```toml
-[licenses]
-# Keymaster is an unpublished application; it carries no license expression yet.
-private = { ignore = true }
+```sh
+grep -n '^license' Cargo.toml && head -1 LICENSE && cargo deny check licenses
 ```
 
-That exception is what keeps `cargo deny check licenses` passing for the crate
-itself while its own license is undecided; the allow-list still governs every
-dependency.
-
-Choosing a license means: add a `LICENSE` file, set `license` in `Cargo.toml`,
-and remove `private = { ignore = true }` from `deny.toml` so the crate is held
-to the same policy as everything else. Deciding to keep it unpublished and
-unlicensed is also a decision — it just needs to be a deliberate one, recorded
-here.
+**Expected:** `license = "Unlicense"`, a `LICENSE` file beginning "This is free
+and unencumbered software released into the public domain", and a passing
+license check with no private-crate exception in `deny.toml` — the crate is
+held to the same allow-list as every dependency. `publish = false` stays:
+publishing to crates.io is a separate decision from licensing.
 
 ## 9. Version set to 0.1.0 and changelog written
 
@@ -246,6 +236,6 @@ head -20 CHANGELOG.md
 **Expected:** `version = "0.1.0"` in `Cargo.toml`, and a `0.1.0` section in
 [`CHANGELOG.md`](../CHANGELOG.md) summarizing the milestone. Both verified.
 
-Note that a release tag should not be cut while items 4 and 8 are open. The
+Note that a release tag should not be cut while item 4 is open. The
 version is set so that what ships and what the changelog describes are the same
-thing; tagging is the owner's call once the two open items are settled.
+thing; tagging is the owner's call once it is settled.
