@@ -155,7 +155,12 @@ impl Client {
     /// named — the one mistake an override like this must not be able to make.
     /// A variable that is unset, or set to nothing at all, is not an override
     /// and means production.
-    fn options_from_env() -> Result<Options, ApiError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::Invariant`] when [`BASE_URL_VAR`] is set to
+    /// something that cannot be a base URL.
+    pub fn options_from_env() -> Result<Options, ApiError> {
         match std::env::var(BASE_URL_VAR) {
             Ok(base_url) if base_url.trim().is_empty() => Ok(Options::default()),
             Ok(base_url) => Ok(Options::new(base_url.trim())),
@@ -165,6 +170,21 @@ impl Client {
                  base URL; unset it to use the production API root"
             ))),
         }
+    }
+
+    /// Whether a value can be used as a base URL, without building anything.
+    ///
+    /// The same parser [`Client::new`] resolves requests with, exposed so a
+    /// caller can tell an unusable endpoint from a usable one before it has a
+    /// client — or a credential to send anywhere.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::Invariant`] unless the value parses as an absolute
+    /// HTTP or HTTPS URL that names a host and carries no credentials, query,
+    /// or fragment.
+    pub fn check_base_url(base_url: &str) -> Result<(), ApiError> {
+        url::base(base_url).map(|_| ())
     }
 
     /// Builds a client against an explicit API root.

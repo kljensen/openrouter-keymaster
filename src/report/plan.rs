@@ -6,6 +6,7 @@ use std::fmt;
 use serde::Serialize;
 
 use super::{RecoveryReport, plural, scrubbed, timestamp};
+use crate::ops::PlanFingerprint;
 use crate::plan::{
     Action, ActionKind, Expansion, FieldChange, Identity, Plan, Reason, ResourceAddress,
 };
@@ -20,6 +21,11 @@ use crate::state::Phase;
 pub struct PlanReport {
     /// Which command produced this document.
     command: &'static str,
+    /// The digest that makes this plan binding, when it can be bound. Absent
+    /// while an operation is pending: what an apply would do then is not what
+    /// this plan describes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<PlanFingerprint>,
     /// Whether an operation of unknown outcome stops the whole run.
     blocked: bool,
     /// What this plan means for the next apply.
@@ -57,6 +63,7 @@ impl PlanReport {
         let has_changes = plan.has_changes();
         let mut report = Self {
             command: "plan",
+            fingerprint: None,
             blocked,
             outcome: Outcome::of(plan, has_changes),
             has_changes,
@@ -79,6 +86,41 @@ impl PlanReport {
     #[must_use]
     pub const fn has_changes(&self) -> bool {
         self.has_changes
+    }
+
+    /// The digest a bound apply must match, when this plan can be bound.
+    #[must_use]
+    pub const fn fingerprint(&self) -> Option<&PlanFingerprint> {
+        self.fingerprint.as_ref()
+    }
+
+    /// Records the digest computed from this plan and the inputs it was
+    /// computed from.
+    ///
+    /// Set by [`crate::ops::plan`] rather than in [`PlanReport::new`], because
+    /// the digest covers the executable actions this document holds as well as
+    /// the configuration, state, endpoint, and credential the caller supplied.
+    pub(crate) fn bind(&mut self, fingerprint: Option<PlanFingerprint>) {
+        self.fingerprint = fingerprint;
+    }
+
+    /// The executable actions, as the bytes a fingerprint binds.
+    ///
+    /// The actions apply would execute and nothing else: an action the plan
+    /// only reports changes no write, and a plan that gained one is still the
+    /// plan the caller approved.
+    ///
+    /// # Errors
+    ///
+    /// Returns the serializer's error, which nothing here can produce: every
+    /// field of an [`ActionReport`] is a string, a number, or a boolean.
+    pub(crate) fn executable_actions(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let executable: Vec<&ActionReport> = self
+            .actions
+            .iter()
+            .filter(|action| action.executable)
+            .collect();
+        serde_json::to_vec(&executable)
     }
 
     fn build_warnings(&self) -> Vec<String> {

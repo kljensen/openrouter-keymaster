@@ -179,10 +179,10 @@ unchanged; this section records where each part of it is enforced.
   a config-removed binding yields `orphaned_binding`; a missing delivered key
   yields `missing` rather than `create`; unknown remote resources are
   `unmanaged` and never written to.
-- **Explicit import** — `src/app/import.rs`, covered by `tests/import.rs`:
+- **Explicit import** — `src/ops/import.rs`, covered by `tests/import.rs`:
   identity lookup only, never a name search, and the one-to-one binding rule
   refused from both directions with state left untouched.
-- **Sequential apply** — `src/app/apply.rs`, covered by `tests/apply.rs`: a
+- **Sequential apply** — `src/ops/apply.rs`, covered by `tests/apply.rs`: a
   no-op plan sends no writes, `unmanaged` objects are never touched, and the
   plan is recomputed after the lock is taken so nothing carries a stale
   observation across that boundary.

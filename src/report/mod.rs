@@ -110,7 +110,7 @@ impl RecoveryReport {
 /// command will actually accept them. `recover resolve` is refused once the
 /// journal records a hash, and `recover replace` is refused while it does not,
 /// so naming the wrong one here would send an operator to a command that
-/// rejects them. The split below is the same one `app::recover` enforces:
+/// rejects them. The split below is the same one `ops::recover` enforces:
 /// resolve for the two phases where a key's existence is unknown, replace for
 /// the four where the key exists and its plaintext is gone, and neither for
 /// `delivered`, which the next apply finishes by itself.

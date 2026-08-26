@@ -1,105 +1,36 @@
-//! Command dispatch.
+//! Command dispatch: the glue between the command line and [`crate::ops`].
 //!
-//! Every v0.1 command is implemented. Each match arm calls that feature's
-//! handler, which builds an output DTO for [`Renderer`] to write.
-//!
-//! `plan` and `status` are strictly read-only: they parse the configuration,
-//! read state without locking or rewriting it, read a complete snapshot of
-//! OpenRouter, and print. No API write, no receiver invocation, and no state
-//! write happens on either path. `recover inspect` is read-only in the same
-//! sense, and `state forget` is the mirror image: it writes state and makes no
-//! remote call at all.
-//!
-//! The writing commands take the exclusive state lock first and reload
-//! everything under it. [`import`] makes no remote write — it reads one remote
-//! object and records a binding; [`apply`] converges guardrails, keys, and
-//! assignments, verifying what it wrote, and runs the journaled transaction for
-//! a planned key create or replace; [`rotate`] runs that same transaction on an
-//! operator's word; [`recover`] closes an operation whose outcome only an
-//! operator can establish; and [`lifecycle`] holds the four explicit endings —
-//! `retire`, `decommission`, `delete key`, and `state forget` — that nothing
-//! else ever performs.
-
-pub mod apply;
-pub mod import;
-mod issuance;
-pub mod lifecycle;
-pub mod recover;
-pub mod rotate;
+//! Every command is an [`ops`] function. This module builds the [`Context`]
+//! those functions take from the parsed [`Cli`] and the environment, calls the
+//! one the command names, renders the report it returns, and maps a failure
+//! beside that report to exit code 1. It makes no decision of its own: what
+//! each command does, what it refuses, and in what order it reads and writes
+//! are all `ops`'.
 
 use std::fmt::Display;
 use std::io::Write;
 
 use serde::Serialize;
 
-use crate::api::Reader;
-use crate::cli::{Cli, Command, DeleteResource, StateAction};
-use crate::client::{ApiError, Client};
-use crate::config::Config;
+use crate::cli::StateAction;
+use crate::cli::{Cli, Command, DeleteResource, ImportResource, RecoverAction, ResolveFinding};
+use crate::client::{ApiError, Client, ManagementKey, Options};
 use crate::error::Error;
-use crate::ids::Address;
+use crate::ops::recover::RecoverError;
+use crate::ops::{self, Context, Finding, Outcome, Paths};
 use crate::output::Renderer;
-use crate::plan::{self, Snapshot};
-use crate::report::{PlanReport, StatusReport};
-use crate::state::{Phase, State, StateFile};
 
-/// What clears an unfinished operation, which is not always `recover`.
+/// Calls one operation and renders what it returned.
 ///
-/// Several commands stand aside for an operation in progress — `rotate` will
-/// not stage a successor beside one, `retire` and `delete key` will not touch
-/// the key one is about to produce, `decommission` will not switch off a
-/// credential while another is being created, and `state forget` will not throw
-/// away the journal that records it. Each of those refusals has to name the
-/// command that resolves it, and they must all name the same one, so the phase
-/// is read here and nowhere else.
-///
-/// The split is a single phase wide. `delivered` needs no operator at all: the
-/// key exists, its restrictions were verified, the receiver acknowledged the
-/// plaintext, and the only thing outstanding is a local promotion that `apply`
-/// completes under its own lock (ADR-0002). `recover replace` refuses that
-/// phase outright, so a refusal that sent an operator there would send them to
-/// a command that turns them away — at the moment they most need one that
-/// works.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Resolution {
-    /// `delivered`: `apply` finishes it, locally.
-    Promotion,
-    /// Every other phase: only an operator can establish what happened.
-    Recovery,
-}
-
-impl Resolution {
-    /// Which of the two an operation in `phase` needs.
-    pub(super) const fn of(phase: Phase) -> Self {
-        match phase {
-            Phase::Delivered => Self::Promotion,
-            Phase::CreateStarted
-            | Phase::CreateAmbiguous
-            | Phase::Created
-            | Phase::Secured
-            | Phase::DeliveryStarted
-            | Phase::DeliveryAmbiguous => Self::Recovery,
-        }
-    }
-
-    /// The sentence naming the one command that clears it, for an error to
-    /// interpolate.
-    ///
-    /// Written to follow a colon or a dash, so each caller keeps its own
-    /// account of what it refused and shares only the instruction.
-    pub(super) fn instruction(self, address: &Address) -> String {
-        match self {
-            Self::Promotion => format!(
-                "no operator has to establish anything and nothing remote is outstanding — \
-                 `openrouter-keymaster apply` records that key as `{address}`'s current key, under \
-                 its own lock"
-            ),
-            Self::Recovery => format!(
-                "only an operator can establish what happened — `openrouter-keymaster recover \
-                 inspect {address}` names the one command this phase takes"
-            ),
-        }
-    }
+/// A macro rather than a function because each report type carries its own
+/// `warnings()`, and Keymaster deliberately has no trait over the reports: the
+/// documents are data, and a trait would exist only to satisfy this one call
+/// site.
+macro_rules! rendered {
+    ($renderer:expr, $operation:expr) => {{
+        let Outcome { report, error } = $operation?;
+        render($renderer, &report, report.warnings(), error)
+    }};
 }
 
 /// Runs the parsed command, writing its result through `renderer`.
@@ -109,55 +40,168 @@ impl Resolution {
 /// Returns the command's application error. Callers map any error to exit
 /// code 1; clap has already exited 2 for a usage error by this point.
 pub fn run<O: Write, E: Write>(cli: &Cli, renderer: &mut Renderer<O, E>) -> Result<(), Error> {
+    let context = context(cli)?;
     match &cli.command {
-        Command::Plan => plan_command(cli, renderer),
-        Command::Status => status_command(cli, renderer),
-        Command::Import { resource } => import::run(cli, resource, renderer),
-        Command::Apply => apply::run(cli, renderer),
-        Command::Rotate { name } => rotate::run(cli, name, renderer),
-        Command::Recover { action } => recover::run(cli, action, renderer),
-        Command::Retire { name, hash } => lifecycle::retire(cli, name, hash, renderer),
+        Command::Plan => rendered!(renderer, ops::plan(context)),
+        Command::Status => rendered!(renderer, ops::status(context)),
+        Command::Import {
+            resource: ImportResource::Key { name, hash },
+        } => rendered!(renderer, ops::import_key(context, name, hash)),
+        Command::Import {
+            resource: ImportResource::Guardrail { name, id },
+        } => rendered!(renderer, ops::import_guardrail(context, name, id)),
+        // The CLI applies whatever the recomputed plan says. Binding a plan to
+        // the one an operator read is a caller's to ask for, and no terminal
+        // run has a plan to bind.
+        Command::Apply => rendered!(renderer, ops::apply(context, None)),
+        Command::Rotate { name } => rendered!(renderer, ops::rotate(context, name)),
+        Command::Recover {
+            action: RecoverAction::Inspect { name },
+        } => rendered!(renderer, ops::recover_inspect(context, name)),
+        Command::Recover {
+            action: RecoverAction::Resolve { name, finding },
+        } => rendered!(
+            renderer,
+            ops::recover_resolve(context, name, &attested(finding)?)
+        ),
+        Command::Recover {
+            action: RecoverAction::Replace { name },
+        } => rendered!(renderer, ops::recover_replace(context, name)),
+        Command::Retire { name, hash } => rendered!(renderer, ops::retire(context, name, hash)),
         Command::Decommission { name, hash, delete } => {
-            lifecycle::decommission(cli, name, hash, *delete, renderer)
+            rendered!(renderer, ops::decommission(context, name, hash, *delete))
         }
         Command::Delete {
             resource: DeleteResource::Key { hash },
-        } => lifecycle::delete_key(cli, hash, renderer),
+        } => rendered!(renderer, ops::delete_key(context, hash)),
         Command::State {
             action: StateAction::Forget { address },
-        } => lifecycle::forget(cli, address, renderer),
+        } => rendered!(renderer, ops::forget(context, address)),
     }
 }
 
-/// Reports the changes an apply would make. Writes nothing anywhere.
-fn plan_command<O: Write, E: Write>(cli: &Cli, renderer: &mut Renderer<O, E>) -> Result<(), Error> {
-    let observed = observe(cli)?;
-    let plan = plan::plan(&observed.config, &observed.state, &observed.snapshot);
-    let report = PlanReport::new(&plan);
-    // Exit 0 whether or not there are changes: planning succeeded either way,
-    // and a distinct code for "has changes" is deliberately not part of v0.1.
-    write(renderer, &report, report.warnings())
+/// Builds the context every operation takes.
+///
+/// The two environment variables are read here, where the binary's contract
+/// puts them: the credential comes from `OPENROUTER_MANAGEMENT_KEY` and the
+/// endpoint from `OPENROUTER_BASE_URL`, and neither has a command-line option.
+/// An endpoint that is present and cannot be a base URL stops the run rather
+/// than falling back, because falling back would send the credential somewhere
+/// the operator did not name.
+///
+/// Two commands are exempt, and only because neither needs an endpoint to do
+/// its work: they are the ones an operator runs when the environment is the
+/// thing that is wrong, and a variable they never use must not be what stops
+/// them.
+fn context(cli: &Cli) -> Result<Context, Error> {
+    let paths = Paths {
+        config: cli.config.clone(),
+        state: cli.state.clone(),
+    };
+
+    // `state forget` makes no request at all — no credential, no network, no
+    // configuration — so it reads neither variable and neither can refuse it.
+    if matches!(
+        cli.command,
+        Command::State {
+            action: StateAction::Forget { .. }
+        }
+    ) {
+        return Ok(offline(paths));
+    }
+
+    let endpoint = Client::options_from_env();
+    // `recover inspect` is offline once the journal records a hash, and it is
+    // the command that explains a broken operation — precisely when the
+    // environment may be broken too. An endpoint that cannot be read, or that
+    // could never be requested, leaves it the production default and no
+    // credential: nothing is sent anywhere, and an inspect that does turn out
+    // to need a candidate listing then reports `missing_credential`, which is
+    // the honest answer for an environment whose endpoint is unusable.
+    if inspecting(&cli.command) && !usable(endpoint.as_ref()) {
+        return Ok(offline(paths));
+    }
+
+    Ok(Context {
+        paths,
+        options: endpoint?,
+        key: credential(&cli.command)?,
+    })
 }
 
-/// Reports bindings, remote presence, usage, and unfinished operations.
-fn status_command<O: Write, E: Write>(
-    cli: &Cli,
-    renderer: &mut Renderer<O, E>,
-) -> Result<(), Error> {
-    let observed = observe(cli)?;
-    let report = StatusReport::new(&observed.config, &observed.state, &observed.snapshot);
-    write(renderer, &report, report.warnings())
+/// A context that reaches nothing: the production defaults, and no credential
+/// to send anywhere.
+fn offline(paths: Paths) -> Context {
+    Context {
+        paths,
+        options: Options::default(),
+        key: None,
+    }
 }
 
-/// Writes a command's warnings and then its result.
+/// Whether the endpoint was read *and* could be requested.
+///
+/// Both halves matter, and they fail at different moments: a variable that is
+/// not Unicode is refused when it is read, and one that is Unicode but not a
+/// URL is refused when a client is built from it. Either way there is no
+/// endpoint, which is what the caller is asking about.
+fn usable(endpoint: Result<&Options, &ApiError>) -> bool {
+    endpoint.is_ok_and(|options| Client::check_base_url(&options.base_url).is_ok())
+}
+
+/// The credential, when the environment holds one that can be sent.
+///
+/// An unset credential is not an error here: a command that needs one reports
+/// `missing_credential` where it would build its client, and two commands need
+/// none at all. A credential that is set and *unusable* is a different fact —
+/// a typo, not an absence — and every command that could send one reports it as
+/// itself, so an operator is not sent looking for a variable they did set.
+/// `recover inspect` is the exception, for the reason it tolerates an unusable
+/// endpoint: it has to go on explaining a broken operation when the credential
+/// is the broken thing.
+fn credential(command: &Command) -> Result<Option<ManagementKey>, Error> {
+    match ManagementKey::from_env() {
+        Ok(key) => Ok(Some(key)),
+        Err(ApiError::MissingCredential) => Ok(None),
+        Err(_) if inspecting(command) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether the command is `recover inspect`.
+const fn inspecting(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Recover {
+            action: RecoverAction::Inspect { .. }
+        }
+    )
+}
+
+/// The finding an operator attested, as [`ops::recover_resolve`] takes it.
+///
+/// Clap's group requires exactly one of the two flags, so the third case cannot
+/// be typed — but nothing about the parsed type says so, and guessing which the
+/// operator meant is precisely what `recover` exists not to do.
+fn attested(finding: &ResolveFinding) -> Result<Finding, Error> {
+    match (&finding.leaked_hash, finding.no_resource_created) {
+        (Some(hash), _) => Ok(Finding::LeakedHash(hash.clone())),
+        (None, true) => Ok(Finding::NoResourceCreated),
+        (None, false) => Err(RecoverError::NoFinding.into()),
+    }
+}
+
+/// Writes a command's warnings, then its result, then reports its failure.
 ///
 /// Warnings first, so a human run sees them before a long result scrolls past;
 /// they are separate streams, so the order between them is the operator's
-/// terminal's to decide either way.
-fn write<O: Write, E: Write, T: Serialize + Display>(
+/// terminal's to decide either way. The result is written whether or not the
+/// operation failed: what did happen is what an operator needs.
+fn render<O: Write, E: Write, R: Serialize + Display>(
     renderer: &mut Renderer<O, E>,
-    report: &T,
+    report: &R,
     warnings: &[String],
+    error: Option<Error>,
 ) -> Result<(), Error> {
     for warning in warnings {
         renderer
@@ -166,55 +210,12 @@ fn write<O: Write, E: Write, T: Serialize + Display>(
     }
     renderer
         .result(report)
-        .map_err(|error| Error::output(&error))
-}
+        .map_err(|error| Error::output(&error))?;
 
-/// The three read-only inputs a reporting command needs.
-struct Observation {
-    config: Config,
-    state: State,
-    snapshot: Snapshot,
-}
-
-/// Parses the configuration, loads state, and reads OpenRouter.
-///
-/// The order is deliberate. A configuration problem is reported before a
-/// client exists, so a run that cannot succeed never sends a credential
-/// anywhere; state is read next, because it is local and cheap; the snapshot
-/// is last.
-///
-/// State is read with [`StateFile::read`], which takes no lock and writes
-/// nothing: observing remote drift is not a reason to rewrite state, and the
-/// exclusive lock belongs to the commands that write.
-///
-/// The listings are unfiltered even when the configuration names a workspace.
-/// The planner needs a *complete* snapshot: a key left out of it reads as a key
-/// that does not exist, and a remote resource left out of it is one nothing
-/// would report as unmanaged.
-fn observe(cli: &Cli) -> Result<Observation, Error> {
-    let config = Config::load(&cli.config)?;
-    let state = StateFile::new(&cli.state).read()?;
-
-    let client = Client::from_env()?;
-    let snapshot = snapshot(&Reader::new(&client))?;
-
-    Ok(Observation {
-        config,
-        state,
-        snapshot,
-    })
-}
-
-/// Reads one complete snapshot of everything Keymaster manages.
-///
-/// Shared with apply, which reads one under its lock before planning and a
-/// second one afterwards to verify what it wrote.
-fn snapshot(reader: &Reader<'_>) -> Result<Snapshot, ApiError> {
-    Ok(Snapshot {
-        keys: reader.list_keys(None)?,
-        guardrails: reader.list_guardrails(None)?,
-        assignments: reader.list_assignments()?,
-    })
+    match error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

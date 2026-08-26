@@ -105,6 +105,19 @@ fn a_converged_project_plans_no_changes_and_exits_zero() {
     assert_eq!(document["outcome"], "converged");
     assert_eq!(kinds(&document), vec!["no_op", "no_op"]);
     assert!(json.err.is_empty(), "a JSON stream carries one document");
+
+    // The one additive field of this release: the digest that lets a caller
+    // bind an apply to the plan it was shown (ADR-0003).
+    let fingerprint = document["fingerprint"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a bindable plan carries a fingerprint: {document}"));
+    assert_eq!(fingerprint.len(), 64);
+    assert!(
+        fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "a fingerprint is lowercase hexadecimal: {fingerprint}"
+    );
 }
 
 #[test]
@@ -305,6 +318,10 @@ fn an_unfinished_operation_blocks_the_plan_and_reports_how_to_resolve_it() {
 
     assert_eq!(document["blocked"], Value::Bool(true));
     assert_eq!(document["has_changes"], Value::Bool(false));
+    assert!(
+        document.get("fingerprint").is_none(),
+        "a plan computed beside an unfinished operation cannot be bound: {document}"
+    );
     assert_eq!(recovery["recovery"]["operation"], "op-0007");
     assert_eq!(recovery["recovery"]["phase"], "created");
     assert_eq!(recovery["recovery"]["phase_at"], "2026-01-01T00:00:04Z");
@@ -423,6 +440,31 @@ fn a_missing_credential_is_its_own_category() {
     let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
     let diagnostic: Value = serde_json::from_str(&stderr).expect("one JSON document");
     assert_eq!(diagnostic["error"]["kind"], "missing_credential");
+    project.server.assert_request_count(0);
+}
+
+#[test]
+fn a_credential_that_cannot_be_sent_is_its_own_category() {
+    // A credential with a space in it cannot be an HTTP header. That is a typo,
+    // not an absence, and reporting it as `missing_credential` would send an
+    // operator looking for a variable they did set. The value itself is never
+    // echoed.
+    let project = Project::new(BASE_CONFIG);
+    project.observe(Vec::new(), Vec::new(), Vec::new());
+
+    let output = project.run_with(
+        &["--json", "plan"],
+        &[(CREDENTIAL_VAR, "sk-or-v1-two words")],
+    );
+    let streams = support::project::Streams::of(&output);
+
+    assert_eq!(output.status.code(), Some(1), "{}", streams.out);
+    assert_eq!(streams.diagnostic()["error"]["kind"], "unusable_credential");
+    assert!(
+        !streams.err.contains("two words"),
+        "the diagnostic must not repeat the credential: {}",
+        streams.err
+    );
     project.server.assert_request_count(0);
 }
 

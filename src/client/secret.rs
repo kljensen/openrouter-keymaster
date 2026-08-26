@@ -4,6 +4,7 @@ use std::env::{self, VarError};
 use std::fmt;
 
 use reqwest::header::HeaderValue;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize as _;
 
 use super::error::ApiError;
@@ -87,6 +88,16 @@ impl ManagementKey {
             });
         }
         Ok(Self(value.to_owned()))
+    }
+
+    /// A non-reversible digest of the credential: SHA-256 and nothing else.
+    ///
+    /// A plan fingerprint covers the account a plan was computed against, so
+    /// that a plan shown for one organization cannot be applied to another.
+    /// The credential itself must not travel into a report, and a digest is
+    /// what makes "the same credential" checkable without it.
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        Sha256::digest(self.0.as_bytes()).into()
     }
 
     /// The `Authorization` header this credential authenticates with, marked

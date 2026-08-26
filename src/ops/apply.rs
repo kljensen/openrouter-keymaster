@@ -55,6 +55,17 @@
 //! - **Repeat an ambiguous write.** A write is sent exactly once. Whether it
 //!   landed is answered by the read that follows, never by sending it again.
 //!
+//! # A shown plan can be made binding
+//!
+//! Nothing carries a plan across the lock, and nothing here ever will. What a
+//! caller may carry is a [`PlanFingerprint`] — a digest of the inputs that
+//! decide what an apply would write. Given one, this run recomputes the plan
+//! under the lock as it always does, compares the digests, and executes only if
+//! they match; a mismatch returns the fresh plan with every write held back,
+//! having written nothing. The credential check and the comparison both come
+//! before the first write, including the promotion below, so a refused run
+//! costs the reads it made and nothing else (ADR-0003).
+//!
 //! # Verification
 //!
 //! When anything was attempted, apply reads a second complete snapshot and
@@ -66,22 +77,20 @@
 //! reported as having happened: a response is not evidence either way.
 
 use std::collections::BTreeSet;
-use std::io::Write;
 
 use time::OffsetDateTime;
 
 use crate::api::{GuardrailBody, Reader, UpdateKey, Writer};
-use crate::cli::Cli;
 use crate::client::Client;
 use crate::config::Config;
 use crate::error::Error;
 use crate::ids::{Address, KeyHash};
-use crate::output::Renderer;
 use crate::plan::{self, Action, ActionKind, Identity, Plan, Reason, ResourceAddress, Snapshot};
-use crate::report::{ActionOutcome, ApplyReport};
+use crate::report::{ActionOutcome, ApplyReport, PlanReport};
 use crate::state::{KeyBinding, Phase as JournalPhase, State, StateFile, StateLock};
 
 use super::issuance::Issuer;
+use super::{Context, Outcome, PlanFingerprint, fingerprint};
 
 /// Why an assignment beside a completed creation needs no separate write.
 const ASSIGNMENT_ISSUED: &str = "the key was attached to its guardrail as part of the journaled \
@@ -93,41 +102,66 @@ const ASSIGNMENT_WITHOUT_KEY: &str =
 
 /// Runs `apply`.
 ///
+/// `expected` makes the run binding: with a fingerprint given, apply takes its
+/// lock, recomputes the plan, compares, and writes only on a match. Every check
+/// is ahead of every write, so a mismatch — including an operation that became
+/// pending after the plan was shown — refuses with nothing written and returns
+/// the fresh plan. With `None` it applies whatever the recomputed plan says, as
+/// the CLI does.
+///
 /// # Errors
 ///
-/// Returns [`ApplyError`] when an unfinished operation stops the run, or when
-/// a write failed or could not be confirmed. The result document is written
-/// before either, because what did happen is what an operator needs. Also
-/// returns the configuration, state, and API errors of the steps before the
-/// first write, none of which change anything.
-pub(super) fn run<O: Write, E: Write>(
-    cli: &Cli,
-    renderer: &mut Renderer<O, E>,
-) -> Result<(), Error> {
+/// Returns the configuration, state, and API errors of the steps before the
+/// first write, none of which change anything, and `missing_credential` when
+/// the context carries none. A run that got as far as a report returns it
+/// instead, with the failure beside it: [`ApplyError`] when an unfinished
+/// operation stopped the run, when a write failed or could not be confirmed,
+/// or when the plan no longer matches the fingerprint.
+pub fn apply(
+    context: Context,
+    expected: Option<PlanFingerprint>,
+) -> Result<Outcome<ApplyReport>, Error> {
     // The lock comes first, and everything the plan is computed from is read
     // after it. Loading the configuration before taking the lock would leave a
     // window in which an edit lands between the read and the lock, and apply
     // would then converge OpenRouter to a file that has already been
     // superseded — the same staleness the recomputed plan exists to prevent,
     // one input over.
-    let file = StateFile::new(&cli.state);
+    let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
-    let config = Config::load(&cli.config)?;
+    let config = Config::load(&context.paths.config)?;
     let mut state = lock.read()?;
+
+    // The credential, before the first write of any kind. Apply always needs
+    // the API to plan, so an apply without one converges nothing — and the
+    // promotion below is a state write like any other (ADR-0003).
+    let client = context.client()?;
+    let reader = Reader::new(&client);
+    let writer = Writer::new(&client);
 
     // Before anything is planned: a delivered operation is finished remotely,
     // and what is left of it — promotion — touches nothing outside this file.
     // Completing it here means the plan this run executes describes the world
     // as it now is, rather than one holding an operation that is already over.
-    let promoted = fast_forward(&lock, &mut state)?;
-
-    let client = Client::from_env()?;
-    let reader = Reader::new(&client);
-    let writer = Writer::new(&client);
+    //
+    // A bound run does not do it. Its comparison comes before every write, and
+    // a pending operation of any phase makes a plan unbindable, so a bound run
+    // that meets one refuses below rather than promoting first.
+    let promoted = if expected.is_some() {
+        None
+    } else {
+        fast_forward(&lock, &mut state)?
+    };
 
     // Read and planned here, under the lock, from this run's own snapshot.
     let snapshot = super::snapshot(&reader)?;
     let plan = plan::plan(&config, &state, &snapshot);
+
+    if let Some(expected) = &expected
+        && let Some(refusal) = refuse_changed_plan(&context, &config, &state, &plan, expected)
+    {
+        return Ok(refusal);
+    }
 
     let mut apply = Apply {
         config: &config,
@@ -144,16 +178,57 @@ pub(super) fn run<O: Write, E: Write>(
 
     let mut report = ApplyReport::new(&plan, &outcomes, failure);
     report.note(promoted);
-    super::write(renderer, &report, report.warnings())?;
 
     if report.succeeded() {
-        return Ok(());
+        return Ok(Outcome::ok(report));
     }
     if report.blocked() {
-        return Err(ApplyError::Blocked.into());
+        return Ok(Outcome::failed(report, ApplyError::Blocked));
     }
     let (failed, unverified) = report.unresolved();
-    Err(ApplyError::Unresolved { failed, unverified }.into())
+    Ok(Outcome::failed(
+        report,
+        ApplyError::Unresolved { failed, unverified },
+    ))
+}
+
+/// What a refused action's outcome says.
+const PLAN_CHANGED: &str = "held back: an input changed after the fingerprint this run was bound \
+                            to was taken, so nothing was written";
+
+/// Refuses a bound apply whose inputs are no longer the ones the caller saw.
+///
+/// The comparison happens here, after the lock and the reads and before the
+/// first write, so a refusal costs the reads it has already made and changes
+/// nothing — locally or remotely. The report it returns is the fresh plan, with
+/// every write held back, which is what a caller needs to show and bind again.
+fn refuse_changed_plan(
+    context: &Context,
+    config: &Config,
+    state: &State,
+    plan: &Plan,
+    expected: &PlanFingerprint,
+) -> Option<Outcome<ApplyReport>> {
+    let fresh = PlanReport::new(plan);
+    if fingerprint::of(context, config, state, &fresh).as_ref() == Some(expected) {
+        return None;
+    }
+
+    let outcomes: Vec<ActionOutcome> = plan
+        .actions()
+        .iter()
+        .map(|action| {
+            if action.kind.writes() {
+                ActionOutcome::held_back(PLAN_CHANGED)
+            } else {
+                ActionOutcome::reported()
+            }
+        })
+        .collect();
+    Some(Outcome::failed(
+        ApplyReport::new(plan, &outcomes, None),
+        ApplyError::PlanChanged,
+    ))
 }
 
 /// Completes a delivered operation, before this run plans anything.
@@ -718,6 +793,13 @@ pub enum ApplyError {
         unverified: usize,
     },
 
+    /// The plan is not the one the caller was given a fingerprint for.
+    #[error(
+        "the plan changed after the fingerprint this apply was bound to was taken, so nothing was \
+         written. The result document holds the plan as it is now: read it, and apply that one."
+    )]
+    PlanChanged,
+
     /// A delivered key could not be promoted to current.
     #[error(
         "`{address}` has a delivered key that could not be promoted to current: {message}. \
@@ -739,6 +821,7 @@ impl ApplyError {
         match self {
             Self::Blocked => "apply_blocked",
             Self::Unresolved { .. } => "apply_unresolved",
+            Self::PlanChanged => "plan_changed",
             Self::Promotion { .. } => "apply_promotion",
         }
     }

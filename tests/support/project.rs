@@ -11,7 +11,9 @@
 //! and every successful or failed run is scanned for the secret sentinel in
 //! stdout, stderr, and every file under the project directory.
 
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
@@ -193,6 +195,30 @@ impl Project {
         command
             .env_remove(CREDENTIAL_VAR)
             .env_remove(BASE_URL_VAR)
+            .arg("--config")
+            .arg(self.config_path())
+            .arg("--state")
+            .arg(self.state_path())
+            .args(arguments);
+        command.output().expect("the binary runs")
+    }
+
+    /// Runs the binary with a base URL that cannot be one: bytes that are not
+    /// valid Unicode.
+    ///
+    /// For the commands that have to work when the environment is the thing
+    /// that is wrong. The sentinel credential is set rather than removed, so a
+    /// run that did build a client would have one to send — and would be aiming
+    /// it at production, which is what makes "this made no HTTP call" an
+    /// assertion rather than a hope.
+    #[must_use]
+    pub fn run_with_unusable_base_url(&self, arguments: &[&str]) -> Output {
+        let mut command = Command::cargo_bin("openrouter-keymaster").expect("the binary builds");
+        command
+            .env_remove(CREDENTIAL_VAR)
+            .env_remove(BASE_URL_VAR)
+            .env(CREDENTIAL_VAR, SECRET_SENTINEL_KEY)
+            .env(BASE_URL_VAR, OsStr::from_bytes(b"http://\xff\xfe/api/v1"))
             .arg("--config")
             .arg(self.config_path())
             .arg("--state")

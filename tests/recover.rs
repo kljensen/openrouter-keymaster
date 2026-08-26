@@ -523,6 +523,116 @@ fn inspecting_an_operation_whose_hash_is_known_needs_no_credential_and_no_api() 
 }
 
 #[test]
+fn a_hash_known_inspect_survives_an_unusable_base_url() {
+    // The endpoint is set to something that cannot be a base URL, which stops
+    // every other command. It must not stop this one: the journal records the
+    // hash, so there is nothing to search for and nothing to send, and the
+    // command that explains a broken operation is the one an operator reaches
+    // for when their environment is broken too.
+    let world = Recovery::new();
+    world.journal(Phase::Secured, false);
+
+    let output = world
+        .project
+        .run_with_unusable_base_url(&["--json", "recover", "inspect", "jobfeed"]);
+    let streams = support::project::Streams::of(&output);
+    world.project.assert_no_secret_escaped(&streams);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "an offline inspect reads no endpoint:\n{}",
+        streams.err
+    );
+    let document = streams.document();
+    assert_eq!(document["operation"]["phase"], "secured");
+    assert_eq!(document["operation"]["known_hash"], LEAKED_HASH);
+    world.project.server.assert_request_count(0);
+}
+
+#[test]
+fn an_inspect_that_needs_a_listing_sends_nothing_when_the_endpoint_is_unusable() {
+    // The other half of the exemption. A `create_ambiguous` operation has a
+    // candidate listing to fetch, and there is no endpoint to fetch it from —
+    // so the run reports a missing credential rather than aiming the one in the
+    // environment at production. It sends nothing either way.
+    let world = Recovery::new();
+    world.journal(Phase::CreateAmbiguous, false);
+
+    let output = world
+        .project
+        .run_with_unusable_base_url(&["--json", "recover", "inspect", "jobfeed"]);
+    let streams = support::project::Streams::of(&output);
+    world.project.assert_no_secret_escaped(&streams);
+
+    assert_eq!(output.status.code(), Some(1), "{}", streams.out);
+    assert_eq!(streams.diagnostic()["error"]["kind"], "missing_credential");
+    world.project.server.assert_request_count(0);
+}
+
+#[test]
+fn a_hash_known_inspect_survives_a_base_url_that_is_not_a_url() {
+    // The endpoint parses as Unicode and could never be requested. That is
+    // refused when a client is built rather than when the variable is read, so
+    // it is a second way to have no endpoint — and inspect has to survive both.
+    let world = Recovery::new();
+    world.journal(Phase::Secured, false);
+
+    let output = world
+        .project
+        .run_against("not-a-url", &["--json", "recover", "inspect", "jobfeed"]);
+    let streams = support::project::Streams::of(&output);
+    world.project.assert_no_secret_escaped(&streams);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "an offline inspect needs no endpoint at all:\n{}",
+        streams.err
+    );
+    let document = streams.document();
+    assert_eq!(document["operation"]["phase"], "secured");
+    assert_eq!(document["operation"]["known_hash"], LEAKED_HASH);
+    world.project.server.assert_request_count(0);
+}
+
+#[test]
+fn an_inspect_that_needs_a_listing_sends_nothing_when_the_base_url_is_not_a_url() {
+    let world = Recovery::new();
+    world.journal(Phase::CreateAmbiguous, false);
+
+    let output = world
+        .project
+        .run_against("not-a-url", &["--json", "recover", "inspect", "jobfeed"]);
+    let streams = support::project::Streams::of(&output);
+    world.project.assert_no_secret_escaped(&streams);
+
+    assert_eq!(output.status.code(), Some(1), "{}", streams.out);
+    assert_eq!(streams.diagnostic()["error"]["kind"], "missing_credential");
+    world.project.server.assert_request_count(0);
+}
+
+#[test]
+fn a_hash_known_inspect_survives_a_credential_that_cannot_be_sent() {
+    // The same exemption, one variable over: a credential with a space in it
+    // cannot be an HTTP header, and every other command reports that. Inspect
+    // is the command an operator runs when something is broken, and here the
+    // credential is the broken thing.
+    let world = Recovery::new();
+    world.journal(Phase::Secured, false);
+
+    let output = world.project.run_with(
+        &["--json", "recover", "inspect", "jobfeed"],
+        &[(support::project::CREDENTIAL_VAR, "sk-or-v1-two words")],
+    );
+    let streams = support::project::Streams::of(&output);
+
+    assert_eq!(output.status.code(), Some(0), "{}", streams.err);
+    assert_eq!(streams.document()["operation"]["phase"], "secured");
+    world.project.server.assert_request_count(0);
+}
+
+#[test]
 fn a_candidate_whose_remote_name_is_a_credential_is_reported_redacted() {
     let world = Recovery::new();
     world.journal(Phase::CreateAmbiguous, false);

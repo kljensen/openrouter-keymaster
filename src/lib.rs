@@ -25,6 +25,7 @@ pub mod config;
 pub mod error;
 pub(crate) mod files;
 pub mod ids;
+pub mod ops;
 pub mod output;
 pub mod plan;
 pub mod receiver;

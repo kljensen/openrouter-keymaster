@@ -35,48 +35,34 @@
 //! configuration still says 1 produces generation 4 rather than a collision. A
 //! generation names one remote key at one address and only ever moves upward.
 
-use std::io::Write;
-
 use time::OffsetDateTime;
 
 use crate::api::{Reader, Writer};
-use crate::cli::Cli;
-use crate::client::Client;
 use crate::config::Config;
 use crate::error::Error;
 use crate::ids::{Address, IdError, OperationId};
-use crate::output::Renderer;
 use crate::report::{Predecessor, RotateReport, Successor};
 use crate::state::{CurrentKey, KeyBinding, Phase, State, StateFile};
 
-use super::Resolution;
 use super::issuance::Issuer;
+use super::{Context, Outcome, Resolution};
 
-/// Runs `rotate`.
+/// Stages a successor for the key an address currently owns.
 ///
 /// # Errors
 ///
 /// Returns [`RotateError`] when the address owns no key, an operation is in
 /// progress, the successor cannot be staged, or the transaction did not finish,
-/// and the configuration, state, and API errors of the steps it performs.
-pub(super) fn run<O: Write, E: Write>(
-    cli: &Cli,
-    name: &str,
-    renderer: &mut Renderer<O, E>,
-) -> Result<(), Error> {
-    let report = rotate(cli, name)?;
-    super::write(renderer, &report, report.warnings())
-}
-
-/// Stages a successor for the key an address currently owns.
-fn rotate(cli: &Cli, name: &str) -> Result<RotateReport, Error> {
+/// and the configuration, state, and API errors of the steps it performs,
+/// including `missing_credential`.
+pub fn rotate(context: Context, name: &str) -> Result<Outcome<RotateReport>, Error> {
     let address = Address::parse(name).map_err(|error| argument("NAME", &error))?;
 
     // As everywhere that writes: the lock, then the two files the decision is
     // made from, so neither can change underneath it.
-    let file = StateFile::new(&cli.state);
+    let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
-    let config = Config::load(&cli.config)?;
+    let config = Config::load(&context.paths.config)?;
     let mut state = lock.read()?;
 
     check_nothing_pending(&state)?;
@@ -88,7 +74,7 @@ fn rotate(cli: &Cli, name: &str) -> Result<RotateReport, Error> {
             address: address.clone(),
         })?;
 
-    let client = Client::from_env()?;
+    let client = context.client()?;
     let (reader, writer) = (Reader::new(&client), Writer::new(&client));
     let issuer = Issuer {
         config: &config,
@@ -116,7 +102,7 @@ fn rotate(cli: &Cli, name: &str) -> Result<RotateReport, Error> {
             message,
         })?;
 
-    Ok(RotateReport::new(
+    Ok(Outcome::ok(RotateReport::new(
         &address,
         retired(&state, &address, &predecessor),
         Successor {
@@ -126,7 +112,7 @@ fn rotate(cli: &Cli, name: &str) -> Result<RotateReport, Error> {
             receiver: issued.receiver,
             promoted: issued.promoted,
         },
-    ))
+    )))
 }
 
 /// What became of the key the address held, read back from state.

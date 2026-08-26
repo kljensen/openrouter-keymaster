@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
@@ -35,7 +36,12 @@ use crate::ids::{Address, ReceiverFingerprint, RemoteName, UserId, Uuid};
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// A validated desired configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// It serializes deterministically — every collection is a `BTreeMap` or a
+/// `BTreeSet`, and every value was normalized on the way in — which is what
+/// lets a plan fingerprint bind the whole configuration rather than a list of
+/// fields (ADR-0003). No field of it can hold credential plaintext.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Config {
     /// Values that individual resources inherit unless they say otherwise.
     pub defaults: Defaults,
@@ -76,7 +82,7 @@ impl Config {
 }
 
 /// Values inherited by resources that do not override them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Defaults {
     /// Whether spend on the operator's own provider keys counts against a
     /// USD limit.
@@ -90,7 +96,7 @@ pub struct Defaults {
 /// and naming it in the block's `clear` list clears it. The distinction is
 /// what lets Keymaster remove a budget or an expiry without also claiming
 /// ownership of every field it does not mention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum Managed<T> {
     /// Absent from the configuration; the remote value is not Keymaster's.
     Unmanaged,
@@ -116,7 +122,7 @@ impl<T> Managed<T> {
 }
 
 /// A guardrail: the model, provider, and budget policy assigned to keys.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Guardrail {
     /// Remote display name. Mutable remotely, never an identifier.
     pub name: RemoteName,
@@ -143,7 +149,7 @@ pub struct Guardrail {
 }
 
 /// An OpenRouter inference key Keymaster manages.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Key {
     /// Remote display name. Mutable remotely, never an identifier.
     pub name: RemoteName,
@@ -175,7 +181,7 @@ pub struct Key {
 }
 
 /// Where a newly created key's plaintext is delivered.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Receiver {
     /// Write the plaintext to one file, for local development and tests.
     File {
@@ -242,7 +248,7 @@ impl Receiver {
 }
 
 /// How often a USD limit resets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum ResetInterval {
     Daily,
     Weekly,
@@ -283,7 +289,7 @@ impl fmt::Display for ResetInterval {
 /// A budget is compared for equality on every plan, so it is stored as an
 /// integer rather than a float: `10`, `10.0`, and `1e1` normalize to the same
 /// value, and no comparison depends on float rounding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Usd {
     micros: i64,
 }

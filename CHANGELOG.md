@@ -9,6 +9,39 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Added
 
+- A Rust API. `openrouter_keymaster::ops` holds one function per command —
+  `plan`, `status`, `apply`, `import_key`, `import_guardrail`, `rotate`,
+  `recover_inspect`, `recover_resolve`, `recover_replace`, `retire`,
+  `decommission`, `delete_key`, and `forget`. Each takes an owned `Context`
+  (the configuration and state paths, the client options, and an optional
+  management credential) plus the command's arguments, and returns the
+  command's report rather than printing it: `Outcome { report, error }` keeps
+  the report on a partial failure, and `Err` is reserved for the runs with no
+  report to give. A `Context` is `Send + 'static` and carries no client, so a
+  host can hand one to a worker thread; each operation builds its own client
+  and receivers on the thread that runs it. Nothing under `ops` reads the
+  environment, prints, or exits. The command line is now the glue that builds a
+  context, calls one of these, renders the report, and maps a failure beside it
+  to exit code 1 — every user-visible behavior is unchanged except the two
+  entries below. First step of
+  [ADR-0003](docs/adr/0003-core-library-split.md).
+
+- `plan --json` carries a new `fingerprint` field: the digest of every input
+  that decides what an apply would write and where — the endpoint, a
+  non-reversible digest of the management credential, the state file path, the
+  whole normalized configuration, the whole state as read (its serial
+  included), and the executable actions. Two plans computed from the same
+  inputs share one; a change to any of them does not. It is absent while an
+  operation is pending, because a plan computed beside one is not what an apply
+  would do. A Rust caller can hand it back to `ops::apply`, which recomputes
+  the plan under the lock, compares, and writes only on a match — so a page
+  that shows a plan and an "apply" button never executes writes nobody saw. A
+  new field in a JSON document is a minor change under the 0.x policy in
+  [`docs/compatibility.md`](docs/compatibility.md); human output is unchanged,
+  and the command line has no way to bind an apply to a fingerprint. A bound
+  apply that refuses returns the fresh plan with its writes held back, under
+  the new error kind `plan_changed`, having written nothing anywhere.
+
 - The Unlicense: a `LICENSE` file and `license = "Unlicense"` in `Cargo.toml`.
   `deny.toml` no longer exempts the crate from the license policy.
 
@@ -23,6 +56,16 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
   the next generation. New error kinds: `decommission_no_current_key`,
   `decommission_not_current`, `decommission_pending`, `decommission_unconfirmed`,
   and `decommission_delete_unconfirmed`.
+
+### Changed
+
+- `apply` checks the management credential before it promotes a `delivered`
+  operation, so an apply with no credential now writes nothing at all. It used
+  to complete that local promotion — a state write — and only then fail with
+  `missing_credential`. An apply always needs the API to plan, so a run without
+  a credential converged nothing either way; what changes is that it no longer
+  moves state on the way to failing. Intentional, and part of
+  [ADR-0003](docs/adr/0003-core-library-split.md).
 
 ### Fixed
 

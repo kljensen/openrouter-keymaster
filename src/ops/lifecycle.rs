@@ -42,16 +42,12 @@
 //! whoever made it, and the tool that reports it as unmanaged must not also be
 //! the tool that deletes it.
 
-use std::io::Write;
-
 use time::OffsetDateTime;
 
 use crate::api::{Reader, Writer};
-use crate::cli::Cli;
-use crate::client::{ApiError, Client};
+use crate::client::ApiError;
 use crate::error::Error;
 use crate::ids::{Address, IdError, KeyHash};
-use crate::output::Renderer;
 use crate::report::{
     DecommissionReport, DeleteAttempt, DeleteOutcome, DeleteReport, Ending, ForgetReport, Released,
     RetireReport,
@@ -60,35 +56,32 @@ use crate::state::{
     KeyBinding, Phase, RetainedKey, RetainedStatus, State, StateFile, StateLock, TransitionError,
 };
 
-use super::Resolution;
 use super::issuance::{Disabled, disable_and_confirm};
+use super::{Context, Outcome, Resolution};
 
 // --- retire ------------------------------------------------------------------
 
-/// Runs `retire`.
+/// Disables one retained hash and proves it by reading the key back.
 ///
 /// # Errors
 ///
 /// Returns [`LifecycleError`] for a value this command cannot use, a hash the
-/// address does not retain, an attempt on the current key, or a disable that
-/// could not be confirmed; and the state and API errors of the steps it
-/// performs.
-pub(super) fn retire<O: Write, E: Write>(
-    cli: &Cli,
-    name: &str,
-    hash: &str,
-    renderer: &mut Renderer<O, E>,
-) -> Result<(), Error> {
-    let attempt = retire_hash(cli, name, hash)?;
-    super::write(renderer, &attempt.report, attempt.report.warnings())?;
+/// address does not retain, or an attempt on the current key; and the state and
+/// API errors of the steps it performs, including `missing_credential`. A
+/// disable that could not be confirmed is reported beside the result document
+/// rather than in place of it.
+pub fn retire(context: Context, name: &str, hash: &str) -> Result<Outcome<RetireReport>, Error> {
+    let attempt = retire_hash(&context, name, hash)?;
     if attempt.report.confirmed() {
-        return Ok(());
+        return Ok(Outcome::ok(attempt.report));
     }
-    Err(LifecycleError::RetireUnconfirmed {
-        address: attempt.address,
-        hash: attempt.hash,
-    }
-    .into())
+    Ok(Outcome::failed(
+        attempt.report,
+        LifecycleError::RetireUnconfirmed {
+            address: attempt.address,
+            hash: attempt.hash,
+        },
+    ))
 }
 
 /// One retirement's result document and the identities it acted on.
@@ -110,17 +103,17 @@ struct Retirement {
 /// address the configuration may have stopped describing entirely; requiring a
 /// desired-state block would refuse exactly the cleanup an orphaned binding
 /// needs.
-fn retire_hash(cli: &Cli, name: &str, hash: &str) -> Result<Retirement, Error> {
+fn retire_hash(context: &Context, name: &str, hash: &str) -> Result<Retirement, Error> {
     let address = Address::parse(name).map_err(|error| argument("NAME", &error))?;
     let hash = KeyHash::parse(hash).map_err(|error| argument("--hash", &error))?;
 
-    let file = StateFile::new(&cli.state);
+    let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
     let mut state = lock.read()?;
 
     let retained = retirable(&state, &address, &hash)?;
 
-    let client = Client::from_env()?;
+    let client = context.client()?;
     let (reader, writer) = (Reader::new(&client), Writer::new(&client));
     let observed = reader
         .get_key(&hash)
@@ -238,25 +231,24 @@ fn record_status(
 
 // --- delete key ----------------------------------------------------------------
 
-/// Runs `delete key`.
+/// Deletes one tracked key permanently.
 ///
 /// # Errors
 ///
 /// Returns [`LifecycleError`] for a value this command cannot use, a hash no
-/// local address tracks, an attempt on a key that is in use, or a deletion that
-/// could not be confirmed; and the state and API errors of the steps it
-/// performs.
-pub(super) fn delete_key<O: Write, E: Write>(
-    cli: &Cli,
-    hash: &str,
-    renderer: &mut Renderer<O, E>,
-) -> Result<(), Error> {
-    let attempt = delete_tracked_key(cli, hash)?;
-    super::write(renderer, &attempt.report, attempt.report.warnings())?;
+/// local address tracks, or an attempt on a key that is in use; and the state
+/// and API errors of the steps it performs, including `missing_credential`. A
+/// deletion that could not be confirmed is reported beside the result document
+/// rather than in place of it.
+pub fn delete_key(context: Context, hash: &str) -> Result<Outcome<DeleteReport>, Error> {
+    let attempt = delete_tracked_key(&context, hash)?;
     if attempt.report.settled() {
-        return Ok(());
+        return Ok(Outcome::ok(attempt.report));
     }
-    Err(LifecycleError::DeleteUnconfirmed { hash: attempt.hash }.into())
+    Ok(Outcome::failed(
+        attempt.report,
+        LifecycleError::DeleteUnconfirmed { hash: attempt.hash },
+    ))
 }
 
 /// One deletion's result document and the hash it acted on.
@@ -267,10 +259,10 @@ struct Deletion {
 
 /// Deletes one tracked key permanently, and stops tracking it only once
 /// OpenRouter says it is gone.
-fn delete_tracked_key(cli: &Cli, hash: &str) -> Result<Deletion, Error> {
+fn delete_tracked_key(context: &Context, hash: &str) -> Result<Deletion, Error> {
     let hash = KeyHash::parse(hash).map_err(|error| argument("--hash", &error))?;
 
-    let file = StateFile::new(&cli.state);
+    let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
     let mut state = lock.read()?;
 
@@ -280,7 +272,7 @@ fn delete_tracked_key(cli: &Cli, hash: &str) -> Result<Deletion, Error> {
         .ok_or_else(|| LifecycleError::Untracked { hash: hash.clone() })?;
     let retained = retirable(&state, &address, &hash)?;
 
-    let client = Client::from_env()?;
+    let client = context.client()?;
     let (reader, writer) = (Reader::new(&client), Writer::new(&client));
     let (outcome, detail) = attempt_delete(&reader, &writer, &hash);
 
@@ -363,27 +355,27 @@ fn attempt_delete(
 
 // --- decommission ------------------------------------------------------------
 
-/// Runs `decommission`.
+/// Takes an address's working key out of service, and optionally deletes it.
 ///
 /// # Errors
 ///
 /// Returns [`LifecycleError`] for a value this command cannot use, a hash that
-/// is not the address's working key, an operation in progress anywhere, a
-/// disable that could not be confirmed, or a deletion that could not be
-/// confirmed; and the state and API errors of the steps it performs.
-pub(super) fn decommission<O: Write, E: Write>(
-    cli: &Cli,
+/// is not the address's working key, or an operation in progress anywhere; and
+/// the state and API errors of the steps it performs, including
+/// `missing_credential`. A disable or a deletion that could not be confirmed is
+/// reported beside the result document rather than in place of it.
+pub fn decommission(
+    context: Context,
     name: &str,
     hash: &str,
     delete: bool,
-    renderer: &mut Renderer<O, E>,
-) -> Result<(), Error> {
-    let attempt = decommission_key(cli, name, hash, delete)?;
-    super::write(renderer, &attempt.report, attempt.report.warnings())?;
+) -> Result<Outcome<DecommissionReport>, Error> {
+    let attempt = decommission_key(&context, name, hash, delete)?;
     if attempt.report.settled() {
-        return Ok(());
+        return Ok(Outcome::ok(attempt.report));
     }
-    Err(attempt.failure().into())
+    let failure = attempt.failure();
+    Ok(Outcome::failed(attempt.report, failure))
 }
 
 /// One decommission's result document and what it would take to finish.
@@ -430,7 +422,7 @@ impl Decommissioning {
 /// using, which is the truth — and the hash becomes retained only after a read
 /// says the key cannot be used.
 fn decommission_key(
-    cli: &Cli,
+    context: &Context,
     name: &str,
     hash: &str,
     delete: bool,
@@ -438,14 +430,14 @@ fn decommission_key(
     let address = Address::parse(name).map_err(|error| argument("NAME", &error))?;
     let hash = KeyHash::parse(hash).map_err(|error| argument("--hash", &error))?;
 
-    let file = StateFile::new(&cli.state);
+    let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
     let mut state = lock.read()?;
 
     check_nothing_pending(&state)?;
     let generation = in_service(&state, &address, &hash)?;
 
-    let client = Client::from_env()?;
+    let client = context.client()?;
     let (reader, writer) = (Reader::new(&client), Writer::new(&client));
     let service = take_out_of_service(&reader, &writer, &hash)?;
 
@@ -609,20 +601,18 @@ fn retry_command(address: &Address, hash: &KeyHash, delete: bool) -> String {
 
 // --- state forget ----------------------------------------------------------------
 
-/// Runs `state forget`.
+/// Relinquishes local ownership of everything an address is bound to.
+///
+/// Needs no credential, no network, and no configuration: it exists to correct
+/// state that is wrong, which is when those may all be unavailable.
 ///
 /// # Errors
 ///
 /// Returns [`LifecycleError`] for an address this command cannot use, an
 /// ambiguous bare address, or an address with an operation in progress; and the
 /// state errors of writing the file.
-pub(super) fn forget<O: Write, E: Write>(
-    cli: &Cli,
-    address: &str,
-    renderer: &mut Renderer<O, E>,
-) -> Result<(), Error> {
-    let report = forget_address(cli, address)?;
-    super::write(renderer, &report, report.warnings())
+pub fn forget(context: Context, address: &str) -> Result<Outcome<ForgetReport>, Error> {
+    Ok(Outcome::ok(forget_address(&context, address)?))
 }
 
 /// Which bindings an operator's address names.
@@ -643,10 +633,10 @@ enum Target {
 /// dashboard, a key another system has taken over — so it must work when the
 /// credential is gone, the network is unreachable, and the configuration no
 /// longer parses.
-fn forget_address(cli: &Cli, address: &str) -> Result<ForgetReport, Error> {
+fn forget_address(context: &Context, address: &str) -> Result<ForgetReport, Error> {
     let target = parse_target(address)?;
 
-    let file = StateFile::new(&cli.state);
+    let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
     let mut state = lock.read()?;
 

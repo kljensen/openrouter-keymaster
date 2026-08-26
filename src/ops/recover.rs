@@ -43,17 +43,13 @@
 //! creates a successor and delivers it. That costs a rotation even when the
 //! original delivery in fact succeeded, and that cost is the honest one.
 
-use std::io::Write;
-
 use time::OffsetDateTime;
 
 use crate::api::{ObservedKey, Reader, Writer};
-use crate::cli::{Cli, RecoverAction, ResolveFinding};
-use crate::client::{ApiError, Client};
+use crate::client::ApiError;
 use crate::config::Config;
 use crate::error::Error;
 use crate::ids::{Address, IdError, KeyHash};
-use crate::output::Renderer;
 use crate::report::{
     CandidateReport, InspectReport, ReplaceReport, ResolveReport, RetainedReport, Retired,
     Successor, created_near,
@@ -64,33 +60,19 @@ use crate::state::{
 };
 
 use super::issuance::{Disabled, Issuer, disable_and_confirm};
+use super::{Context, Outcome};
 
-/// Runs one `recover` action.
+/// What an operator found about an ambiguous create.
 ///
-/// # Errors
-///
-/// Returns [`RecoverError`] for a value or a lifecycle phase this command
-/// cannot act on, and the configuration, state, and API errors of the steps it
-/// performs.
-pub(super) fn run<O: Write, E: Write>(
-    cli: &Cli,
-    action: &RecoverAction,
-    renderer: &mut Renderer<O, E>,
-) -> Result<(), Error> {
-    match action {
-        RecoverAction::Inspect { name } => {
-            let report = inspect(cli, name)?;
-            super::write(renderer, &report, report.warnings())
-        }
-        RecoverAction::Resolve { name, finding } => {
-            let report = resolve(cli, name, finding)?;
-            super::write(renderer, &report, report.warnings())
-        }
-        RecoverAction::Replace { name } => {
-            let report = replace(cli, name)?;
-            super::write(renderer, &report, report.warnings())
-        }
-    }
+/// Two findings and no third state: Keymaster never guesses which happened, and
+/// a caller that cannot say has nothing to record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Finding {
+    /// OpenRouter holds no key from the attempt. Keymaster cannot verify this;
+    /// it is the operator's word.
+    NoResourceCreated,
+    /// This exact hash is the key the attempt made, found by an operator.
+    LeakedHash(String),
 }
 
 // --- inspect ----------------------------------------------------------------
@@ -108,25 +90,38 @@ pub(super) fn run<O: Write, E: Write>(
 /// one anyway would make the command that explains a broken operation require a
 /// management credential and a reachable API — precisely when an operator may
 /// have neither and needs the report most.
-fn inspect(cli: &Cli, name: &str) -> Result<InspectReport, Error> {
+///
+/// # Errors
+///
+/// Returns [`RecoverError`] for an address this command cannot use, and the
+/// state and API errors of the steps it performs. It needs a credential only
+/// when there is something to search for, so an operation whose hash the
+/// journal records is reported with none.
+pub fn recover_inspect(context: Context, name: &str) -> Result<Outcome<InspectReport>, Error> {
     let address = local_address(name)?;
-    let state = StateFile::new(&cli.state).read()?;
+    let state = StateFile::new(&context.paths.state).read()?;
 
     let Some(operation) = pending_at(&state, &address) else {
-        return Ok(InspectReport::settled(&address));
+        return Ok(Outcome::ok(InspectReport::settled(&address)));
     };
     if !existence_unknown(operation.phase) {
-        return Ok(InspectReport::found(&address, operation, Vec::new()));
+        return Ok(Outcome::ok(InspectReport::found(
+            &address,
+            operation,
+            Vec::new(),
+        )));
     }
 
     // A fresh snapshot, every time. A candidate listing computed from anything
     // older would be describing an organization that has since changed, which
     // is the one thing an operator must not be handed here.
-    let client = Client::from_env()?;
+    let client = context.client()?;
     let observed = Reader::new(&client).list_keys(None)?;
 
     let candidates = candidates(&state, operation, &observed);
-    Ok(InspectReport::found(&address, operation, candidates))
+    Ok(Outcome::ok(InspectReport::found(
+        &address, operation, candidates,
+    )))
 }
 
 /// Whether the journal leaves it unknown that a key exists at all.
@@ -188,22 +183,28 @@ fn candidates(
 // --- resolve ----------------------------------------------------------------
 
 /// Records what an operator found about an ambiguous create.
-fn resolve(cli: &Cli, name: &str, finding: &ResolveFinding) -> Result<ResolveReport, Error> {
+///
+/// # Errors
+///
+/// Returns [`RecoverError`] for a value or a phase this command cannot act on,
+/// and the state and API errors of the steps it performs, including
+/// `missing_credential`.
+pub fn recover_resolve(
+    context: Context,
+    name: &str,
+    finding: &Finding,
+) -> Result<Outcome<ResolveReport>, Error> {
     let address = local_address(name)?;
-    match (&finding.leaked_hash, finding.no_resource_created) {
-        (Some(hash), _) => resolve_leaked(cli, &address, hash),
-        (None, true) => resolve_absence(cli, &address),
-        // The command line cannot produce this — the two flags are one required
-        // group of which exactly one may be given — but nothing about the type
-        // says so, and guessing which the operator meant is precisely the thing
-        // this command exists not to do.
-        (None, false) => Err(RecoverError::NoFinding.into()),
-    }
+    let report = match finding {
+        Finding::LeakedHash(hash) => resolve_leaked(&context, &address, hash),
+        Finding::NoResourceCreated => resolve_absence(&context, &address),
+    }?;
+    Ok(Outcome::ok(report))
 }
 
 /// Clears an ambiguous create on an operator's word that no key was made.
-fn resolve_absence(cli: &Cli, address: &Address) -> Result<ResolveReport, Error> {
-    let file = StateFile::new(&cli.state);
+fn resolve_absence(context: &Context, address: &Address) -> Result<ResolveReport, Error> {
+    let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
     let mut state = lock.read()?;
 
@@ -228,10 +229,14 @@ fn resolve_absence(cli: &Cli, address: &Address) -> Result<ResolveReport, Error>
 /// — never a name lookup — so a key that is not there leaves state untouched;
 /// it is then recorded as a failed candidate *before* any cleanup, so a disable
 /// that fails, or a run that dies attempting one, still leaves the key tracked.
-fn resolve_leaked(cli: &Cli, address: &Address, hash: &str) -> Result<ResolveReport, Error> {
+fn resolve_leaked(
+    context: &Context,
+    address: &Address,
+    hash: &str,
+) -> Result<ResolveReport, Error> {
     let hash = KeyHash::parse(hash).map_err(|error| argument("--leaked-hash", &error))?;
 
-    let file = StateFile::new(&cli.state);
+    let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
     let mut state = lock.read()?;
 
@@ -246,7 +251,7 @@ fn resolve_leaked(cli: &Cli, address: &Address, hash: &str) -> Result<ResolveRep
         .into());
     }
 
-    let client = Client::from_env()?;
+    let client = context.client()?;
     let (reader, writer) = (Reader::new(&client), Writer::new(&client));
     reader
         .get_key(&hash)
@@ -275,12 +280,18 @@ fn resolve_leaked(cli: &Cli, address: &Address, hash: &str) -> Result<ResolveRep
 /// and is gone. Nothing an operator can discover changes either fact, which is
 /// why this needs no attestation — and why the two phases where a key's
 /// existence is still *unknown* are refused. Resolve those first.
-fn replace(cli: &Cli, name: &str) -> Result<ReplaceReport, Error> {
+///
+/// # Errors
+///
+/// Returns [`RecoverError`] for an address or a phase this command cannot act
+/// on, and the configuration, state, and API errors of the steps it performs,
+/// including `missing_credential`.
+pub fn recover_replace(context: Context, name: &str) -> Result<Outcome<ReplaceReport>, Error> {
     let address = local_address(name)?;
 
-    let file = StateFile::new(&cli.state);
+    let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
-    let config = Config::load(&cli.config)?;
+    let config = Config::load(&context.paths.config)?;
     let mut state = lock.read()?;
 
     let operation =
@@ -291,7 +302,7 @@ fn replace(cli: &Cli, name: &str) -> Result<ReplaceReport, Error> {
             })?;
     check_replaceable(&address, operation.phase)?;
 
-    let client = Client::from_env()?;
+    let client = context.client()?;
     let (reader, writer) = (Reader::new(&client), Writer::new(&client));
     let issuer = Issuer {
         config: &config,
@@ -332,7 +343,7 @@ fn replace(cli: &Cli, name: &str) -> Result<ReplaceReport, Error> {
         .issue_prepared(&address, &mut state, prepared, now())
         .map_err(|message| RecoverError::Issuance { message })?;
 
-    Ok(ReplaceReport::new(
+    Ok(Outcome::ok(ReplaceReport::new(
         &address,
         Retired {
             operation: operation.id.as_str().to_owned(),
@@ -346,7 +357,7 @@ fn replace(cli: &Cli, name: &str) -> Result<ReplaceReport, Error> {
             receiver: issued.receiver,
             promoted: issued.promoted,
         },
-    ))
+    )))
 }
 
 /// Refuses a replacement for an operation whose outcome is not settled yet.
@@ -459,6 +470,10 @@ pub enum RecoverError {
     },
 
     /// Neither finding was given.
+    ///
+    /// An `ops` caller cannot produce this — [`Finding`] has no such state —
+    /// but a command line can be handed it, and guessing which the operator
+    /// meant is precisely what this command exists not to do.
     #[error(
         "say what you found: `--no-resource-created` if OpenRouter holds no key from the \
          attempt, or `--leaked-hash HASH` if it does. Keymaster does not guess which."

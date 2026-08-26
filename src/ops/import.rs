@@ -33,58 +33,49 @@
 //! 7. Record the binding and write state atomically. Repeating an import that
 //!    changes nothing writes nothing.
 
-use std::io::Write;
-
 use time::OffsetDateTime;
 
 use crate::api::Reader;
-use crate::cli::{Cli, ImportResource};
-use crate::client::{ApiError, Client};
+use crate::client::ApiError;
 use crate::config::Config;
 use crate::error::Error;
 use crate::ids::{Address, IdError, KeyHash, Uuid};
-use crate::output::Renderer;
 use crate::plan;
 use crate::report::ImportReport;
 use crate::state::{BindError, KeyBinding, Origin, State, StateFile, StateLock};
 
-/// Runs `import key` or `import guardrail`.
+use super::{Context, Outcome};
+
+/// Binds one API key to a local address, by its immutable hash.
+///
+/// Makes no remote write: it reads that one key and records a binding.
 ///
 /// # Errors
 ///
 /// Returns [`ImportError`] for a value this command cannot use, and the
-/// configuration, state, and API errors of the steps it performs. Every one of
-/// them leaves state exactly as it was.
-pub(super) fn run<O: Write, E: Write>(
-    cli: &Cli,
-    resource: &ImportResource,
-    renderer: &mut Renderer<O, E>,
-) -> Result<(), Error> {
-    let report = match resource {
-        ImportResource::Key { name, hash } => key(cli, name, hash),
-        ImportResource::Guardrail { name, id } => guardrail(cli, name, id),
-    }?;
-    super::write(renderer, &report, report.warnings())
-}
-
-/// Binds one API key by its immutable hash.
-fn key(cli: &Cli, name: &str, hash: &str) -> Result<ImportReport, Error> {
+/// configuration, state, and API errors of the steps it performs, including
+/// `missing_credential`. Every one of them leaves state exactly as it was.
+pub fn import_key(
+    context: Context,
+    name: &str,
+    hash: &str,
+) -> Result<Outcome<ImportReport>, Error> {
     let address = local_address(name)?;
     let hash = KeyHash::parse(hash).map_err(|error| identifier("--hash", &error))?;
 
     // The lock first, then everything read from a file. See the module
     // documentation: the generation this records comes from the configuration,
     // so the configuration has to be the one that cannot change underneath it.
-    let file = StateFile::new(&cli.state);
+    let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
-    let config = Config::load(&cli.config)?;
+    let config = Config::load(&context.paths.config)?;
     let desired = config
         .keys
         .get(&address)
         .ok_or_else(|| ImportError::not_configured("key", &address))?;
     let mut state = lock.read()?;
 
-    let client = Client::from_env()?;
+    let client = context.client()?;
     let observed = Reader::new(&client)
         .get_key(&hash)
         .map_err(|error| absent_or(error, &format!("key {hash}")))?;
@@ -95,32 +86,41 @@ fn key(cli: &Cli, name: &str, hash: &str) -> Result<ImportReport, Error> {
         state.bind_key(&address, hash.clone(), desired.generation, now())
     })?;
 
-    Ok(ImportReport::key(
+    Ok(Outcome::ok(ImportReport::key(
         &address,
         &hash,
         origin_of(state.key(&address).map(KeyBinding::origin)),
         &observed.name,
         &changes,
         bound,
-    ))
+    )))
 }
 
-/// Binds one guardrail by its immutable UUID.
-fn guardrail(cli: &Cli, name: &str, id: &str) -> Result<ImportReport, Error> {
+/// Binds one guardrail to a local address, by its immutable UUID.
+///
+/// # Errors
+///
+/// As [`import_key`].
+pub fn import_guardrail(
+    context: Context,
+    name: &str,
+    id: &str,
+) -> Result<Outcome<ImportReport>, Error> {
     let address = local_address(name)?;
     let id = Uuid::parse(id).map_err(|error| identifier("--id", &error))?;
 
-    // As in `key`: the lock, then the two files the binding is derived from.
-    let file = StateFile::new(&cli.state);
+    // As in `import_key`: the lock, then the two files the binding is derived
+    // from.
+    let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
-    let config = Config::load(&cli.config)?;
+    let config = Config::load(&context.paths.config)?;
     let desired = config
         .guardrails
         .get(&address)
         .ok_or_else(|| ImportError::not_configured("guardrail", &address))?;
     let mut state = lock.read()?;
 
-    let client = Client::from_env()?;
+    let client = context.client()?;
     let observed = Reader::new(&client)
         .get_guardrail(&id)
         .map_err(|error| absent_or(error, &format!("guardrail {id}")))?;
@@ -131,14 +131,14 @@ fn guardrail(cli: &Cli, name: &str, id: &str) -> Result<ImportReport, Error> {
         state.bind_guardrail(&address, id.clone(), Origin::Imported, now())
     })?;
 
-    Ok(ImportReport::guardrail(
+    Ok(Outcome::ok(ImportReport::guardrail(
         &address,
         &id,
         origin_of(state.guardrail(&address).map(|binding| binding.origin)),
         &observed.name,
         &changes,
         bound,
-    ))
+    )))
 }
 
 /// Applies a binding and writes state only if the binding changed it.

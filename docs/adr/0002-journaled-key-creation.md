@@ -298,16 +298,16 @@ unchanged; this section records where each part of it is enforced.
   anywhere. `tests/receiver.rs` exercises both receivers through every ending
   the protocol describes, using a compiled helper adapter rather than a shell
   string.
-- **The journaled create transaction** — `src/app/issuance.rs`, covered by
+- **The journaled create transaction** — `src/ops/issuance.rs`, covered by
   `tests/issuance.rs`: zero POSTs after a failed pre-create state write; exactly
   one POST on connection loss, timeout, 500, and malformed success; hash
   durability before any follow-up call; delivery only after verified
   restrictions and assignment; and crash injection immediately before and after
   every durable phase.
-- **Explicit recovery** — `src/app/recover.rs`, covered by `tests/recover.rs`:
+- **Explicit recovery** — `src/ops/recover.rs`, covered by `tests/recover.rs`:
   no path sends a second create or a second receiver call, and a found hash is
   bound as a failed candidate rather than promoted as delivered.
-- **Staged rotation** — `src/app/rotate.rs` and `src/app/lifecycle.rs`, covered
+- **Staged rotation** — `src/ops/rotate.rs` and `src/ops/lifecycle.rs`, covered
   by `tests/rotation.rs`: promotion happens only after verified delivery, and
   the predecessor stays enabled and tracked until an explicit `retire`.
 - **No secret escapes any of it** — `tests/support/sentinel.rs` and the scans

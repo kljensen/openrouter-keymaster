@@ -1,12 +1,12 @@
 //! Keymaster's application error type.
 
-use crate::app::apply::ApplyError;
-use crate::app::import::ImportError;
-use crate::app::lifecycle::LifecycleError;
-use crate::app::recover::RecoverError;
-use crate::app::rotate::RotateError;
 use crate::client::ApiError;
 use crate::config::ConfigError;
+use crate::ops::apply::ApplyError;
+use crate::ops::import::ImportError;
+use crate::ops::lifecycle::LifecycleError;
+use crate::ops::recover::RecoverError;
+use crate::ops::rotate::RotateError;
 use crate::state::StateError;
 
 /// An application error. Every variant is safe to display: no variant may

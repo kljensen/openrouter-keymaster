@@ -37,6 +37,10 @@ can apply against one organization simultaneously and nothing detects it.
 **No saved plans.** `apply` recomputes the plan under its own lock, so there is
 nothing to save and nothing to go stale. There is no plan file format, no
 interactive approval, no `--only`, and no Terraform-style detailed exit code.
+A plan's `fingerprint` is not a saved plan either: it is a digest of the inputs,
+and an apply given one still recomputes the plan and then refuses unless every
+input that decides the outcome is still what it was. The command line never
+sends one.
 
 **No scheduled rotation**, no downstream smoke tests, no pruning, no
 delete-by-name, no bulk import, no generated configuration.

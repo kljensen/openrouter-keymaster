@@ -1552,6 +1552,40 @@ fn forget_releases_every_hash_and_makes_no_remote_call() {
 }
 
 #[test]
+fn forget_survives_an_unusable_base_url() {
+    // `state forget` reads neither environment variable. It exists to correct
+    // state that is wrong, which is exactly when an endpoint that cannot be
+    // parsed — the one thing that stops every other command before it starts —
+    // may be wrong too.
+    let world = after_a_rotation();
+
+    let output =
+        world
+            .project
+            .run_with_unusable_base_url(&["--json", "state", "forget", "keys.jobfeed"]);
+    let streams = Streams::of(&output);
+    world.project.assert_no_secret_escaped(&streams);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "forget reads no endpoint:\n{}",
+        streams.err
+    );
+    assert_eq!(streams.document()["forgotten"], Value::Bool(true));
+    world.project.server.assert_request_count(0);
+    assert_eq!(world.deliveries(), 0);
+    assert!(
+        world
+            .project
+            .read_state()
+            .key(&address("jobfeed"))
+            .is_none(),
+        "the binding is gone"
+    );
+}
+
+#[test]
 fn forgetting_an_address_twice_is_a_clear_no_op() {
     let world = after_a_rotation();
     world
