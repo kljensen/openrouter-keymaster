@@ -3,13 +3,14 @@
 # with one would hang forever or follow a redirect carrying the management
 # credential to another host. `Client::new` is the only way to get such a client
 # without going through `Client::builder`, so it is refused outright.
-# tests/lints.rs fails if this list stops naming them.
+# crates/core/tests/lints.rs fails if this list stops naming them.
 disallowed-methods = [
-    { path = "reqwest::blocking::Client::new", reason = "build the client with openrouter_keymaster::client::Client, which sets timeouts, the user agent, and the redirect policy" },
-    { path = "reqwest::Client::new", reason = "Keymaster is a blocking CLI; use openrouter_keymaster::client::Client" },
+    { path = "reqwest::blocking::Client::new", reason = "build the client with openrouter_keymaster_core::client::Client, which sets timeouts, the user agent, and the redirect policy" },
+    { path = "reqwest::Client::new", reason = "Keymaster is a blocking CLI; use openrouter_keymaster_core::client::Client" },
 ]
 
-# Complexity tripwires. The matching lints are denied in Cargo.toml [lints].
+# Complexity tripwires. The matching lints are denied in [workspace.lints] in
+# the root Cargo.toml.
 cognitive-complexity-threshold = 20
 too-many-lines-threshold = 80
 too-many-arguments-threshold = 7

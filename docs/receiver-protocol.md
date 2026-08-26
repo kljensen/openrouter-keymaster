@@ -251,8 +251,8 @@ anything that can read the file can spend the key.
 
 ## Testing an adapter
 
-`src/bin/openrouter-keymaster-test-receiver.rs` is the adapter Keymaster's own
-tests run. It is small, it records exactly what it was given — its argument
-vector, the names of every environment variable it inherited, and the envelope
-— and it can end in every way this document describes, including badly. Read it
-as a worked example of the receiving half.
+`crates/cli/src/bin/openrouter-keymaster-test-receiver.rs` is the adapter
+Keymaster's own tests run. It is small, it records exactly what it was given —
+its argument vector, the names of every environment variable it inherited, and
+the envelope — and it can end in every way this document describes, including
+badly. Read it as a worked example of the receiving half.

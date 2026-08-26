@@ -41,11 +41,18 @@ cargo build --release
 ./target/release/openrouter-keymaster --version
 ```
 
-Put the binary somewhere on your `PATH`, or run it from `target/release`. There
-is no installer, no package, and no published crate.
+Put the binary somewhere on your `PATH`, or run it from `target/release`, or
+install it with `cargo install --path crates/cli`. There is no installer, no
+package, and no published crate.
 
-For development, `cargo build`, `cargo run -- --help`, and `cargo test` work as
-usual; [`just check`](#checks) runs the same battery CI does.
+The repository is a Cargo workspace of two crates:
+[`crates/core`](crates/core) is `openrouter-keymaster-core`, the library that
+holds the client, the planner, state, the receivers, and the operations, and
+[`crates/cli`](crates/cli) is `openrouter-keymaster`, the binary that parses
+arguments and renders reports. The CLI is the workspace's default member, so
+`cargo build`, `cargo run -- --help`, and `cargo test` at the root are the
+binary's and work as usual; `cargo test --workspace` and
+[`just check`](#checks) cover both crates, which is the battery CI runs.
 
 Then read [Credentials](#credentials) and
 [the first-run runbook](docs/operations.md#first-run).
@@ -804,10 +811,10 @@ left behind.
 
 ## OpenRouter client
 
-`src/client/` is a small blocking client for the OpenRouter management API. It
-is deliberately not a generated SDK: Keymaster touches a handful of endpoints,
-sequentially, and a hand-written client is what makes the safety properties
-below inspectable.
+`crates/core/src/client/` is a small blocking client for the OpenRouter
+management API. It is deliberately not a generated SDK: Keymaster touches a
+handful of endpoints, sequentially, and a hand-written client is what makes the
+safety properties below inspectable.
 
 - **One client, built one way.** Every request goes through the client built by
   `client::build_http`, which sets a connect timeout, a whole-request timeout, a
@@ -815,7 +822,7 @@ below inspectable.
   refuses to follow anything — the request carries the management credential,
   and the redirect target is chosen by whatever answered. `clippy.toml` refuses
   `reqwest::blocking::Client::new` so a client without those cannot be created
-  elsewhere; `tests/lints.rs` fails if that ban is removed.
+  elsewhere; `crates/core/tests/lints.rs` fails if that ban is removed.
 - **Management traffic goes direct.** Proxies are disabled outright, because
   `reqwest` otherwise honours `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` and a proxy
   named there terminates TLS to inspect what passes through it — the
@@ -852,13 +859,13 @@ below inspectable.
 
 ## Reading and writing OpenRouter
 
-`src/api/` reads and writes the resources Keymaster manages: keys, guardrails,
-and the assignments between them. `api::Reader` is read-only and its types are
-observations, not desires; `api::Writer` is the small set of writes an ordinary
-convergence needs. No method on the writer reports success from what the server
-echoed back — an update returns `()`, a create returns only the identity apply
-must persist immediately — because an ambiguous write is resolved by a fresh
-read, never by a replay.
+`crates/core/src/api/` reads and writes the resources Keymaster manages: keys,
+guardrails, and the assignments between them. `api::Reader` is read-only and its
+types are observations, not desires; `api::Writer` is the small set of writes an
+ordinary convergence needs. No method on the writer reports success from what
+the server echoed back — an update returns `()`, a create returns only the
+identity apply must persist immediately — because an ambiguous write is resolved
+by a fresh read, never by a replay.
 
 Usage counters, remaining budget, and creation timestamps are OpenRouter's
 alone, so they live in `KeyUsage` and `RemoteTimestamps` rather than beside the
@@ -890,8 +897,8 @@ be unset.
 Stdout carries requested results only — human-readable text, or exactly one
 JSON document when `--json` is given. Stderr carries diagnostics, also as one
 JSON document under `--json`. Neither is ever colored, so `--json` output is
-machine-readable on a terminal. Only `src/output.rs` writes to either stream;
-the other modules return values.
+machine-readable on a terminal. Only `crates/cli/src/output.rs` writes to either
+stream; the other modules return values.
 
 | Exit code | Meaning |
 | --------- | ------- |
@@ -904,10 +911,10 @@ successful `status` exits 0 whatever it reports. Only a failure — a
 configuration, credential, state, or API error — exits 1, and its `kind` names
 the category.
 
-Results are rendered from dedicated DTOs in `src/report/`, not from the domain
-types: a field added to a planner or state type cannot silently change the
-output contract, and no type that could hold secret material is reachable from
-one.
+Results are rendered from dedicated DTOs in `crates/core/src/report/`, not from
+the domain types: a field added to a planner or state type cannot silently
+change the output contract, and no type that could hold secret material is
+reachable from one.
 
 ## Checks
 
@@ -915,9 +922,9 @@ one.
 
 ```sh
 cargo fmt --all -- --check
-cargo check --locked --all-targets
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
+cargo check --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
 cargo deny check advisories licenses bans sources
 ```
 
@@ -928,8 +935,8 @@ locally at the version pinned in the `justfile` (the same version CI installs);
 `just check` fails with installation instructions if the versions differ.
 
 The Rust toolchain is pinned in `rust-toolchain.toml` and must match
-`package.rust-version` in `Cargo.toml`; `tests/toolchain_pin.rs` fails if they
-drift apart.
+`workspace.package.rust-version` in the root `Cargo.toml`;
+`crates/cli/tests/toolchain_pin.rs` fails if they drift apart.
 
 `just live` is the one thing `just check` does not run and CI never will. It is
 an opt-in acceptance suite against a **real** OpenRouter organization, gated by
@@ -939,8 +946,14 @@ resources with a real management credential. Read
 
 ## Test harness
 
-`tests/support/` is shared test support that any integration test picks up
-with `mod support;`. It uses no external network and no real credential.
+The shared harness is `crates/core/src/test_support/`, compiled into the core
+library only under its `test-support` feature — which core's own tests require
+and the CLI crate's dev-dependency turns on, so there is one copy rather than
+one per crate. It uses no external network and no real credential. Core's tests
+reach it as `use openrouter_keymaster_core::test_support as support;`; the CLI
+crate's tests pick it up with `mod support;`, through
+`crates/cli/tests/support/mod.rs`, which re-exports it beside the one part that
+cannot be shared.
 
 - `http` — a local `wiremock` server with a synchronous interface, so tests of
   the blocking client never write `async`. It matches routes and methods,
@@ -957,16 +970,19 @@ with `mod support;`. It uses no external network and no real credential.
   from strings, files, and directory trees, and its presence where disclosure
   is the expected behavior.
 
-`tests/harness.rs` has one demonstration test per capability, including one
-that proves the server received the expected bearer credential while sentinel
-scanning proves it reached neither diagnostics nor any written artifact.
+`crates/core/tests/harness.rs` has one demonstration test per capability,
+including one that proves the server received the expected bearer credential
+while sentinel scanning proves it reached neither diagnostics nor any written
+artifact.
 
-- `project` — a temporary project directory, a server answering the three
-  listings a snapshot reads, and the compiled binary pointed at both with a
-  sentinel credential. Every run it starts is scanned for the sentinel in
-  stdout, stderr, and every file under the project directory.
+- `project` — the part that cannot be shared, because `Command::cargo_bin`
+  only finds a binary of the package under test: a temporary project directory,
+  a server answering the three listings a snapshot reads, and the compiled
+  binary pointed at both with a sentinel credential. Every run it starts is
+  scanned for the sentinel in stdout, stderr, and every file under the project
+  directory.
 
-`tests/plan.rs` runs the compiled binary against that harness for the
+`crates/cli/tests/plan.rs` runs the compiled binary against that harness for the
 representative planning cases — converged, drift, name collision, missing,
 unmanaged, and an unfinished operation — and for the failure categories. Every
 run in it scans stdout, stderr, and the whole project directory for the
@@ -974,37 +990,38 @@ sentinel on the success path and the failure path alike, and one case proves
 that `plan` and `status` sent nothing but `GET` requests and left the state
 file byte for byte as they found it.
 
-`tests/import.rs` covers the binding rules the same way: the exact-identity
-lookup and the requests it does *not* make, the reported difference, a repeated
-import that writes nothing, a 404, both one-to-one violations, lock contention,
-a state write that cannot happen, and a remote display name carrying the
-sentinel.
+`crates/cli/tests/import.rs` covers the binding rules the same way: the
+exact-identity lookup and the requests it does *not* make, the reported
+difference, a repeated import that writes nothing, a 404, both one-to-one
+violations, lock contention, a state write that cannot happen, and a remote
+display name carrying the sentinel.
 
-`tests/receiver.rs` delivers a real plaintext — one parsed out of a create
-response served by the local HTTP harness, because there is deliberately no
-other way to obtain a `KeyPlaintext` — to both receivers, and scans the
-outcome, the messages, and every file and filename left behind for the
-sentinel. The command cases run
-`src/bin/openrouter-keymaster-test-receiver.rs`, a real compiled adapter rather
-than a shell string, which records its argument vector, the names of every
-environment variable it inherited, and the envelope it was given, and can end
-in every way the protocol describes: cleanly, with the
-refusal code, with an undefined code, by signal, by timeout, by shouting
-megabytes at both streams, and by echoing the key back.
+`crates/cli/tests/receiver.rs` delivers a real plaintext — one parsed out of a
+create response served by the local HTTP harness, because there is deliberately
+no other way to obtain a `KeyPlaintext` — to both receivers, and scans the
+outcome, the messages, and every file and filename left behind for the sentinel.
+The command cases run
+`crates/cli/src/bin/openrouter-keymaster-test-receiver.rs`, a real compiled
+adapter rather than a shell string, which records
+its argument vector, the names of every environment variable it inherited, and
+the envelope it was given, and can end in every way the protocol describes:
+cleanly, with the refusal code, with an undefined code, by signal, by timeout,
+by shouting megabytes at both streams, and by echoing the key back.
 
-`tests/apply.rs` asserts which requests apply sent, in what order, carrying
-what — and, as often, that it sent none: a converged project, an unmanaged
-resource, a blocked plan, and a plan whose only work is a key creation all
-write nothing. It also covers the phase order and request bodies, verification,
-a second apply that is a no-op, a guardrail recreated after it disappeared, an
-assignment removed and one restored, and a guardrail create that fails midway —
-which must leave the identity of the one that succeeded tracked and state
-exactly which actions were verified.
+`crates/cli/tests/apply.rs` asserts which requests apply sent, in what order,
+carrying what — and, as often, that it sent none: a converged project, an
+unmanaged resource, a blocked plan, and a plan whose only work is a key creation
+all write nothing. It also covers the phase order and request bodies,
+verification, a second apply that is a no-op, a guardrail recreated after it
+disappeared, an assignment removed and one restored, and a guardrail create that
+fails midway — which must leave the identity of the one that succeeded tracked
+and state exactly which actions were verified.
 
 ## Lint policy
 
-`Cargo.toml` `[lints]` forbids `unsafe_code` and denies `dbg!`, `todo!`,
-`unimplemented!`, and `unwrap()`. Complexity tripwires live in `clippy.toml`:
+`[workspace.lints]` in the root `Cargo.toml`, which both crates inherit, forbids
+`unsafe_code` and denies `dbg!`, `todo!`, `unimplemented!`, and `unwrap()`.
+Complexity tripwires live in `clippy.toml`:
 cognitive complexity 20, function length 80, argument count 7, type complexity
 200. Tests may add narrowly scoped `#[allow(...)]` with a reason; production
 code may not disable the policy wholesale. `clippy.toml` also lists disallowed

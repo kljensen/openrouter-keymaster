@@ -1,6 +1,6 @@
 # The live acceptance suite
 
-`tests/live.rs` runs Keymaster against a real OpenRouter organization. It exists
+`crates/cli/tests/live.rs` runs Keymaster against a real OpenRouter organization. It exists
 for the one thing the local harness cannot check: whether the real management
 API behaves the way its documentation says it does.
 

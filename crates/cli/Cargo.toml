@@ -1,0 +1,37 @@
+[package]
+name = "openrouter-keymaster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+# `src/bin/openrouter-keymaster-test-receiver.rs` is a second binary, so
+# `cargo run` needs to be told which one is the program.
+default-run = "openrouter-keymaster"
+
+[features]
+# The fault injection points are in the core crate's write path; this forwards
+# the feature so `--all-features` over the workspace still compiles the crash
+# tests in `tests/issuance.rs` and `tests/rotation.rs`.
+fault-injection = ["openrouter-keymaster-core/fault-injection"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+openrouter-keymaster-core = { path = "../core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# The management credential's buffer is cleared when its wrapper is dropped.
+zeroize = "1.8"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+# The shared harness, compiled into core for the tests that need it.
+openrouter-keymaster-core = { path = "../core", features = ["test-support"] }
+predicates = "3.1"
+sha2 = "0.10"
+tempfile = "3.23"
+time = { version = "0.3", features = ["macros", "serde-well-known"] }
+wiremock = "0.6"
+
+[lints]
+workspace = true

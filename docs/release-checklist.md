@@ -166,11 +166,14 @@ git log --all --format='' --name-only \
 ```
 
 **Expected:** only source, test, and documentation files. Verified — the eight
-files are `tests/support/sentinel.rs`, which defines it; `src/config/tests.rs`,
-`src/ids.rs`, `src/receiver/command.rs`, `src/receiver/file.rs`,
-`src/receiver/mod.rs`, and `src/state/tests.rs`, which assert it is refused or
-never disclosed; and this checklist, which quotes it in the command above. No
-state file, fixture artifact, or log.
+files are `crates/core/src/test_support/sentinel.rs`, which defines it;
+`crates/core/src/config/tests.rs`, `crates/core/src/ids.rs`,
+`crates/core/src/receiver/command.rs`, `crates/core/src/receiver/file.rs`,
+`crates/core/src/receiver/mod.rs`, and `crates/core/src/state/tests.rs`, which
+assert it is refused or never disclosed; and this checklist, which quotes it in
+the command above. No state file, fixture artifact, or log. The paths are the
+ones the workspace split (ADR-0003) moved them to; the search is by content, so
+it finds them under their old names too.
 
 The runtime property — that no secret reaches stdout, stderr, JSON, state, a
 temporary file, or a filename — is enforced by the sentinel scans in the test
@@ -199,11 +202,11 @@ values are contracts. Human-readable text is not.
 
 ```sh
 cargo deny check advisories licenses bans sources
-cargo tree --depth 1
+cargo tree --workspace --depth 1
 ```
 
 **Expected:** `cargo deny` passes. Every direct dependency is justified in a
-comment in `Cargo.toml`, and the policy is
+comment in the crate's `Cargo.toml`, and the policy is
 [in the README](../README.md#dependency-policy): committed `Cargo.lock`,
 `--locked` everywhere, an allow-list of permissive licenses, no wildcard
 requirements, crates.io as the only source.
@@ -220,11 +223,12 @@ is scoped to that crate and explained in place.
 grep -n '^license' Cargo.toml && head -1 LICENSE && cargo deny check licenses
 ```
 
-**Expected:** `license = "Unlicense"`, a `LICENSE` file beginning "This is free
-and unencumbered software released into the public domain", and a passing
-license check with no private-crate exception in `deny.toml` — the crate is
-held to the same allow-list as every dependency. `publish = false` stays:
-publishing to crates.io is a separate decision from licensing.
+**Expected:** `license = "Unlicense"` under `[workspace.package]`, which both
+crates inherit, a `LICENSE` file beginning "This is free and unencumbered
+software released into the public domain", and a passing license check with no
+private-crate exception in `deny.toml` — both crates are held to the same
+allow-list as every dependency. `publish = false` stays: publishing to
+crates.io is a separate decision from licensing.
 
 ## 9. Version set to 0.1.0 and changelog written
 
@@ -233,7 +237,8 @@ grep '^version' Cargo.toml
 head -20 CHANGELOG.md
 ```
 
-**Expected:** `version = "0.1.0"` in `Cargo.toml`, and a `0.1.0` section in
+**Expected:** `version = "0.1.0"` under `[workspace.package]` in the root
+`Cargo.toml`, which both crates inherit, and a `0.1.0` section in
 [`CHANGELOG.md`](../CHANGELOG.md) summarizing the milestone. Both verified.
 
 Note that a release tag should not be cut while item 4 is open. The

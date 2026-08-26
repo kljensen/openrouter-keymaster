@@ -9,7 +9,7 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Added
 
-- A Rust API. `openrouter_keymaster::ops` holds one function per command —
+- A Rust API. `openrouter_keymaster_core::ops` holds one function per command —
   `plan`, `status`, `apply`, `import_key`, `import_guardrail`, `rotate`,
   `recover_inspect`, `recover_resolve`, `recover_replace`, `retire`,
   `decommission`, `delete_key`, and `forget`. Each takes an owned `Context`
@@ -67,6 +67,19 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
   and `decommission_delete_unconfirmed`.
 
 ### Changed
+
+- The repository is a Cargo workspace of two crates.
+  `openrouter-keymaster-core` (`crates/core`) holds the client, the API reads
+  and writes, configuration, state, the planner, the receivers, the reports,
+  the identifiers, and `ops`; `openrouter-keymaster` (`crates/cli`) holds
+  argument parsing, dispatch, rendering, and the two binaries. Core does not
+  depend on `clap`. The shared test harness moved into core as `test_support`,
+  behind a `test-support` feature the CLI crate's dev-dependency turns on, so
+  there is still one copy of it. Nothing a user sees changed: the binary, its
+  name, its help, its output, and its exit codes are the same; `cargo build`
+  and `cargo run -- …` at the root are still the CLI's; and
+  `cargo install --path crates/cli` produces the same program. Third step of
+  [ADR-0003](docs/adr/0003-core-library-split.md).
 
 - `apply` checks the management credential before it promotes a `delivered`
   operation, so an apply with no credential now writes nothing at all. It used

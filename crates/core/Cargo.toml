@@ -1,0 +1,84 @@
+[package]
+name = "openrouter-keymaster-core"
+description = "Planning, state, and the OpenRouter operations behind the openrouter-keymaster CLI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Lets a test interrupt a real `openrouter-keymaster` run at a named durable
+# phase, by setting `KEYMASTER_STATE_FAULT`. ADR-0002 requires crash coverage
+# immediately before and after every journal entry, and the only faithful way
+# to get it is to stop the production write path at that exact point rather
+# than to reimplement the transaction in a test.
+#
+# Off by default and never in a release build: `just check` runs
+# `cargo check --locked --all-targets` with no features, which is the shape
+# shipped, and `cargo test --all-features`, which is the shape tested. The
+# `openrouter-keymaster` binary reads the variable only when the CLI crate's
+# feature of the same name forwards this one.
+fault-injection = []
+# Compiles `test_support` — the local HTTP server, the fake clock, the secret
+# sentinel, the JSON fixtures, and the fake receiver — into the library, so
+# the CLI crate's tests and this crate's own tests share one copy. Off by
+# default: it pulls a mock server into the dependency graph and has no place
+# in a shipped build.
+test-support = ["dep:tokio", "dep:wiremock"]
+
+[dependencies]
+# URL path segments and query values are percent-encoded before they reach the
+# wire, so a name or hash cannot change which resource a request addresses.
+percent-encoding = "2.3"
+# `rustls` rather than the platform's OpenSSL: one TLS stack, built the same way
+# everywhere. `system-proxy` is left off deliberately — a management credential
+# should not start flowing through a proxy because of an OS-wide setting.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "charset", "http2", "json", "rustls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# `openat`/`renameat`/`statat` in safe Rust. The file receiver writes a live
+# credential, and a path-based create can be redirected by a directory swapped
+# out between the check and the write; resolving the directory once and working
+# relative to that descriptor is the only fix, and the standard library does not
+# expose those calls. Already in the graph by way of `tempfile`.
+rustix = { version = "1.1", features = ["fs"] }
+# Receiver fingerprints are a digest, so a changed delivery destination is
+# detectable without a collision-prone ad-hoc hash.
+sha2 = "0.10"
+thiserror = "2.0"
+# `serde-well-known` brings the RFC 3339 parser and serializer used for every
+# timestamp in the configuration and in state; `macros` builds the HTTP-date
+# formats `Retry-After` is parsed with at compile time.
+time = { version = "0.3", features = ["macros", "serde-well-known"] }
+# `wiremock` is async; the harness owns the runtime so tests stay synchronous.
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+toml = "1.1"
+wiremock = { version = "0.6", optional = true }
+# The management credential's buffer is cleared when its wrapper is dropped.
+zeroize = "1.8"
+
+[dev-dependencies]
+tempfile = "3.23"
+
+# Everything below drives the harness in `test_support`, which exists only
+# under the feature; `required-features` is what keeps a featureless
+# `cargo check --all-targets` from compiling a test that cannot build.
+[[test]]
+name = "api"
+required-features = ["test-support"]
+
+[[test]]
+name = "client"
+required-features = ["test-support"]
+
+[[test]]
+name = "harness"
+required-features = ["test-support"]
+
+[[test]]
+name = "state"
+required-features = ["test-support"]
+
+[lints]
+workspace = true

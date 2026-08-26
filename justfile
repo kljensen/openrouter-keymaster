@@ -9,11 +9,11 @@ fmt:
 
 # Lint all targets; warnings are errors.
 lint:
-    cargo clippy --locked --all-targets --all-features -- -D warnings
+    cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 # Run all tests.
 test:
-    cargo test --locked --all-features
+    cargo test --locked --workspace --all-features
 
 # Fail unless the local cargo-deny matches the version CI pins.
 check-deny-version:
@@ -39,7 +39,7 @@ live-sweep prefix:
 # The same battery CI runs.
 check: check-deny-version
     cargo fmt --all -- --check
-    cargo check --locked --all-targets
-    cargo clippy --locked --all-targets --all-features -- -D warnings
-    cargo test --locked --all-features
+    cargo check --locked --workspace --all-targets
+    cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+    cargo test --locked --workspace --all-features
     cargo deny check advisories licenses bans sources

@@ -1013,8 +1013,22 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
- "percent-encoding",
+ "openrouter-keymaster-core",
  "predicates",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "time",
+ "wiremock",
+ "zeroize",
+]
+
+[[package]]
+name = "openrouter-keymaster-core"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
  "reqwest",
  "rustix",
  "serde",

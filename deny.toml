@@ -27,6 +27,11 @@ allow = ["CDLA-Permissive-2.0"]
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# A path dependency inside this workspace carries no version requirement, which
+# is what `wildcards` refuses everywhere else. The exemption is limited to
+# unpublished path dependencies, so the ban still covers every crate that comes
+# from a registry.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
