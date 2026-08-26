@@ -189,6 +189,7 @@ fn now() -> OffsetDateTime {
 
 /// Why a rotation could not be staged.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RotateError {
     /// A command-line value is not the kind of identifier it names.
     #[error("`{value}` is not usable: {message}")]

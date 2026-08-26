@@ -40,7 +40,7 @@ pub struct StatusReport {
 impl StatusReport {
     /// Describes the three read-only inputs.
     #[must_use]
-    pub fn new(config: &Config, state: &State, observed: &Snapshot) -> Self {
+    pub(crate) fn new(config: &Config, state: &State, observed: &Snapshot) -> Self {
         let index = Observed::build(observed);
         let mut report = Self {
             command: "status",

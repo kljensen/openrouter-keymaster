@@ -35,6 +35,7 @@ const FINGERPRINT_LENGTH: usize = 64;
 
 /// Why an identifier was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum IdError {
     /// A local address did not match the allowed shape.
     #[error(

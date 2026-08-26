@@ -773,6 +773,7 @@ fn now() -> OffsetDateTime {
 
 /// Why an apply did not converge the configuration.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ApplyError {
     /// An operation of unknown outcome stopped the run.
     #[error(

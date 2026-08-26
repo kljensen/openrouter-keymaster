@@ -288,31 +288,35 @@ that can be interrupted at any point.
 As of v0.1 these checks exist and run in `just check`. The decision above is
 unchanged; this section records where each part of it is enforced.
 
-- **Legal phase ordering and durability** — `src/state/` transition functions,
-  with unit tests in `src/state/tests.rs` and fault-injection coverage in
-  `tests/state.rs`. `KEYMASTER_STATE_FAULT` stops the production write path at a
-  named durable phase, so the crash cases are the real transaction being
-  interrupted rather than a reimplementation of it.
-- **Receiver outcome categories** — `src/receiver/mod.rs` defines definite
-  success, definite rejection, and ambiguous acknowledgement, with no retry
-  anywhere. `tests/receiver.rs` exercises both receivers through every ending
-  the protocol describes, using a compiled helper adapter rather than a shell
-  string.
-- **The journaled create transaction** — `src/ops/issuance.rs`, covered by
-  `tests/issuance.rs`: zero POSTs after a failed pre-create state write; exactly
-  one POST on connection loss, timeout, 500, and malformed success; hash
-  durability before any follow-up call; delivery only after verified
-  restrictions and assignment; and crash injection immediately before and after
-  every durable phase.
-- **Explicit recovery** — `src/ops/recover.rs`, covered by `tests/recover.rs`:
-  no path sends a second create or a second receiver call, and a found hash is
-  bound as a failed candidate rather than promoted as delivered.
-- **Staged rotation** — `src/ops/rotate.rs` and `src/ops/lifecycle.rs`, covered
-  by `tests/rotation.rs`: promotion happens only after verified delivery, and
-  the predecessor stays enabled and tracked until an explicit `retire`.
-- **No secret escapes any of it** — `tests/support/sentinel.rs` and the scans
-  every binary-level test runs over stdout, stderr, state, and the whole project
-  directory on the success and failure paths alike.
+- **Legal phase ordering and durability** — `crates/core/src/state/` transition
+  functions, with unit tests in `crates/core/src/state/tests.rs` and
+  fault-injection coverage in `crates/core/tests/state.rs`.
+  `KEYMASTER_STATE_FAULT` stops the production write path at a named durable
+  phase, so the crash cases are the real transaction being interrupted rather
+  than a reimplementation of it.
+- **Receiver outcome categories** — `crates/core/src/receiver/mod.rs` defines
+  definite success, definite rejection, and ambiguous acknowledgement, with no
+  retry anywhere. `crates/cli/tests/receiver.rs` exercises both receivers
+  through every ending the protocol describes, using a compiled helper adapter
+  rather than a shell string.
+- **The journaled create transaction** — `crates/core/src/ops/issuance.rs`,
+  covered by `crates/cli/tests/issuance.rs`: zero POSTs after a failed
+  pre-create state write; exactly one POST on connection loss, timeout, 500,
+  and malformed success; hash durability before any follow-up call; delivery
+  only after verified restrictions and assignment; and crash injection
+  immediately before and after every durable phase.
+- **Explicit recovery** — `crates/core/src/ops/recover.rs`, covered by
+  `crates/cli/tests/recover.rs`: no path sends a second create or a second
+  receiver call, and a found hash is bound as a failed candidate rather than
+  promoted as delivered.
+- **Staged rotation** — `crates/core/src/ops/rotate.rs` and
+  `crates/core/src/ops/lifecycle.rs`, covered by
+  `crates/cli/tests/rotation.rs`: promotion happens only after verified
+  delivery, and the predecessor stays enabled and tracked until an explicit
+  `retire`.
+- **No secret escapes any of it** — `crates/core/src/test_support/sentinel.rs`
+  and the scans every binary-level test runs over stdout, stderr, state, and
+  the whole project directory on the success and failure paths alike.
 
 The one thing these checks cannot cover is whether the real API behaves as
 assumed. [`docs/live-tests.md`](../live-tests.md) describes the opt-in suite for

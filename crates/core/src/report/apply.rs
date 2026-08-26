@@ -136,42 +136,42 @@ pub struct ActionOutcome {
 impl ActionOutcome {
     /// A write that was made.
     #[must_use]
-    pub fn applied(detail: impl Into<String>) -> Self {
+    pub(crate) fn applied(detail: impl Into<String>) -> Self {
         Self::new(Status::Applied, Some(detail.into()))
     }
 
     /// A write apply deliberately did not make.
     #[must_use]
-    pub fn skipped(detail: impl Into<String>) -> Self {
+    pub(crate) fn skipped(detail: impl Into<String>) -> Self {
         Self::new(Status::Skipped, Some(detail.into()))
     }
 
     /// A write that was attempted and failed.
     #[must_use]
-    pub fn failed(detail: impl Into<String>) -> Self {
+    pub(crate) fn failed(detail: impl Into<String>) -> Self {
         Self::new(Status::Failed, Some(detail.into()))
     }
 
     /// A write that never got its turn.
     #[must_use]
-    pub fn not_attempted(detail: impl Into<String>) -> Self {
+    pub(crate) fn not_attempted(detail: impl Into<String>) -> Self {
         Self::new(Status::NotAttempted, Some(detail.into()))
     }
 
     /// A write the planner held back until an operator resolves something.
     #[must_use]
-    pub fn held_back(detail: impl Into<String>) -> Self {
+    pub(crate) fn held_back(detail: impl Into<String>) -> Self {
         Self::new(Status::HeldBack, Some(detail.into()))
     }
 
     /// Something the plan reports and apply never touches.
     #[must_use]
-    pub fn reported() -> Self {
+    pub(crate) fn reported() -> Self {
         Self::new(Status::Reported, None)
     }
 
     /// Records what the verification read found about this action.
-    pub fn record_verification(&mut self, converged: bool) {
+    pub(crate) fn record_verification(&mut self, converged: bool) {
         self.verified = Some(converged);
     }
 
@@ -255,7 +255,7 @@ impl ApplyReport {
     /// Panics if `outcomes` is shorter than the plan, which would mean apply
     /// lost track of an action it was given.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         plan: &Plan,
         outcomes: &[ActionOutcome],
         verification_failure: Option<String>,
@@ -318,7 +318,7 @@ impl ApplyReport {
     /// Apply completes a delivered operation's promotion under its lock, before
     /// the plan exists, so no action can carry it. It still has to be reported:
     /// the run changed what the address owns.
-    pub fn note(&mut self, note: Option<String>) {
+    pub(crate) fn note(&mut self, note: Option<String>) {
         if let Some(note) = note {
             self.warnings.insert(0, note);
         }

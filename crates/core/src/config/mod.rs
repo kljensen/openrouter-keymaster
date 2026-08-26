@@ -16,7 +16,7 @@
 //!
 //! Nothing here accepts credential plaintext. Unknown fields are rejected
 //! outright, every string is checked against
-//! [`crate::redaction::looks_like_credential`], and no error message repeats a
+//! `crate::redaction::looks_like_credential`, and no error message repeats a
 //! value read from the file.
 
 mod validate;
@@ -398,6 +398,7 @@ impl fmt::Display for Problem {
 
 /// Why a configuration could not be used.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     /// The configuration file could not be read.
     #[error("cannot read {}: {message}", path.display())]

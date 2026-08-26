@@ -49,7 +49,7 @@ pub struct ImportReport {
 impl ImportReport {
     /// Describes an imported API key.
     #[must_use]
-    pub fn key(
+    pub(crate) fn key(
         address: &Address,
         hash: &KeyHash,
         origin: Origin,
@@ -70,7 +70,7 @@ impl ImportReport {
 
     /// Describes an imported guardrail.
     #[must_use]
-    pub fn guardrail(
+    pub(crate) fn guardrail(
         address: &Address,
         id: &Uuid,
         origin: Origin,

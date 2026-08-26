@@ -81,6 +81,27 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
   `cargo install --path crates/cli` produces the same program. Third step of
   [ADR-0003](docs/adr/0003-core-library-split.md).
 
+- The core crate's public surface is curated, and it is a compatibility
+  contract. `pub` is now what `ops` exposes — `Context`, `Paths`, `Options`,
+  `ManagementKey`, `Outcome`, the reports, `PlanFingerprint`, the identifiers,
+  and the errors — plus what a host needs to *read* configuration and state:
+  `Config` and everything reachable from it, and `StateFile::read` with `State`
+  and everything reachable from it. State mutation — the lock, the transitions,
+  and the write path — is `pub(crate)`, so a key's lifecycle moves only through
+  an operation that journals it. The HTTP client, the OpenRouter resource
+  layer, the planner, the receivers, and redaction are `pub(crate)` too; the
+  handful of items a host still needs from them (`ApiError`,
+  `MANAGEMENT_KEY_VAR`, `PRODUCTION_BASE_URL`, `REJECTED_EXIT_CODE`, and the
+  new `Options::check_base_url`) are re-exported where they are used.
+  [`docs/compatibility.md`](docs/compatibility.md) now names the Rust API as a
+  0.x contract beside the CLI, the JSON documents, and the configuration file,
+  and says what an additive change is and what breaks. Every public error enum
+  is `#[non_exhaustive]`, so a new error variant stays additive; every other
+  public enum is exhaustive on purpose, so a host is told at compile time when
+  there is a new case to handle. `tests/public_api.rs`
+  compiles against that surface and nothing else. Last step of
+  [ADR-0003](docs/adr/0003-core-library-split.md), which is now Accepted.
+
 - `apply` checks the management credential before it promotes a `delivered`
   operation, so an apply with no credential now writes nothing at all. It used
   to complete that local promotion — a state write — and only then fail with

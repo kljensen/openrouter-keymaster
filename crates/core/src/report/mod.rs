@@ -12,8 +12,8 @@
 //! name, a description, a slug — which nothing has checked, so every one of
 //! those goes through [`scrubbed`] on its way into a DTO.
 //!
-//! Every DTO implements both `Serialize` and `Display`, which is what
-//! [`crate::output::Renderer`] requires: neither format can be forgotten.
+//! Every DTO implements both `Serialize` and `Display`, which is what the
+//! CLI's renderer requires: neither format can be forgotten.
 //! Rendering is deterministic — no clock is read, and every collection is
 //! either already ordered by the planner or ordered here — so two runs over
 //! the same three inputs produce byte-identical output.
@@ -42,9 +42,10 @@ pub use lifecycle::{
     Predecessor, Released, RetireReport, RotateReport,
 };
 pub use plan::PlanReport;
+pub(crate) use recover::created_near;
 pub use recover::{
     CandidateReport, InspectReport, ReplaceReport, ResolveReport, RetainedReport, Retired,
-    Successor, created_near,
+    Successor,
 };
 pub use status::StatusReport;
 

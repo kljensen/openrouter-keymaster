@@ -54,7 +54,7 @@ pub struct OperationReport {
 impl OperationReport {
     /// Describes one journaled operation.
     #[must_use]
-    pub fn new(operation: &PendingOperation) -> Self {
+    pub(crate) fn new(operation: &PendingOperation) -> Self {
         Self {
             id: operation.id.as_str().to_owned(),
             phase: operation.phase.as_str(),
@@ -126,7 +126,7 @@ pub struct CandidateReport {
 impl CandidateReport {
     /// Describes one candidate and why it is listed.
     #[must_use]
-    pub fn new(key: &ObservedKey, matched_on: Vec<&'static str>) -> Self {
+    pub(crate) fn new(key: &ObservedKey, matched_on: Vec<&'static str>) -> Self {
         Self {
             hash: key.hash.as_str().to_owned(),
             name: scrubbed(&key.name),
@@ -166,7 +166,7 @@ pub struct RetainedReport {
 impl RetainedReport {
     /// Describes one retained hash.
     #[must_use]
-    pub fn new(hash: &KeyHash, generation: u32, status: RetainedStatus) -> Self {
+    pub(crate) fn new(hash: &KeyHash, generation: u32, status: RetainedStatus) -> Self {
         Self {
             hash: hash.as_str().to_owned(),
             generation,
@@ -181,7 +181,7 @@ impl RetainedReport {
     /// promote leaves the old hash still current, and `still_current` says so
     /// rather than inviting an operator to retire the key in use.
     #[must_use]
-    pub fn rotated(hash: &str, generation: u32, status: Option<RetainedStatus>) -> Self {
+    pub(crate) fn rotated(hash: &str, generation: u32, status: Option<RetainedStatus>) -> Self {
         Self {
             hash: hash.to_owned(),
             generation,
@@ -228,7 +228,7 @@ pub struct InspectReport {
 impl InspectReport {
     /// Reports an address with an unfinished operation.
     #[must_use]
-    pub fn found(
+    pub(crate) fn found(
         address: &Address,
         operation: &PendingOperation,
         candidates: Vec<CandidateReport>,
@@ -341,7 +341,7 @@ pub struct ResolveReport {
 impl ResolveReport {
     /// An attestation that no resource was created.
     #[must_use]
-    pub fn absence(address: &Address, operation: &PendingOperation) -> Self {
+    pub(crate) fn absence(address: &Address, operation: &PendingOperation) -> Self {
         Self {
             command: "recover resolve",
             address: address.as_str().to_owned(),
@@ -368,7 +368,7 @@ impl ResolveReport {
 
     /// A leaked hash bound as a failed candidate.
     #[must_use]
-    pub fn leaked(
+    pub(crate) fn leaked(
         address: &Address,
         operation: &PendingOperation,
         retained: RetainedReport,
@@ -479,7 +479,7 @@ pub struct ReplaceReport {
 impl ReplaceReport {
     /// Describes one replacement.
     #[must_use]
-    pub fn new(address: &Address, retired: Retired, issued: Successor) -> Self {
+    pub(crate) fn new(address: &Address, retired: Retired, issued: Successor) -> Self {
         Self {
             command: "recover replace",
             address: address.as_str().to_owned(),
@@ -577,7 +577,7 @@ impl fmt::Display for ReplaceReport {
 /// Deliberately generous. A candidate that is shown and dismissed costs an
 /// operator a glance; one that is not shown costs them a live key nobody owns.
 #[must_use]
-pub fn created_near(created_at: Option<OffsetDateTime>, attempt: OffsetDateTime) -> bool {
+pub(crate) fn created_near(created_at: Option<OffsetDateTime>, attempt: OffsetDateTime) -> bool {
     let Some(created_at) = created_at else {
         // OpenRouter documents the field as free-form text, so a value that did
         // not parse is unknown rather than distant.

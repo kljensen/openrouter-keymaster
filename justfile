@@ -40,6 +40,7 @@ live-sweep prefix:
 check: check-deny-version
     cargo fmt --all -- --check
     cargo check --locked --workspace --all-targets
+    cargo check --locked --package openrouter-keymaster-core --all-targets
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
     cargo test --locked --workspace --all-features
     cargo deny check advisories licenses bans sources

@@ -18,10 +18,12 @@ use serde::Serialize;
 use crate::cli::StateAction;
 use crate::cli::{Cli, Command, DeleteResource, ImportResource, RecoverAction, ResolveFinding};
 use crate::output::Renderer;
-use openrouter_keymaster_core::client::{ApiError, Client, ManagementKey, Options};
+use openrouter_keymaster_core::error::ApiError;
 use openrouter_keymaster_core::error::Error;
 use openrouter_keymaster_core::ops::recover::RecoverError;
-use openrouter_keymaster_core::ops::{self, Context, Finding, Outcome, Paths};
+use openrouter_keymaster_core::ops::{
+    self, Context, Finding, ManagementKey, Options, Outcome, Paths,
+};
 
 /// Calls one operation and renders what it returned.
 ///
@@ -149,7 +151,7 @@ fn offline(paths: Paths) -> Context {
 /// URL is refused when a client is built from it. Either way there is no
 /// endpoint, which is what the caller is asking about.
 fn usable(endpoint: Result<&Options, &ApiError>) -> bool {
-    endpoint.is_ok_and(|options| Client::check_base_url(&options.base_url).is_ok())
+    endpoint.is_ok_and(|options| options.check_base_url().is_ok())
 }
 
 /// The credential, when the environment holds one that can be sent.

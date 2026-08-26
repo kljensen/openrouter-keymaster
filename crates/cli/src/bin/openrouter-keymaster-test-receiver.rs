@@ -37,7 +37,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
 
-use openrouter_keymaster_core::receiver::command::REJECTED_EXIT_CODE;
+use openrouter_keymaster_core::REJECTED_EXIT_CODE;
 
 fn main() -> ExitCode {
     let argv: Vec<String> = env::args().collect();

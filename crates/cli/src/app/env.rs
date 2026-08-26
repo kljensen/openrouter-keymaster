@@ -10,10 +10,11 @@ use std::env::{self, VarError};
 
 use zeroize::Zeroizing;
 
-use openrouter_keymaster_core::client::{ApiError, MANAGEMENT_KEY_VAR, ManagementKey, Options};
+use openrouter_keymaster_core::error::ApiError;
+use openrouter_keymaster_core::ops::{MANAGEMENT_KEY_VAR, ManagementKey, Options};
 
 /// The environment variable that overrides
-/// [`openrouter_keymaster_core::client::PRODUCTION_BASE_URL`].
+/// [`openrouter_keymaster_core::ops::PRODUCTION_BASE_URL`].
 ///
 /// It exists so the compiled binary can be pointed at a local server — the
 /// integration tests run it against the harness in core's

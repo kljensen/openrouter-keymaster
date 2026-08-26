@@ -168,24 +168,26 @@ possible outcome for an operation that may have produced an unknown live key.
 As of v0.1 these checks exist and run in `just check`. The decision above is
 unchanged; this section records where each part of it is enforced.
 
-- **Versioned, locked, atomic, non-secret state** — `src/state/`, with
-  `src/state/tests.rs` and `tests/state.rs`. State carries identity and
-  lifecycle phases only, refuses credential-shaped input and unrecognized schema
-  versions, and holds its exclusive lock and atomic write under fault injection.
-- **The pure planner** — `src/plan/`, with the table-driven cases in
-  `src/plan/tests.rs`. Planning takes no clock, environment, filesystem,
-  network, or output; state-bound identity is resolved before any name; an
-  unbound desired object with a matching remote name yields `adoption_required`;
-  a config-removed binding yields `orphaned_binding`; a missing delivered key
-  yields `missing` rather than `create`; unknown remote resources are
-  `unmanaged` and never written to.
-- **Explicit import** — `src/ops/import.rs`, covered by `tests/import.rs`:
-  identity lookup only, never a name search, and the one-to-one binding rule
-  refused from both directions with state left untouched.
-- **Sequential apply** — `src/ops/apply.rs`, covered by `tests/apply.rs`: a
-  no-op plan sends no writes, `unmanaged` objects are never touched, and the
-  plan is recomputed after the lock is taken so nothing carries a stale
-  observation across that boundary.
+- **Versioned, locked, atomic, non-secret state** — `crates/core/src/state/`,
+  with `crates/core/src/state/tests.rs` and `crates/core/tests/state.rs`. State
+  carries identity and lifecycle phases only, refuses credential-shaped input
+  and unrecognized schema versions, and holds its exclusive lock and atomic
+  write under fault injection.
+- **The pure planner** — `crates/core/src/plan/`, with the table-driven cases
+  in `crates/core/src/plan/tests.rs`. Planning takes no clock, environment,
+  filesystem, network, or output; state-bound identity is resolved before any
+  name; an unbound desired object with a matching remote name yields
+  `adoption_required`; a config-removed binding yields `orphaned_binding`; a
+  missing delivered key yields `missing` rather than `create`; unknown remote
+  resources are `unmanaged` and never written to.
+- **Explicit import** — `crates/core/src/ops/import.rs`, covered by
+  `crates/cli/tests/import.rs`: identity lookup only, never a name search, and
+  the one-to-one binding rule refused from both directions with state left
+  untouched.
+- **Sequential apply** — `crates/core/src/ops/apply.rs`, covered by
+  `crates/cli/tests/apply.rs`: a no-op plan sends no writes, `unmanaged`
+  objects are never touched, and the plan is recomputed after the lock is taken
+  so nothing carries a stale observation across that boundary.
 
 The local single-writer model and the absence of remote locking are consequences
 this ADR accepts, not gaps these checks close;

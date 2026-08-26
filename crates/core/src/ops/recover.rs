@@ -459,6 +459,7 @@ fn now() -> OffsetDateTime {
 
 /// Why a recovery could not be performed.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RecoverError {
     /// A command-line value is not the kind of identifier it names.
     #[error("`{value}` is not usable: {message}")]

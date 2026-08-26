@@ -32,6 +32,11 @@ jobs:
 
       - run: cargo fmt --all -- --check
       - run: cargo check --locked --workspace --all-targets
+      # Core on its own, so the CLI's dev-dependency does not unify
+      # `test-support` in: this is the crate as a host compiles it, and
+      # crates/core/tests/public_api.rs only builds if the curated public
+      # surface is enough (ADR-0003).
+      - run: cargo check --locked --package openrouter-keymaster-core --all-targets
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-features
       - run: cargo deny check advisories licenses bans sources

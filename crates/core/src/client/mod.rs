@@ -101,6 +101,21 @@ impl Options {
             ..Self::default()
         }
     }
+
+    /// Whether [`Options::base_url`] is an endpoint a client can be built for.
+    ///
+    /// The same parser `Client::new` resolves requests with, so a caller can
+    /// tell an unusable endpoint from a usable one before it has a client — or
+    /// a credential to send anywhere.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError::Invariant`] unless the value parses as an absolute
+    /// HTTP or HTTPS URL that names a host and carries no credentials, query,
+    /// or fragment.
+    pub fn check_base_url(&self) -> Result<(), ApiError> {
+        Client::check_base_url(&self.base_url)
+    }
 }
 
 impl Default for Options {

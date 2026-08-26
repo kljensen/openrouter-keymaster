@@ -15,8 +15,11 @@
 //! its hash cannot write one to disk.
 //!
 //! Phase transitions implement ADR-0002 exactly. Every legal move is a
-//! [`Transition`]; there is no way to set a phase directly, so a caller cannot
+//! `Transition`; there is no way to set a phase directly, so a caller cannot
 //! record `delivered` for an operation that never reached `delivery_started`.
+//! Both the transitions and the write path are crate-private (ADR-0003, item
+//! 7): a host reads state with [`StateFile::read`] and changes it only by
+//! calling an operation in [`crate::ops`], which journals what it did.
 //!
 //! [`StateFile`] owns durability: an exclusive lock for writers, a temporary
 //! file, an fsync, and an atomic rename.
@@ -27,6 +30,27 @@
 //! corrupt rather than migrated. Refusing it is the safe answer — every field
 //! here identifies a live spending credential — and it keeps the invariants
 //! below unconditional instead of split across versions.
+
+/// Defines one entry point to changing state, with the visibility the build
+/// calls for: `pub(crate)` normally, `pub` under `test-support`.
+///
+/// ADR-0003, item 7: a host reads state with [`StateFile::read`] and moves a
+/// key's lifecycle only through `ops`, which journals what it did. Both crates'
+/// test suites build state fixtures by calling these directly, and a test
+/// binary is an external consumer, so the feature — which no shipped build
+/// turns on — opens them. Visibility is not a position a macro can expand into,
+/// so the two arms are cfg'd around one body written once here.
+macro_rules! mutation {
+    ($(#[$attribute:meta])* fn $name:ident $($rest:tt)*) => {
+        #[cfg(feature = "test-support")]
+        $(#[$attribute])*
+        pub fn $name $($rest)*
+
+        #[cfg(not(feature = "test-support"))]
+        $(#[$attribute])*
+        pub(crate) fn $name $($rest)*
+    };
+}
 
 mod persist;
 
@@ -42,7 +66,15 @@ use time::OffsetDateTime;
 
 use crate::ids::{Address, KeyHash, OperationId, ReceiverFingerprint, RemoteName, Uuid};
 
-pub use persist::{Fault, Faults, StateFile, StateLock};
+pub use persist::StateFile;
+
+// The write path. A host reads state with [`StateFile::read`]; taking the lock
+// and writing through it are reachable only from `ops`, which journals every
+// change (ADR-0003, item 7). `test-support` opens them to the test suites.
+#[cfg(feature = "test-support")]
+pub use persist::StateLock;
+#[cfg(not(feature = "test-support"))]
+pub(crate) use persist::StateLock;
 
 /// Names the durable phase a test asks a run to be interrupted at.
 ///
@@ -147,78 +179,93 @@ impl fmt::Display for Phase {
     }
 }
 
-/// A move from one phase to the next.
+/// The two values that drive a key's lifecycle forward.
 ///
-/// Each variant names the outcome that justifies it, so the ADR's rules are
-/// expressed in the type rather than checked at the call site. A phase cannot
-/// be assigned any other way.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Transition {
-    /// The create request's outcome could not be determined.
-    CreateAmbiguous,
-    /// A well-formed create response returned this hash.
-    Created {
-        /// The new key's immutable identity.
-        hash: KeyHash,
-    },
-    /// Restrictions and assignment were applied and verified.
-    Secured,
-    /// The receiver is about to be invoked, exactly once.
-    DeliveryStarted,
-    /// The receiver's acknowledgement was lost.
-    DeliveryAmbiguous,
-    /// The receiver definitely refused and committed nothing, so the operation
-    /// returns to `secured`: the key exists and is restricted, and its
-    /// plaintext is gone (ADR-0002).
-    DeliveryRejected,
-    /// The receiver definitely committed the secret.
-    Delivered,
-}
+/// They live in a private module so their visibility can follow the crate's:
+/// `pub` for the test suites that drive state directly, `pub(crate)`
+/// otherwise, which is what makes mutation reachable only through `ops`
+/// (ADR-0003, item 7).
+mod transition {
+    use super::{KeyHash, OperationId, Phase, ReceiverFingerprint, RemoteName, Uuid};
 
-impl Transition {
-    /// The phase this transition moves to.
-    const fn target(&self) -> Phase {
-        match self {
-            Self::CreateAmbiguous => Phase::CreateAmbiguous,
-            Self::Created { .. } => Phase::Created,
-            Self::Secured | Self::DeliveryRejected => Phase::Secured,
-            Self::DeliveryStarted => Phase::DeliveryStarted,
-            Self::DeliveryAmbiguous => Phase::DeliveryAmbiguous,
-            Self::Delivered => Phase::Delivered,
-        }
+    /// A move from one phase to the next.
+    ///
+    /// Each variant names the outcome that justifies it, so the ADR's rules are
+    /// expressed in the type rather than checked at the call site. A phase cannot
+    /// be assigned any other way.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Transition {
+        /// The create request's outcome could not be determined.
+        CreateAmbiguous,
+        /// A well-formed create response returned this hash.
+        Created {
+            /// The new key's immutable identity.
+            hash: KeyHash,
+        },
+        /// Restrictions and assignment were applied and verified.
+        Secured,
+        /// The receiver is about to be invoked, exactly once.
+        DeliveryStarted,
+        /// The receiver's acknowledgement was lost.
+        DeliveryAmbiguous,
+        /// The receiver definitely refused and committed nothing, so the operation
+        /// returns to `secured`: the key exists and is restricted, and its
+        /// plaintext is gone (ADR-0002).
+        DeliveryRejected,
+        /// The receiver definitely committed the secret.
+        Delivered,
     }
 
-    /// The one phase this transition may be applied from.
-    const fn requires(&self) -> Phase {
-        match self {
-            Self::CreateAmbiguous | Self::Created { .. } => Phase::CreateStarted,
-            Self::Secured => Phase::Created,
-            Self::DeliveryStarted => Phase::Secured,
-            Self::DeliveryAmbiguous | Self::DeliveryRejected | Self::Delivered => {
-                Phase::DeliveryStarted
+    impl Transition {
+        /// The phase this transition moves to.
+        pub(super) const fn target(&self) -> Phase {
+            match self {
+                Self::CreateAmbiguous => Phase::CreateAmbiguous,
+                Self::Created { .. } => Phase::Created,
+                Self::Secured | Self::DeliveryRejected => Phase::Secured,
+                Self::DeliveryStarted => Phase::DeliveryStarted,
+                Self::DeliveryAmbiguous => Phase::DeliveryAmbiguous,
+                Self::Delivered => Phase::Delivered,
+            }
+        }
+
+        /// The one phase this transition may be applied from.
+        pub(super) const fn requires(&self) -> Phase {
+            match self {
+                Self::CreateAmbiguous | Self::Created { .. } => Phase::CreateStarted,
+                Self::Secured => Phase::Created,
+                Self::DeliveryStarted => Phase::Secured,
+                Self::DeliveryAmbiguous | Self::DeliveryRejected | Self::Delivered => {
+                    Phase::DeliveryStarted
+                }
             }
         }
     }
+
+    /// What the journal records before a create request is sent.
+    ///
+    /// The intended name and workspace are here because the hash is not: if the
+    /// create response is lost, they are all an operator has to recognize the key
+    /// the request may have made (ADR-0002).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct BeginCreate {
+        /// Identifies this attempt, in the journal and to the receiver.
+        pub operation: OperationId,
+        /// The generation this attempt would become.
+        pub generation: u32,
+        /// The display name the key was to be created with.
+        pub name: RemoteName,
+        /// The workspace the key was to be created in, when one was configured.
+        pub workspace: Option<Uuid>,
+        /// Where the plaintext is destined, described without secret material.
+        pub receiver: ReceiverFingerprint,
+    }
 }
 
-/// What the journal records before a create request is sent.
-///
-/// The intended name and workspace are here because the hash is not: if the
-/// create response is lost, they are all an operator has to recognize the key
-/// the request may have made (ADR-0002).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BeginCreate {
-    /// Identifies this attempt, in the journal and to the receiver.
-    pub operation: OperationId,
-    /// The generation this attempt would become.
-    pub generation: u32,
-    /// The display name the key was to be created with.
-    pub name: RemoteName,
-    /// The workspace the key was to be created in, when one was configured.
-    pub workspace: Option<Uuid>,
-    /// Where the plaintext is destined, described without secret material.
-    pub receiver: ReceiverFingerprint,
-}
+#[cfg(feature = "test-support")]
+pub use transition::{BeginCreate, Transition};
+#[cfg(not(feature = "test-support"))]
+pub(crate) use transition::{BeginCreate, Transition};
 
 /// The key an address currently owns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -561,95 +608,97 @@ impl State {
             .map(|(address, _)| address)
     }
 
-    /// Binds an existing key hash to an address as its current key.
-    ///
-    /// This is what `import` records, and it makes no remote call. The caller
-    /// passes the generation the configuration asks for, not a counter of its
-    /// own: an operator rebuilding lost state (ADR-0001) imports a key whose
-    /// configuration is already at generation 3, and recording 1 would make
-    /// the next plan see a stale key and propose replacing a live credential.
-    ///
-    /// Repeating the same binding is a no-op; repeating it after the
-    /// configured generation rose records the higher one.
-    ///
-    /// The origin is always `imported`, and is not the caller's to choose. A
-    /// key Keymaster created is bound by [`State::promote_key`], which is the
-    /// only place that knows where the plaintext went; binding one here would
-    /// record a created key with no delivery destination, which is the one
-    /// shape the reader refuses.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BindError`] when the generation is zero or unavailable, when
-    /// the address already owns a different hash, when the hash already
-    /// belongs to another address or is one this address retains, or when the
-    /// address has an operation in progress.
-    pub fn bind_key(
-        &mut self,
-        address: &Address,
-        hash: KeyHash,
-        generation: u32,
-        at: OffsetDateTime,
-    ) -> Result<(), BindError> {
-        if generation == 0 {
-            return Err(BindError::GenerationInvalid {
-                address: address.clone(),
-            });
-        }
-        if let Some(owner) = self.address_owning(&hash)
-            && owner != address
-        {
-            return Err(BindError::HashOwnedElsewhere {
-                hash,
-                owner: owner.clone(),
-            });
-        }
-        self.check_bindable(address, &hash, generation)?;
-
-        // `check_bindable` has established that a current key, if there is
-        // one, is this same hash, so only its generation can move.
-        if let Some(current) = self
-            .keys
-            .get_mut(address)
-            .and_then(|binding| binding.current.as_mut())
-        {
-            current.generation = generation;
-            return Ok(());
-        }
-
-        // An address can hold retained hashes with nothing current — it still
-        // owns them, so binding must not drop them on the floor. The
-        // high-water mark comes with them: it is the record of keys this
-        // address has already spent generations on, and rebuilding the binding
-        // without it would release those numbers.
-        let (retained, floor) = self
-            .keys
-            .get_mut(address)
-            .map(|binding| {
-                (
-                    std::mem::take(&mut binding.retained),
-                    binding.generation_floor,
-                )
-            })
-            .unwrap_or_default();
-        self.keys.insert(
-            address.clone(),
-            KeyBinding {
-                origin: Origin::Imported,
-                current: Some(CurrentKey {
+    mutation! {
+        /// Binds an existing key hash to an address as its current key.
+        ///
+        /// This is what `import` records, and it makes no remote call. The caller
+        /// passes the generation the configuration asks for, not a counter of its
+        /// own: an operator rebuilding lost state (ADR-0001) imports a key whose
+        /// configuration is already at generation 3, and recording 1 would make
+        /// the next plan see a stale key and propose replacing a live credential.
+        ///
+        /// Repeating the same binding is a no-op; repeating it after the
+        /// configured generation rose records the higher one.
+        ///
+        /// The origin is always `imported`, and is not the caller's to choose. A
+        /// key Keymaster created is bound by [`State::promote_key`], which is the
+        /// only place that knows where the plaintext went; binding one here would
+        /// record a created key with no delivery destination, which is the one
+        /// shape the reader refuses.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`BindError`] when the generation is zero or unavailable, when
+        /// the address already owns a different hash, when the hash already
+        /// belongs to another address or is one this address retains, or when the
+        /// address has an operation in progress.
+        fn bind_key(
+            &mut self,
+            address: &Address,
+            hash: KeyHash,
+            generation: u32,
+            at: OffsetDateTime,
+        ) -> Result<(), BindError> {
+            if generation == 0 {
+                return Err(BindError::GenerationInvalid {
+                    address: address.clone(),
+                });
+            }
+            if let Some(owner) = self.address_owning(&hash)
+                && owner != address
+            {
+                return Err(BindError::HashOwnedElsewhere {
                     hash,
-                    generation,
-                    bound_at: at,
-                    // An imported key's plaintext was never Keymaster's to
-                    // deliver, so it records no destination (ADR-0001).
-                    receiver: None,
-                }),
-                pending: None,
-                retained,
-                generation_floor: floor,
-            },
-        );
-        Ok(())
+                    owner: owner.clone(),
+                });
+            }
+            self.check_bindable(address, &hash, generation)?;
+
+            // `check_bindable` has established that a current key, if there is
+            // one, is this same hash, so only its generation can move.
+            if let Some(current) = self
+                .keys
+                .get_mut(address)
+                .and_then(|binding| binding.current.as_mut())
+            {
+                current.generation = generation;
+                return Ok(());
+            }
+
+            // An address can hold retained hashes with nothing current — it still
+            // owns them, so binding must not drop them on the floor. The
+            // high-water mark comes with them: it is the record of keys this
+            // address has already spent generations on, and rebuilding the binding
+            // without it would release those numbers.
+            let (retained, floor) = self
+                .keys
+                .get_mut(address)
+                .map(|binding| {
+                    (
+                        std::mem::take(&mut binding.retained),
+                        binding.generation_floor,
+                    )
+                })
+                .unwrap_or_default();
+            self.keys.insert(
+                address.clone(),
+                KeyBinding {
+                    origin: Origin::Imported,
+                    current: Some(CurrentKey {
+                        hash,
+                        generation,
+                        bound_at: at,
+                        // An imported key's plaintext was never Keymaster's to
+                        // deliver, so it records no destination (ADR-0001).
+                        receiver: None,
+                    }),
+                    pending: None,
+                    retained,
+                    generation_floor: floor,
+                },
+            );
+            Ok(())
+        }
     }
 
     /// Whether `hash` may take `generation` at `address`.
@@ -708,609 +757,643 @@ impl State {
         Ok(())
     }
 
-    /// Binds a guardrail UUID to an address. Repeating it is a no-op.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BindError`] when the address or the UUID already belongs to
-    /// something else.
-    pub fn bind_guardrail(
-        &mut self,
-        address: &Address,
-        id: Uuid,
-        origin: Origin,
-        at: OffsetDateTime,
-    ) -> Result<(), BindError> {
-        if let Some((owner, _)) = self
-            .guardrails
-            .iter()
-            .find(|(owner, binding)| binding.id == id && *owner != address)
-        {
-            return Err(BindError::GuardrailOwnedElsewhere {
-                id,
-                owner: owner.clone(),
-            });
+    mutation! {
+        /// Binds a guardrail UUID to an address. Repeating it is a no-op.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`BindError`] when the address or the UUID already belongs to
+        /// something else.
+        fn bind_guardrail(
+            &mut self,
+            address: &Address,
+            id: Uuid,
+            origin: Origin,
+            at: OffsetDateTime,
+        ) -> Result<(), BindError> {
+            if let Some((owner, _)) = self
+                .guardrails
+                .iter()
+                .find(|(owner, binding)| binding.id == id && *owner != address)
+            {
+                return Err(BindError::GuardrailOwnedElsewhere {
+                    id,
+                    owner: owner.clone(),
+                });
+            }
+            if let Some(existing) = self.guardrails.get(address) {
+                return if existing.id == id {
+                    Ok(())
+                } else {
+                    Err(BindError::GuardrailBound {
+                        address: address.clone(),
+                        id: existing.id.clone(),
+                    })
+                };
+            }
+
+            self.guardrails.insert(
+                address.clone(),
+                GuardrailBinding {
+                    id,
+                    origin,
+                    bound_at: at,
+                },
+            );
+            Ok(())
         }
-        if let Some(existing) = self.guardrails.get(address) {
-            return if existing.id == id {
-                Ok(())
-            } else {
-                Err(BindError::GuardrailBound {
+    }
+
+    mutation! {
+        /// Binds a guardrail Keymaster has just created, over a binding to one
+        /// that is gone.
+        ///
+        /// [`State::bind_guardrail`] refuses to rebind an address, which is what
+        /// makes an import safe: an operator who names the wrong address is told,
+        /// rather than having a live guardrail quietly forgotten. Recreation is the
+        /// one case where replacing a binding is right, and it is not the caller's
+        /// judgement to make casually — the planner proposes a guardrail create
+        /// only when the bound UUID is absent from a complete snapshot *and* no
+        /// remote guardrail carries the configured name, so the identity being
+        /// overwritten is one that no longer exists.
+        ///
+        /// The origin becomes `created`, because the guardrail it now names is one
+        /// Keymaster created.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`BindError::GuardrailOwnedElsewhere`] when another address
+        /// already owns the new UUID.
+        fn replace_guardrail(
+            &mut self,
+            address: &Address,
+            id: Uuid,
+            at: OffsetDateTime,
+        ) -> Result<(), BindError> {
+            if let Some((owner, _)) = self
+                .guardrails
+                .iter()
+                .find(|(owner, binding)| binding.id == id && *owner != address)
+            {
+                return Err(BindError::GuardrailOwnedElsewhere {
+                    id,
+                    owner: owner.clone(),
+                });
+            }
+            self.guardrails.insert(
+                address.clone(),
+                GuardrailBinding {
+                    id,
+                    origin: Origin::Created,
+                    bound_at: at,
+                },
+            );
+            Ok(())
+        }
+    }
+
+    mutation! {
+        /// Journals the intent to create a key, before any request is sent.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TransitionError`] when this or any other address already has
+        /// an operation in progress, or when the requested generation does not
+        /// exceed the highest the address records.
+        fn begin_create(
+            &mut self,
+            address: &Address,
+            begin: BeginCreate,
+            at: OffsetDateTime,
+        ) -> Result<(), TransitionError> {
+            self.check_nothing_pending(address)?;
+
+            let recorded = self
+                .keys
+                .get(address)
+                .map_or(0, KeyBinding::highest_generation);
+            if begin.generation <= recorded {
+                return Err(TransitionError::GenerationNotMonotonic {
                     address: address.clone(),
-                    id: existing.id.clone(),
-                })
-            };
-        }
+                    recorded,
+                    requested: begin.generation,
+                });
+            }
 
-        self.guardrails.insert(
-            address.clone(),
-            GuardrailBinding {
-                id,
-                origin,
-                bound_at: at,
-            },
-        );
-        Ok(())
-    }
-
-    /// Binds a guardrail Keymaster has just created, over a binding to one
-    /// that is gone.
-    ///
-    /// [`State::bind_guardrail`] refuses to rebind an address, which is what
-    /// makes an import safe: an operator who names the wrong address is told,
-    /// rather than having a live guardrail quietly forgotten. Recreation is the
-    /// one case where replacing a binding is right, and it is not the caller's
-    /// judgement to make casually — the planner proposes a guardrail create
-    /// only when the bound UUID is absent from a complete snapshot *and* no
-    /// remote guardrail carries the configured name, so the identity being
-    /// overwritten is one that no longer exists.
-    ///
-    /// The origin becomes `created`, because the guardrail it now names is one
-    /// Keymaster created.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BindError::GuardrailOwnedElsewhere`] when another address
-    /// already owns the new UUID.
-    pub fn replace_guardrail(
-        &mut self,
-        address: &Address,
-        id: Uuid,
-        at: OffsetDateTime,
-    ) -> Result<(), BindError> {
-        if let Some((owner, _)) = self
-            .guardrails
-            .iter()
-            .find(|(owner, binding)| binding.id == id && *owner != address)
-        {
-            return Err(BindError::GuardrailOwnedElsewhere {
-                id,
-                owner: owner.clone(),
-            });
-        }
-        self.guardrails.insert(
-            address.clone(),
-            GuardrailBinding {
-                id,
+            // Every check is done, so the entry below is the only mutation: a
+            // refused create must not leave an empty binding behind.
+            let binding = self.keys.entry(address.clone()).or_insert(KeyBinding {
                 origin: Origin::Created,
-                bound_at: at,
-            },
-        );
-        Ok(())
+                current: None,
+                pending: None,
+                retained: Vec::new(),
+                generation_floor: 0,
+            });
+            binding.pending = Some(PendingOperation {
+                id: begin.operation,
+                generation: begin.generation,
+                phase: Phase::CreateStarted,
+                phase_at: at,
+                name: begin.name,
+                workspace: begin.workspace,
+                hash: None,
+                delivery_rejected_at: None,
+                receiver: begin.receiver,
+            });
+            Ok(())
+        }
     }
 
-    /// Journals the intent to create a key, before any request is sent.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionError`] when this or any other address already has
-    /// an operation in progress, or when the requested generation does not
-    /// exceed the highest the address records.
-    pub fn begin_create(
-        &mut self,
-        address: &Address,
-        begin: BeginCreate,
-        at: OffsetDateTime,
-    ) -> Result<(), TransitionError> {
-        self.check_nothing_pending(address)?;
+    mutation! {
+        /// Moves a pending operation to its next phase.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TransitionError`] when there is no pending operation, when
+        /// the transition is not legal from the current phase, or when the hash a
+        /// create returned already belongs to another address.
+        fn advance_key(
+            &mut self,
+            address: &Address,
+            transition: Transition,
+            at: OffsetDateTime,
+        ) -> Result<(), TransitionError> {
+            let from = self.pending_phase(address)?;
+            if from != transition.requires() {
+                return Err(TransitionError::IllegalPhase {
+                    address: address.clone(),
+                    from,
+                    to: transition.target(),
+                });
+            }
+            if let Transition::Created { hash } = &transition
+                && let Some(owner) = self.address_owning(hash)
+            {
+                return Err(TransitionError::HashOwnedElsewhere {
+                    hash: hash.clone(),
+                    owner: owner.clone(),
+                });
+            }
 
-        let recorded = self
-            .keys
-            .get(address)
-            .map_or(0, KeyBinding::highest_generation);
-        if begin.generation <= recorded {
-            return Err(TransitionError::GenerationNotMonotonic {
-                address: address.clone(),
-                recorded,
-                requested: begin.generation,
-            });
+            let Some(pending) = self.keys.get_mut(address).and_then(|b| b.pending.as_mut()) else {
+                return Err(TransitionError::NotPending {
+                    address: address.clone(),
+                });
+            };
+            // A definite rejection returns the operation to `secured`, which is
+            // the phase delivery starts from — so without this the type would
+            // happily allow a second invocation of a receiver that already
+            // refused, for a key whose plaintext no longer exists.
+            if matches!(transition, Transition::DeliveryStarted)
+                && pending.delivery_rejected_at.is_some()
+            {
+                return Err(TransitionError::DeliveryRefused {
+                    address: address.clone(),
+                });
+            }
+
+            pending.phase = transition.target();
+            if let Transition::Created { hash } = transition {
+                pending.hash = Some(hash);
+            } else if matches!(transition, Transition::DeliveryRejected) {
+                pending.delivery_rejected_at = Some(at);
+            }
+            pending.phase_at = at;
+            Ok(())
         }
-
-        // Every check is done, so the entry below is the only mutation: a
-        // refused create must not leave an empty binding behind.
-        let binding = self.keys.entry(address.clone()).or_insert(KeyBinding {
-            origin: Origin::Created,
-            current: None,
-            pending: None,
-            retained: Vec::new(),
-            generation_floor: 0,
-        });
-        binding.pending = Some(PendingOperation {
-            id: begin.operation,
-            generation: begin.generation,
-            phase: Phase::CreateStarted,
-            phase_at: at,
-            name: begin.name,
-            workspace: begin.workspace,
-            hash: None,
-            delivery_rejected_at: None,
-            receiver: begin.receiver,
-        });
-        Ok(())
     }
 
-    /// Moves a pending operation to its next phase.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionError`] when there is no pending operation, when
-    /// the transition is not legal from the current phase, or when the hash a
-    /// create returned already belongs to another address.
-    pub fn advance_key(
-        &mut self,
-        address: &Address,
-        transition: Transition,
-        at: OffsetDateTime,
-    ) -> Result<(), TransitionError> {
-        let from = self.pending_phase(address)?;
-        if from != transition.requires() {
-            return Err(TransitionError::IllegalPhase {
-                address: address.clone(),
-                from,
-                to: transition.target(),
-            });
+    mutation! {
+        /// Clears a pending create that the server definitely rejected.
+        ///
+        /// Only legal from `create_started`: a well-formed 4xx says the request
+        /// was seen and declined, so no key exists (ADR-0002).
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TransitionError`] when there is no pending operation, or when
+        /// it has already passed `create_started`.
+        fn abandon_create(&mut self, address: &Address) -> Result<(), TransitionError> {
+            let from = self.pending_phase(address)?;
+            if from != Phase::CreateStarted {
+                return Err(TransitionError::CannotAbandon {
+                    address: address.clone(),
+                    phase: from,
+                });
+            }
+            if let Some(binding) = self.keys.get_mut(address) {
+                binding.pending = None;
+            }
+            Ok(())
         }
-        if let Transition::Created { hash } = &transition
-            && let Some(owner) = self.address_owning(hash)
-        {
-            return Err(TransitionError::HashOwnedElsewhere {
-                hash: hash.clone(),
-                owner: owner.clone(),
-            });
-        }
-
-        let Some(pending) = self.keys.get_mut(address).and_then(|b| b.pending.as_mut()) else {
-            return Err(TransitionError::NotPending {
-                address: address.clone(),
-            });
-        };
-        // A definite rejection returns the operation to `secured`, which is
-        // the phase delivery starts from — so without this the type would
-        // happily allow a second invocation of a receiver that already
-        // refused, for a key whose plaintext no longer exists.
-        if matches!(transition, Transition::DeliveryStarted)
-            && pending.delivery_rejected_at.is_some()
-        {
-            return Err(TransitionError::DeliveryRefused {
-                address: address.clone(),
-            });
-        }
-
-        pending.phase = transition.target();
-        if let Transition::Created { hash } = transition {
-            pending.hash = Some(hash);
-        } else if matches!(transition, Transition::DeliveryRejected) {
-            pending.delivery_rejected_at = Some(at);
-        }
-        pending.phase_at = at;
-        Ok(())
     }
 
-    /// Clears a pending create that the server definitely rejected.
-    ///
-    /// Only legal from `create_started`: a well-formed 4xx says the request
-    /// was seen and declined, so no key exists (ADR-0002).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionError`] when there is no pending operation, or when
-    /// it has already passed `create_started`.
-    pub fn abandon_create(&mut self, address: &Address) -> Result<(), TransitionError> {
-        let from = self.pending_phase(address)?;
-        if from != Phase::CreateStarted {
-            return Err(TransitionError::CannotAbandon {
-                address: address.clone(),
-                phase: from,
-            });
+    mutation! {
+        /// Clears a create after an operator attested that no key was made.
+        ///
+        /// Legal only from `create_started` and `create_ambiguous` — the two phases
+        /// in which the journal does not know whether a key exists. Past them the
+        /// hash is recorded, so there is nothing to attest and forgetting the
+        /// operation would forget a live credential.
+        ///
+        /// Separate from [`State::abandon_create`], which the same phase would
+        /// allow, because the authority is different and that difference is the
+        /// whole point of the command that calls this. A definite 4xx is
+        /// OpenRouter saying it declined; this is an operator saying they looked.
+        /// Keymaster cannot check the second one, so it must be spelled out at the
+        /// call site rather than borrowed from a function that means the first.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TransitionError`] when there is no pending operation, or when
+        /// it has passed the phases where a key's existence is still unknown.
+        fn clear_ambiguous_create(
+            &mut self,
+            address: &Address,
+        ) -> Result<(), TransitionError> {
+            let from = self.pending_phase(address)?;
+            if !matches!(from, Phase::CreateStarted | Phase::CreateAmbiguous) {
+                return Err(TransitionError::NothingToAttest {
+                    address: address.clone(),
+                    phase: from,
+                });
+            }
+            if let Some(binding) = self.keys.get_mut(address) {
+                binding.pending = None;
+            }
+            Ok(())
         }
-        if let Some(binding) = self.keys.get_mut(address) {
-            binding.pending = None;
-        }
-        Ok(())
     }
 
-    /// Clears a create after an operator attested that no key was made.
-    ///
-    /// Legal only from `create_started` and `create_ambiguous` — the two phases
-    /// in which the journal does not know whether a key exists. Past them the
-    /// hash is recorded, so there is nothing to attest and forgetting the
-    /// operation would forget a live credential.
-    ///
-    /// Separate from [`State::abandon_create`], which the same phase would
-    /// allow, because the authority is different and that difference is the
-    /// whole point of the command that calls this. A definite 4xx is
-    /// OpenRouter saying it declined; this is an operator saying they looked.
-    /// Keymaster cannot check the second one, so it must be spelled out at the
-    /// call site rather than borrowed from a function that means the first.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionError`] when there is no pending operation, or when
-    /// it has passed the phases where a key's existence is still unknown.
-    pub fn clear_ambiguous_create(&mut self, address: &Address) -> Result<(), TransitionError> {
-        let from = self.pending_phase(address)?;
-        if !matches!(from, Phase::CreateStarted | Phase::CreateAmbiguous) {
-            return Err(TransitionError::NothingToAttest {
-                address: address.clone(),
-                phase: from,
-            });
-        }
-        if let Some(binding) = self.keys.get_mut(address) {
-            binding.pending = None;
-        }
-        Ok(())
-    }
+    mutation! {
+        /// Binds the key an operator found as the leaked result of an ambiguous
+        /// create, and closes the operation.
+        ///
+        /// The hash is retained as a [`RetainedStatus::FailedCandidate`], never
+        /// promoted: OpenRouter disclosed this key's plaintext once, in a response
+        /// nobody received, so the key exists, can never be used, and is kept only
+        /// so it can be disabled and deleted (ADR-0002).
+        ///
+        /// Legal from the same two phases as [`State::clear_ambiguous_create`]. Past
+        /// them the operation already carries a hash, and binding a second one
+        /// would claim the address owns two keys from one attempt.
+        ///
+        /// Returns the retained entry it recorded.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TransitionError`] when there is no pending operation, when it
+        /// has passed the phases where the hash is still unknown, or when the hash
+        /// already belongs to some address.
+        fn retain_leaked_candidate(
+            &mut self,
+            address: &Address,
+            hash: KeyHash,
+            at: OffsetDateTime,
+        ) -> Result<RetainedKey, TransitionError> {
+            let from = self.pending_phase(address)?;
+            if !matches!(from, Phase::CreateStarted | Phase::CreateAmbiguous) {
+                return Err(TransitionError::NothingToAttest {
+                    address: address.clone(),
+                    phase: from,
+                });
+            }
+            if let Some(owner) = self.address_owning(&hash) {
+                return Err(TransitionError::HashOwnedElsewhere {
+                    hash,
+                    owner: owner.clone(),
+                });
+            }
 
-    /// Binds the key an operator found as the leaked result of an ambiguous
-    /// create, and closes the operation.
-    ///
-    /// The hash is retained as a [`RetainedStatus::FailedCandidate`], never
-    /// promoted: OpenRouter disclosed this key's plaintext once, in a response
-    /// nobody received, so the key exists, can never be used, and is kept only
-    /// so it can be disabled and deleted (ADR-0002).
-    ///
-    /// Legal from the same two phases as [`State::clear_ambiguous_create`]. Past
-    /// them the operation already carries a hash, and binding a second one
-    /// would claim the address owns two keys from one attempt.
-    ///
-    /// Returns the retained entry it recorded.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionError`] when there is no pending operation, when it
-    /// has passed the phases where the hash is still unknown, or when the hash
-    /// already belongs to some address.
-    pub fn retain_leaked_candidate(
-        &mut self,
-        address: &Address,
-        hash: KeyHash,
-        at: OffsetDateTime,
-    ) -> Result<RetainedKey, TransitionError> {
-        let from = self.pending_phase(address)?;
-        if !matches!(from, Phase::CreateStarted | Phase::CreateAmbiguous) {
-            return Err(TransitionError::NothingToAttest {
-                address: address.clone(),
-                phase: from,
-            });
-        }
-        if let Some(owner) = self.address_owning(&hash) {
-            return Err(TransitionError::HashOwnedElsewhere {
+            let Some(binding) = self.keys.get_mut(address) else {
+                return Err(TransitionError::NotPending {
+                    address: address.clone(),
+                });
+            };
+            let Some(pending) = binding.pending.take() else {
+                return Err(TransitionError::NotPending {
+                    address: address.clone(),
+                });
+            };
+            let retained = RetainedKey {
                 hash,
-                owner: owner.clone(),
-            });
-        }
-
-        let Some(binding) = self.keys.get_mut(address) else {
-            return Err(TransitionError::NotPending {
-                address: address.clone(),
-            });
-        };
-        let Some(pending) = binding.pending.take() else {
-            return Err(TransitionError::NotPending {
-                address: address.clone(),
-            });
-        };
-        let retained = RetainedKey {
-            hash,
-            generation: pending.generation,
-            status: RetainedStatus::FailedCandidate,
-            recorded_at: at,
-        };
-        binding.retained.push(retained.clone());
-        Ok(retained)
-    }
-
-    /// Closes an operation whose key exists and can never be delivered, keeping
-    /// the hash tracked.
-    ///
-    /// This is what stands between a dead operation and its replacement. The
-    /// key is real — the create response arrived and its hash is journaled —
-    /// and its plaintext is gone, so nothing can rescue it; but forgetting it
-    /// would leave a live budgeted credential nothing names. It moves to
-    /// [`RetainedStatus::FailedCandidate`], where an explicit `retire` or
-    /// `delete` can still reach it, and the address is free to stage a
-    /// successor.
-    ///
-    /// Legal from every phase that carries a hash except `delivered`, which is
-    /// not dead at all: [`State::promote_key`] finishes that one.
-    ///
-    /// Returns the retained entry, so the caller can attempt to disable it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionError`] when there is no pending operation, or when
-    /// its phase is not one this closes.
-    pub fn retire_candidate(
-        &mut self,
-        address: &Address,
-        at: OffsetDateTime,
-    ) -> Result<RetainedKey, TransitionError> {
-        let from = self.pending_phase(address)?;
-        if !matches!(
-            from,
-            Phase::Created | Phase::Secured | Phase::DeliveryStarted | Phase::DeliveryAmbiguous
-        ) {
-            return Err(TransitionError::CannotRetireCandidate {
-                address: address.clone(),
-                phase: from,
-            });
-        }
-
-        let Some(binding) = self.keys.get_mut(address) else {
-            return Err(TransitionError::NotPending {
-                address: address.clone(),
-            });
-        };
-        let Some(pending) = binding.pending.take() else {
-            return Err(TransitionError::NotPending {
-                address: address.clone(),
-            });
-        };
-        // The four phases above all require a hash, so this is unreachable;
-        // restoring the operation is the honest answer if it ever is reached,
-        // because dropping it would forget an attempt nobody has resolved.
-        let Some(hash) = pending.hash.clone() else {
-            binding.pending = Some(pending);
-            return Err(TransitionError::CannotRetireCandidate {
-                address: address.clone(),
-                phase: from,
-            });
-        };
-        let retained = RetainedKey {
-            hash,
-            generation: pending.generation,
-            status: RetainedStatus::FailedCandidate,
-            recorded_at: at,
-        };
-        binding.retained.push(retained.clone());
-        Ok(retained)
-    }
-
-    /// Promotes a delivered key to current.
-    ///
-    /// Any previous current hash moves to `awaiting_retirement`; rotation
-    /// never disables a predecessor.
-    ///
-    /// The binding's origin becomes `created`, because the key it now names is
-    /// one Keymaster created and delivered. Rotating a key an operator
-    /// imported replaces it with Keymaster's own; the imported hash stays
-    /// tracked as the predecessor, and the origin describes what is current.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionError`] when there is no pending operation or it
-    /// has not reached `delivered`.
-    pub fn promote_key(
-        &mut self,
-        address: &Address,
-        at: OffsetDateTime,
-    ) -> Result<(), TransitionError> {
-        let from = self.pending_phase(address)?;
-        if from != Phase::Delivered {
-            return Err(TransitionError::CannotPromote {
-                address: address.clone(),
-                phase: from,
-            });
-        }
-
-        let Some(binding) = self.keys.get_mut(address) else {
-            return Err(TransitionError::NotPending {
-                address: address.clone(),
-            });
-        };
-        let Some(pending) = binding.pending.take() else {
-            return Err(TransitionError::NotPending {
-                address: address.clone(),
-            });
-        };
-        let Some(hash) = pending.hash else {
-            return Err(TransitionError::CannotPromote {
-                address: address.clone(),
-                phase: from,
-            });
-        };
-
-        if let Some(previous) = binding.current.take() {
-            binding.retained.push(RetainedKey {
-                hash: previous.hash,
-                generation: previous.generation,
-                status: RetainedStatus::AwaitingRetirement,
+                generation: pending.generation,
+                status: RetainedStatus::FailedCandidate,
                 recorded_at: at,
-            });
+            };
+            binding.retained.push(retained.clone());
+            Ok(retained)
         }
-        binding.origin = Origin::Created;
-        binding.current = Some(CurrentKey {
-            hash,
-            generation: pending.generation,
-            bound_at: at,
-            receiver: Some(pending.receiver),
-        });
-        Ok(())
     }
 
-    /// Takes the key an address uses out of service, keeping the hash tracked.
-    ///
-    /// The one transition that empties a binding's current slot without putting
-    /// another key in it, and the whole of what `openrouter-keymaster
-    /// decommission` writes: rotation *replaces* a credential, and this *ends*
-    /// one. The address stays bound and keeps everything else it holds — its
-    /// other retained hashes and its generation floor — so a key created here
-    /// later still takes a higher number than this one had.
-    ///
-    /// `status` is the caller's finding about the remote key, established by a
-    /// read: [`RetainedStatus::Retired`] once one proved the key is out of
-    /// service. Nothing here talks to OpenRouter, so nothing here can establish
-    /// that.
-    ///
-    /// Returns the retained entry it recorded.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionError::AlreadyPending`] while an operation is in
-    /// progress at the address, whose successor would otherwise be promoted
-    /// into the slot this empties; and [`TransitionError::HashNotCurrent`] when
-    /// the hash named is not the one the address is using. The hash is required
-    /// rather than implied because this is the one ending that acts on a
-    /// working credential.
-    pub fn decommission_current(
-        &mut self,
-        address: &Address,
-        hash: &KeyHash,
-        status: RetainedStatus,
-        at: OffsetDateTime,
-    ) -> Result<RetainedKey, TransitionError> {
-        let not_current = || TransitionError::HashNotCurrent {
-            address: address.clone(),
-            hash: hash.clone(),
-        };
+    mutation! {
+        /// Closes an operation whose key exists and can never be delivered, keeping
+        /// the hash tracked.
+        ///
+        /// This is what stands between a dead operation and its replacement. The
+        /// key is real — the create response arrived and its hash is journaled —
+        /// and its plaintext is gone, so nothing can rescue it; but forgetting it
+        /// would leave a live budgeted credential nothing names. It moves to
+        /// [`RetainedStatus::FailedCandidate`], where an explicit `retire` or
+        /// `delete` can still reach it, and the address is free to stage a
+        /// successor.
+        ///
+        /// Legal from every phase that carries a hash except `delivered`, which is
+        /// not dead at all: [`State::promote_key`] finishes that one.
+        ///
+        /// Returns the retained entry, so the caller can attempt to disable it.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TransitionError`] when there is no pending operation, or when
+        /// its phase is not one this closes.
+        fn retire_candidate(
+            &mut self,
+            address: &Address,
+            at: OffsetDateTime,
+        ) -> Result<RetainedKey, TransitionError> {
+            let from = self.pending_phase(address)?;
+            if !matches!(
+                from,
+                Phase::Created | Phase::Secured | Phase::DeliveryStarted | Phase::DeliveryAmbiguous
+            ) {
+                return Err(TransitionError::CannotRetireCandidate {
+                    address: address.clone(),
+                    phase: from,
+                });
+            }
 
-        let Some(binding) = self.keys.get_mut(address) else {
-            return Err(not_current());
-        };
-        if let Some(pending) = &binding.pending {
-            return Err(TransitionError::AlreadyPending {
-                address: address.clone(),
-                phase: pending.phase,
-            });
+            let Some(binding) = self.keys.get_mut(address) else {
+                return Err(TransitionError::NotPending {
+                    address: address.clone(),
+                });
+            };
+            let Some(pending) = binding.pending.take() else {
+                return Err(TransitionError::NotPending {
+                    address: address.clone(),
+                });
+            };
+            // The four phases above all require a hash, so this is unreachable;
+            // restoring the operation is the honest answer if it ever is reached,
+            // because dropping it would forget an attempt nobody has resolved.
+            let Some(hash) = pending.hash.clone() else {
+                binding.pending = Some(pending);
+                return Err(TransitionError::CannotRetireCandidate {
+                    address: address.clone(),
+                    phase: from,
+                });
+            };
+            let retained = RetainedKey {
+                hash,
+                generation: pending.generation,
+                status: RetainedStatus::FailedCandidate,
+                recorded_at: at,
+            };
+            binding.retained.push(retained.clone());
+            Ok(retained)
         }
-        let Some(current) = binding.current.take_if(|current| &current.hash == hash) else {
-            return Err(not_current());
-        };
-
-        let retained = RetainedKey {
-            hash: current.hash,
-            generation: current.generation,
-            status,
-            recorded_at: at,
-        };
-        binding.retained.push(retained.clone());
-        Ok(retained)
     }
 
-    /// Stops tracking a retained hash, after its remote key is confirmed gone.
-    ///
-    /// The last step of `openrouter-keymaster delete key`, and only ever that. A hash
-    /// leaves state when OpenRouter no longer has the key and a read has said
-    /// so; dropping it on the strength of a delete response would be how a live
-    /// spending credential ends up with no local record naming it.
-    ///
-    /// Returns the entry it removed, so the caller can report what it released.
-    ///
-    /// The removed generation is kept as a high-water mark
-    /// ([`KeyBinding::generation_floor`]). The key is gone, but the number is
-    /// spent: handing it to a successor would give two different remote keys the
-    /// same generation at one address, and the evidence that the first one ever
-    /// existed has just been deleted.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionError::HashNotRetained`] when the address does not
-    /// retain that hash. A current hash and an operation's hash are deliberately
-    /// out of reach here: neither is a key whose life is over.
-    pub fn drop_retained(
-        &mut self,
-        address: &Address,
-        hash: &KeyHash,
-    ) -> Result<RetainedKey, TransitionError> {
-        let position = self
-            .keys
-            .get(address)
-            .and_then(|binding| binding.retained.iter().position(|r| &r.hash == hash));
+    mutation! {
+        /// Promotes a delivered key to current.
+        ///
+        /// Any previous current hash moves to `awaiting_retirement`; rotation
+        /// never disables a predecessor.
+        ///
+        /// The binding's origin becomes `created`, because the key it now names is
+        /// one Keymaster created and delivered. Rotating a key an operator
+        /// imported replaces it with Keymaster's own; the imported hash stays
+        /// tracked as the predecessor, and the origin describes what is current.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TransitionError`] when there is no pending operation or it
+        /// has not reached `delivered`.
+        fn promote_key(
+            &mut self,
+            address: &Address,
+            at: OffsetDateTime,
+        ) -> Result<(), TransitionError> {
+            let from = self.pending_phase(address)?;
+            if from != Phase::Delivered {
+                return Err(TransitionError::CannotPromote {
+                    address: address.clone(),
+                    phase: from,
+                });
+            }
 
-        let (Some(binding), Some(position)) = (self.keys.get_mut(address), position) else {
-            return Err(TransitionError::HashNotRetained {
+            let Some(binding) = self.keys.get_mut(address) else {
+                return Err(TransitionError::NotPending {
+                    address: address.clone(),
+                });
+            };
+            let Some(pending) = binding.pending.take() else {
+                return Err(TransitionError::NotPending {
+                    address: address.clone(),
+                });
+            };
+            let Some(hash) = pending.hash else {
+                return Err(TransitionError::CannotPromote {
+                    address: address.clone(),
+                    phase: from,
+                });
+            };
+
+            if let Some(previous) = binding.current.take() {
+                binding.retained.push(RetainedKey {
+                    hash: previous.hash,
+                    generation: previous.generation,
+                    status: RetainedStatus::AwaitingRetirement,
+                    recorded_at: at,
+                });
+            }
+            binding.origin = Origin::Created;
+            binding.current = Some(CurrentKey {
+                hash,
+                generation: pending.generation,
+                bound_at: at,
+                receiver: Some(pending.receiver),
+            });
+            Ok(())
+        }
+    }
+
+    mutation! {
+        /// Takes the key an address uses out of service, keeping the hash tracked.
+        ///
+        /// The one transition that empties a binding's current slot without putting
+        /// another key in it, and the whole of what `openrouter-keymaster
+        /// decommission` writes: rotation *replaces* a credential, and this *ends*
+        /// one. The address stays bound and keeps everything else it holds — its
+        /// other retained hashes and its generation floor — so a key created here
+        /// later still takes a higher number than this one had.
+        ///
+        /// `status` is the caller's finding about the remote key, established by a
+        /// read: [`RetainedStatus::Retired`] once one proved the key is out of
+        /// service. Nothing here talks to OpenRouter, so nothing here can establish
+        /// that.
+        ///
+        /// Returns the retained entry it recorded.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TransitionError::AlreadyPending`] while an operation is in
+        /// progress at the address, whose successor would otherwise be promoted
+        /// into the slot this empties; and [`TransitionError::HashNotCurrent`] when
+        /// the hash named is not the one the address is using. The hash is required
+        /// rather than implied because this is the one ending that acts on a
+        /// working credential.
+        fn decommission_current(
+            &mut self,
+            address: &Address,
+            hash: &KeyHash,
+            status: RetainedStatus,
+            at: OffsetDateTime,
+        ) -> Result<RetainedKey, TransitionError> {
+            let not_current = || TransitionError::HashNotCurrent {
                 address: address.clone(),
                 hash: hash.clone(),
-            });
-        };
-        let removed = binding.retained.remove(position);
-        binding.generation_floor = binding.generation_floor.max(removed.generation);
-        Ok(removed)
-    }
+            };
 
-    /// Relinquishes every key this address owns, recording nothing in its place.
-    ///
-    /// This is `openrouter-keymaster state forget`, and it is purely local: the remote keys
-    /// go on existing, enabled, and are simply no longer Keymaster's. Returns
-    /// the binding it removed so the caller can list what it released, or
-    /// `None` when the address owned nothing.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionError::AlreadyPending`] when an operation is in
-    /// progress at the address. An unfinished attempt may have made a key whose
-    /// hash nobody has yet, and forgetting the journal would destroy the only
-    /// record that the attempt happened — the exact outcome ADR-0002's recovery
-    /// exists to prevent. Resolve it first.
-    pub fn forget_key(&mut self, address: &Address) -> Result<Option<KeyBinding>, TransitionError> {
-        if let Some(pending) = self
-            .keys
-            .get(address)
-            .and_then(|binding| binding.pending.as_ref())
-        {
-            return Err(TransitionError::AlreadyPending {
-                address: address.clone(),
-                phase: pending.phase,
-            });
+            let Some(binding) = self.keys.get_mut(address) else {
+                return Err(not_current());
+            };
+            if let Some(pending) = &binding.pending {
+                return Err(TransitionError::AlreadyPending {
+                    address: address.clone(),
+                    phase: pending.phase,
+                });
+            }
+            let Some(current) = binding.current.take_if(|current| &current.hash == hash) else {
+                return Err(not_current());
+            };
+
+            let retained = RetainedKey {
+                hash: current.hash,
+                generation: current.generation,
+                status,
+                recorded_at: at,
+            };
+            binding.retained.push(retained.clone());
+            Ok(retained)
         }
-        Ok(self.keys.remove(address))
     }
 
-    /// Relinquishes the guardrail this address owns.
-    ///
-    /// As [`State::forget_key`], and with nothing to refuse: a guardrail has no
-    /// journal and no one-time secret.
-    pub fn forget_guardrail(&mut self, address: &Address) -> Option<GuardrailBinding> {
-        self.guardrails.remove(address)
+    mutation! {
+        /// Stops tracking a retained hash, after its remote key is confirmed gone.
+        ///
+        /// The last step of `openrouter-keymaster delete key`, and only ever that. A hash
+        /// leaves state when OpenRouter no longer has the key and a read has said
+        /// so; dropping it on the strength of a delete response would be how a live
+        /// spending credential ends up with no local record naming it.
+        ///
+        /// Returns the entry it removed, so the caller can report what it released.
+        ///
+        /// The removed generation is kept as a high-water mark
+        /// ([`KeyBinding::generation_floor`]). The key is gone, but the number is
+        /// spent: handing it to a successor would give two different remote keys the
+        /// same generation at one address, and the evidence that the first one ever
+        /// existed has just been deleted.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TransitionError::HashNotRetained`] when the address does not
+        /// retain that hash. A current hash and an operation's hash are deliberately
+        /// out of reach here: neither is a key whose life is over.
+        fn drop_retained(
+            &mut self,
+            address: &Address,
+            hash: &KeyHash,
+        ) -> Result<RetainedKey, TransitionError> {
+            let position = self
+                .keys
+                .get(address)
+                .and_then(|binding| binding.retained.iter().position(|r| &r.hash == hash));
+
+            let (Some(binding), Some(position)) = (self.keys.get_mut(address), position) else {
+                return Err(TransitionError::HashNotRetained {
+                    address: address.clone(),
+                    hash: hash.clone(),
+                });
+            };
+            let removed = binding.retained.remove(position);
+            binding.generation_floor = binding.generation_floor.max(removed.generation);
+            Ok(removed)
+        }
     }
 
-    /// Records why a retained hash is still tracked.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransitionError::HashNotRetained`] when the address does not
-    /// retain that hash.
-    pub fn set_retained_status(
-        &mut self,
-        address: &Address,
-        hash: &KeyHash,
-        status: RetainedStatus,
-        at: OffsetDateTime,
-    ) -> Result<(), TransitionError> {
-        let retained = self
-            .keys
-            .get_mut(address)
-            .and_then(|binding| binding.retained.iter_mut().find(|r| &r.hash == hash));
+    mutation! {
+        /// Relinquishes every key this address owns, recording nothing in its place.
+        ///
+        /// This is `openrouter-keymaster state forget`, and it is purely local: the remote keys
+        /// go on existing, enabled, and are simply no longer Keymaster's. Returns
+        /// the binding it removed so the caller can list what it released, or
+        /// `None` when the address owned nothing.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TransitionError::AlreadyPending`] when an operation is in
+        /// progress at the address. An unfinished attempt may have made a key whose
+        /// hash nobody has yet, and forgetting the journal would destroy the only
+        /// record that the attempt happened — the exact outcome ADR-0002's recovery
+        /// exists to prevent. Resolve it first.
+        fn forget_key(
+            &mut self,
+            address: &Address,
+        ) -> Result<Option<KeyBinding>, TransitionError> {
+            if let Some(pending) = self
+                .keys
+                .get(address)
+                .and_then(|binding| binding.pending.as_ref())
+            {
+                return Err(TransitionError::AlreadyPending {
+                    address: address.clone(),
+                    phase: pending.phase,
+                });
+            }
+            Ok(self.keys.remove(address))
+        }
+    }
 
-        let Some(retained) = retained else {
-            return Err(TransitionError::HashNotRetained {
-                address: address.clone(),
-                hash: hash.clone(),
-            });
-        };
-        retained.status = status;
-        retained.recorded_at = at;
-        Ok(())
+    mutation! {
+        /// Relinquishes the guardrail this address owns.
+        ///
+        /// As [`State::forget_key`], and with nothing to refuse: a guardrail has no
+        /// journal and no one-time secret.
+        fn forget_guardrail(&mut self, address: &Address) -> Option<GuardrailBinding> {
+            self.guardrails.remove(address)
+        }
+    }
+
+    mutation! {
+        /// Records why a retained hash is still tracked.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`TransitionError::HashNotRetained`] when the address does not
+        /// retain that hash.
+        fn set_retained_status(
+            &mut self,
+            address: &Address,
+            hash: &KeyHash,
+            status: RetainedStatus,
+            at: OffsetDateTime,
+        ) -> Result<(), TransitionError> {
+            let retained = self
+                .keys
+                .get_mut(address)
+                .and_then(|binding| binding.retained.iter_mut().find(|r| &r.hash == hash));
+
+            let Some(retained) = retained else {
+                return Err(TransitionError::HashNotRetained {
+                    address: address.clone(),
+                    hash: hash.clone(),
+                });
+            };
+            retained.status = status;
+            retained.recorded_at = at;
+            Ok(())
+        }
     }
 
     /// Checks that at most one operation is in progress across the whole file.
@@ -1584,6 +1667,7 @@ fn check_distinct_generations(address: &Address, binding: &KeyBinding) -> Result
 
 /// Why a state operation failed.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StateError {
     /// The state file could not be read.
     #[error("cannot read state {}: {message}", path.display())]
@@ -1706,6 +1790,7 @@ impl StateError {
 
 /// Why a binding could not be recorded.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum BindError {
     /// The address already owns a different key.
     #[error("`{address}` is already bound to key {hash}")]
@@ -1798,6 +1883,7 @@ pub enum BindError {
 
 /// Why a lifecycle transition was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum TransitionError {
     /// A new operation was started while one was still pending.
     #[error("`{address}` already has an operation in progress, in phase `{phase}`")]

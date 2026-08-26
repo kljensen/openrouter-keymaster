@@ -1,7 +1,15 @@
 # ADR-0003: Core library and CLI split
 
 - **Date:** 2026-08-25
-- **Status:** Proposed
+- **Status:** Accepted
+
+Accepted through automated code review of the four commits that implement it.
+This repository currently has a single maintainer committing directly to
+`main`, so that review stands in for a second human reviewer; see
+[the ADR convention](README.md#review).
+
+The status changed only after the last of those commits, so nothing was binding
+while the shape was still moving.
 
 ## Context
 
@@ -255,6 +263,57 @@ output is otherwise unchanged.
 - [ADR-0002](0002-journaled-key-creation.md) — the transaction `ops::apply`
   and `ops::rotate` expose unchanged.
 - [`docs/compatibility.md`](../compatibility.md) — where the core API joins
-  the list of contracts.
+  the list of contracts, with the 0.x rules for changing it.
 - reqwest's documentation on using the blocking client inside an async
   runtime: <https://docs.rs/reqwest/latest/reqwest/blocking/index.html>
+
+### Implementation checks
+
+All four steps are merged. The decision above is unchanged; this section
+records where each part of it is enforced, and where the code differs from what
+was written.
+
+- **The two crates and the missing argument parser** — `crates/core` and
+  `crates/cli`, with `crates/core/tests/lints.rs`, which fails unless
+  `cargo tree --package openrouter-keymaster-core --invert clap` finds nothing.
+- **`ops` as the API** — `crates/core/src/ops/`, one module per command, with
+  `crates/cli/tests/ops.rs` driving the functions directly and every other file
+  under `crates/cli/tests/` driving the same code through the binary.
+- **The plan fingerprint** — `crates/core/src/ops/fingerprint.rs`, covered by
+  `crates/cli/tests/ops.rs`: a change to any single input — an action, a
+  receiver destination, a generation, the endpoint, the credential, the state
+  path — is refused with no remote, receiver, or state write, and a bound apply
+  beside a pending operation is refused without promoting it.
+- **Credentials from the caller** — `ManagementKey::from_secret`, with the
+  environment read confined to `crates/cli/src/app/env.rs`.
+- **The curated surface** — `crates/core/src/lib.rs`, proved from both
+  directions. `crates/core/tests/public_api.rs` is the only test binary that
+  does not turn on `test-support`, so it compiles against exactly what a host
+  gets and fails if that is not enough to build a `Context`, call `ops::plan`,
+  read a `Config`, and read a `State`. `crates/core/tests/lints.rs` fails if
+  any of the five internal modules is declared `pub` for a host.
+  [`docs/compatibility.md`](../compatibility.md) states what the surface
+  promises within 0.x.
+- **The shared harness** — `crates/core/src/test_support/`, behind the
+  `test-support` feature the CLI crate's dev-dependency turns on.
+
+Two things differ from the text above.
+
+The internal modules are declared twice: `pub` under `test-support`, and
+`pub(crate)` without it. Both crates' test suites drive `client`, `api`,
+`plan`, and `receiver` directly, and a test binary is an external consumer, so
+hiding them outright would have meant rewriting several thousand lines of
+passing tests to go through `ops`. The feature pulls a mock HTTP server into
+the dependency graph and no shipped build turns it on, so the surface a host
+compiles against is the one decided here. State's transitions and its write path are
+hidden the same way: visibility is not a position a macro can expand into, so
+`crates/core/src/state/mod.rs` defines a four-line `mutation!` macro whose two
+cfg'd arms wrap one body, and each method is still written — and called —
+once.
+
+Three items the decision did not enumerate are `pub` because the CLI — which
+is a host, and the only one so far — needs them: `MANAGEMENT_KEY_VAR` and
+`PRODUCTION_BASE_URL`, which it reads the environment with, and
+`REJECTED_EXIT_CODE`, which any host writing a receiver command needs.
+`Options::check_base_url` was added for the same reason, so that validating an
+endpoint does not require a public `Client`.

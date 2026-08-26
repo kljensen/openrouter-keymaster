@@ -58,7 +58,7 @@ one JSON document, and never colored.
 
 ## Compatibility surfaces
 
-Three things are contracts. Everything else in the repository is
+Four things are contracts. Everything else in the repository is
 implementation, and will change without ceremony.
 
 ### The command-line surface
@@ -93,6 +93,62 @@ Human-readable output is **not** a contract. Parse `--json`.
 version. New optional fields may be added; a file that a newer Keymaster
 understands may not parse in an older one, which is why unknown fields are a
 hard error rather than a silent skip.
+
+### The core crate's Rust API
+
+`openrouter-keymaster-core` is a library, and what it exposes is a contract for
+the same reason the command line is: a host compiles against it, and a signature
+that changes shape breaks a build rather than a script. It is versioned 0.x
+alongside the binary, and the surface is deliberately small — everything else is
+`pub(crate)`, so there is nothing to accidentally depend on
+([ADR-0003](adr/0003-core-library-split.md)).
+
+Covered:
+
+- **The `ops` functions**, their names and their signatures: the `Context` a
+  caller builds (`Paths`, `Options`, `ManagementKey`), the arguments each takes,
+  and the `Outcome<R>` or `Error` each returns. A `Context` stays movable to
+  another thread, and the operations stay synchronous and blocking.
+- **The report types** `ops` returns, their public accessors, and the field
+  names and enumerated string values of their JSON. These are the same DTOs the
+  `--json` contract above describes; a field is one promise, made once, in both
+  places.
+- **`PlanFingerprint`** as an opaque value: a plan's fingerprint can be handed
+  back to `ops::apply` and nothing else. Its digest inputs and its encoding are
+  not a contract — a build that computes a different digest simply refuses a
+  plan computed by another build, which is the safe direction.
+- **The read-only configuration and state types**: `Config` and everything
+  reachable from it, and `StateFile::read` with `State` and everything reachable
+  from it. Their fields, accessors, and the meanings of their values.
+- **The error types** — `Error`, its variants, the per-layer errors it wraps,
+  and `Error::kind`, whose strings are already part of the JSON contract. Every
+  one of them is `#[non_exhaustive]`; see the rule for variants below.
+
+Not covered, and free to change in any release: everything behind `ops` — the
+HTTP client, the OpenRouter resource layer, the planner, the receivers, and
+redaction — the crate's internal module layout, and the `test-support` feature,
+which exists for this repository's own tests and makes no promise to anyone.
+
+Within 0.x: a new `ops` function, a new field on a report, and a new accessor
+are minor changes — including a new function that takes extra arguments beside
+an existing one, which is how an option is added without changing a signature.
+Changing an existing `ops` signature, removing or renaming a public item,
+changing the type or meaning of a report, configuration, or state field, and
+moving an item out of the public surface are breaking changes, and each gets a
+version bump and a changelog entry.
+
+Enum variants follow one rule. Every public error enum — `Error`, `ApiError`,
+and the per-layer errors `Error` wraps — is `#[non_exhaustive]`, so a caller has to
+write a fallback arm and adding a variant to one is a minor change. Every other
+public enum is exhaustive deliberately: a host matching on a `Phase`, a
+`DeleteOutcome`, or a `Receiver` should be told at compile time that there is a
+new case to handle, so adding a variant to one of those is a breaking change.
+
+A host also inherits two obligations that are not API and will not change
+without an ADR: an async caller moves the whole `ops` call to a blocking thread,
+because the client panics on a thread running a Tokio runtime, and callers
+serialize their own operations on one state file, because the lock refuses a
+concurrent writer rather than queueing it.
 
 ## State format migrations
 

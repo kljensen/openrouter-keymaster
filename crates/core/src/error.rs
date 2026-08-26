@@ -1,6 +1,5 @@
 //! Keymaster's application error type.
 
-use crate::client::ApiError;
 use crate::config::ConfigError;
 use crate::ops::apply::ApplyError;
 use crate::ops::import::ImportError;
@@ -8,6 +7,12 @@ use crate::ops::lifecycle::LifecycleError;
 use crate::ops::recover::RecoverError;
 use crate::ops::rotate::RotateError;
 use crate::state::StateError;
+
+/// OpenRouter's own failures, wrapped by [`Error::Api`].
+///
+/// Defined beside the internal HTTP client and re-exported here because it is
+/// one of the errors a host handles (ADR-0003, item 7).
+pub use crate::client::ApiError;
 
 /// An application error. Every variant is safe to display: no variant may
 /// carry credential plaintext or a credential-shaped string.
@@ -17,6 +22,7 @@ use crate::state::StateError;
 /// reading JSON diagnostics can tell a missing credential from a rejected one,
 /// and either from a configuration that does not parse.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The command line could not be parsed. Carries clap's own rendered
     /// message so `--json` can report it without inventing a second wording.

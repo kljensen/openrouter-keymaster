@@ -107,6 +107,7 @@ impl Faults {
     }
 
     /// Fails the `nth` write, counting from one, at `fault`.
+    #[cfg(any(test, feature = "fault-injection"))]
     #[must_use]
     pub fn at(fault: Fault, nth: usize) -> Self {
         Self {
@@ -203,42 +204,44 @@ impl StateFile {
         self.parse(&source)
     }
 
-    /// Takes the exclusive writer lock.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StateError::Locked`] when another Keymaster holds the lock,
-    /// or [`StateError::Write`] when the lock file cannot be created.
-    pub fn lock(&self) -> Result<StateLock<'_>, StateError> {
-        let lock_path = self.lock_path();
-        self.create_private_directory(&containing_directory(&lock_path))?;
+    mutation! {
+        /// Takes the exclusive writer lock.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`StateError::Locked`] when another Keymaster holds the lock,
+        /// or [`StateError::Write`] when the lock file cannot be created.
+        fn lock(&self) -> Result<StateLock<'_>, StateError> {
+            let lock_path = self.lock_path();
+            self.create_private_directory(&containing_directory(&lock_path))?;
 
-        match create_private_new(&lock_path) {
-            Ok(file) => {
-                // Not load-bearing: a hint for whoever finds a stale lock.
-                let _ = io::Write::write_all(
-                    &mut &file,
-                    format!("openrouter-keymaster pid {}\n", std::process::id()).as_bytes(),
-                );
-                Ok(StateLock {
-                    file: self,
-                    lock_path,
-                })
+            match create_private_new(&lock_path) {
+                Ok(file) => {
+                    // Not load-bearing: a hint for whoever finds a stale lock.
+                    let _ = io::Write::write_all(
+                        &mut &file,
+                        format!("openrouter-keymaster pid {}\n", std::process::id()).as_bytes(),
+                    );
+                    Ok(StateLock {
+                        file: self,
+                        lock_path,
+                    })
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(StateError::Locked {
+                    path: lock_path.clone(),
+                    message: format!(
+                        "another Keymaster is writing {state}. If no other Keymaster is running, \
+                         a previous one was killed before it could release the lock; remove \
+                         {lock} to continue.",
+                        state = self.path.display(),
+                        lock = lock_path.display()
+                    ),
+                }),
+                Err(error) => Err(StateError::Write {
+                    path: lock_path,
+                    message: error.to_string(),
+                }),
             }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(StateError::Locked {
-                path: lock_path.clone(),
-                message: format!(
-                    "another Keymaster is writing {state}. If no other Keymaster is running, \
-                     a previous one was killed before it could release the lock; remove \
-                     {lock} to continue.",
-                    state = self.path.display(),
-                    lock = lock_path.display()
-                ),
-            }),
-            Err(error) => Err(StateError::Write {
-                path: lock_path,
-                message: error.to_string(),
-            }),
         }
     }
 

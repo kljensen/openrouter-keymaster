@@ -47,7 +47,7 @@ pub struct PlanReport {
 impl PlanReport {
     /// Describes a computed plan.
     #[must_use]
-    pub fn new(plan: &Plan) -> Self {
+    pub(crate) fn new(plan: &Plan) -> Self {
         let blocked = plan.is_blocked();
         let actions: Vec<ActionReport> = plan
             .actions()

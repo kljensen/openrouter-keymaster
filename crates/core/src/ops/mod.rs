@@ -6,7 +6,7 @@
 //! caller decides what to do with them (ADR-0003).
 //!
 //! [`Context`] is `Send + 'static` and carries no client. Each operation builds
-//! its own [`Client`] and its receivers on the thread that runs it, from the
+//! its own HTTP client and its receivers on the thread that runs it, from the
 //! context and the configuration, which is what lets a host hand a context to a
 //! worker thread. The operations are synchronous and blocking, and so is
 //! everything they build: an async host moves the whole call to a blocking
@@ -36,13 +36,19 @@ pub mod rotate;
 use std::path::PathBuf;
 
 use crate::api::Reader;
-use crate::client::{ApiError, Client, ManagementKey, Options};
+use crate::client::{ApiError, Client};
 use crate::config::Config;
 use crate::error::Error;
 use crate::ids::Address;
 use crate::plan::{self, Snapshot};
 use crate::report::{PlanReport, StatusReport};
 use crate::state::{Phase, State, StateFile};
+
+// The credential and endpoint types a caller needs to build a [`Context`], and
+// the two environment variable names the CLI reads them from. They are defined
+// beside the HTTP client, which is internal (ADR-0003, item 7); a host reaches
+// them here, where the context that carries them is defined.
+pub use crate::client::{MANAGEMENT_KEY_VAR, ManagementKey, Options, PRODUCTION_BASE_URL};
 
 pub use apply::apply;
 pub use fingerprint::PlanFingerprint;

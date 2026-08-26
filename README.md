@@ -57,6 +57,49 @@ binary's and work as usual; `cargo test --workspace` and
 Then read [Credentials](#credentials) and
 [the first-run runbook](docs/operations.md#first-run).
 
+## Using the core crate
+
+A Rust program can call the same operations the binary does. Depend on the
+library and skip the CLI:
+
+```toml
+[dependencies]
+openrouter-keymaster-core = { git = "https://github.com/kljensen/openrouter-keymaster" }
+```
+
+Every operation is a function in `ops` taking an owned `Context` — the two file
+paths, the endpoint, and the credential — and returning the command's report
+rather than printing it:
+
+```rust
+use openrouter_keymaster_core::ops::{self, Context, ManagementKey, Options, Paths};
+use zeroize::Zeroizing;
+
+let context = Context {
+    paths: Paths { config: "keymaster.toml".into(), state: "state.json".into() },
+    options: Options::default(),
+    key: Some(ManagementKey::from_secret(Zeroizing::new(secret))?),
+};
+
+let outcome = ops::plan(context)?;
+println!("{}", serde_json::to_string_pretty(&outcome.report)?);
+```
+
+`Outcome { report, error }` keeps the report beside a partial failure; `Err` is
+for the runs with no report to give. A plan's `fingerprint` can be handed back
+to `ops::apply`, which recomputes the plan under the lock and writes only if
+every input that decides the outcome is still what it was.
+
+Two rules the crate cannot enforce for you. The HTTP client is blocking and
+panics on a thread that is running a Tokio runtime, so an async host moves the
+whole call — context in, outcome out — to `tokio::task::spawn_blocking` or an
+equivalent; that is what `Context: Send + 'static` is for. And the state lock
+refuses a concurrent writer rather than queueing it, so a process that serves
+many requests serializes its own operations on one state file.
+
+What the crate promises, and what it does not, is
+[`docs/compatibility.md`](docs/compatibility.md#the-core-crates-rust-api).
+
 ## Documentation
 
 This README is the reference for what each command does and why. The pages under
@@ -923,6 +966,7 @@ reachable from one.
 ```sh
 cargo fmt --all -- --check
 cargo check --locked --workspace --all-targets
+cargo check --locked --package openrouter-keymaster-core --all-targets
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 cargo deny check advisories licenses bans sources

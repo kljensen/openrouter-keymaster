@@ -62,7 +62,7 @@ pub struct RotateReport {
 impl RotateReport {
     /// Describes one staged rotation.
     #[must_use]
-    pub fn new(address: &Address, predecessor: Predecessor, successor: Successor) -> Self {
+    pub(crate) fn new(address: &Address, predecessor: Predecessor, successor: Successor) -> Self {
         let status = predecessor.status;
         Self {
             command: "rotate",
@@ -203,7 +203,7 @@ pub struct RetireReport {
 impl RetireReport {
     /// Describes one retirement.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         address: &Address,
         hash: &KeyHash,
         generation: u32,
@@ -348,7 +348,7 @@ pub struct DeleteReport {
 impl DeleteReport {
     /// Describes one deletion attempt.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         address: &Address,
         hash: &KeyHash,
         generation: u32,
@@ -487,7 +487,7 @@ pub struct DecommissionReport {
 impl DecommissionReport {
     /// Describes one decommission.
     #[must_use]
-    pub fn new(address: &Address, hash: &KeyHash, generation: u32, ending: Ending) -> Self {
+    pub(crate) fn new(address: &Address, hash: &KeyHash, generation: u32, ending: Ending) -> Self {
         let status = tracking(&ending);
         Self {
             command: "decommission",
@@ -646,7 +646,7 @@ pub struct Released {
 impl Released {
     /// The key the address was using.
     #[must_use]
-    pub fn current(hash: &KeyHash, generation: u32) -> Self {
+    pub(crate) fn current(hash: &KeyHash, generation: u32) -> Self {
         Self {
             role: "current",
             identity: hash.as_str().to_owned(),
@@ -656,7 +656,7 @@ impl Released {
 
     /// A key the address still held but no longer used.
     #[must_use]
-    pub fn retained(retained: &RetainedKey) -> Self {
+    pub(crate) fn retained(retained: &RetainedKey) -> Self {
         Self {
             role: retained.status.as_str(),
             identity: retained.hash.as_str().to_owned(),
@@ -666,7 +666,7 @@ impl Released {
 
     /// The guardrail the address owned.
     #[must_use]
-    pub fn guardrail(id: &Uuid, origin: Origin) -> Self {
+    pub(crate) fn guardrail(id: &Uuid, origin: Origin) -> Self {
         Self {
             role: origin.as_str(),
             identity: id.as_str().to_owned(),
@@ -713,7 +713,7 @@ pub struct ForgetReport {
 impl ForgetReport {
     /// Describes a binding that was removed.
     #[must_use]
-    pub fn released(
+    pub(crate) fn released(
         written: &str,
         resource: &'static str,
         address: &Address,
@@ -742,7 +742,7 @@ impl ForgetReport {
 
     /// Describes an address that was bound to nothing.
     #[must_use]
-    pub fn nothing(written: &str) -> Self {
+    pub(crate) fn nothing(written: &str) -> Self {
         Self {
             command: "state forget",
             address: written.to_owned(),

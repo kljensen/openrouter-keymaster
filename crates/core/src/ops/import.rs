@@ -259,6 +259,7 @@ fn now() -> OffsetDateTime {
 
 /// Why an import could not be performed. Every variant leaves state unchanged.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ImportError {
     /// A command-line value is not the kind of identifier it names.
     #[error("`{value}` is not usable: {message}")]

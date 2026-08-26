@@ -784,6 +784,7 @@ fn now() -> OffsetDateTime {
 
 /// Why an explicit end-of-life command could not be performed.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum LifecycleError {
     /// A command-line value is not the kind of identifier it names.
     #[error("`{value}` is not usable: {message}")]
