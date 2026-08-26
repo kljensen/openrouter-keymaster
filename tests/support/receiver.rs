@@ -23,6 +23,7 @@ use openrouter_keymaster::ids::RemoteName;
 use openrouter_keymaster::receiver::{Acknowledgement, DeliveryMetadata, Outcome, SecretReceiver};
 use wiremock::Mock;
 use wiremock::matchers::{method, path};
+use zeroize::Zeroizing;
 
 use super::fixtures::created_key;
 use super::http::{TestServer, json_response};
@@ -211,7 +212,8 @@ fn create(plaintext: String) -> CreatedKey {
         request_timeout: Duration::from_secs(10),
         ..Options::new(server.api_base_url())
     };
-    let credential = ManagementKey::for_tests(SECRET_SENTINEL_KEY).expect("a usable fake key");
+    let credential = ManagementKey::from_secret(Zeroizing::new(SECRET_SENTINEL_KEY.to_owned()))
+        .expect("a usable fake key");
     Client::new(options, &credential)
         .expect("a client")
         .create_key_once(&CreateKeyRequest::new(

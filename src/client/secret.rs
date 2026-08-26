@@ -1,23 +1,24 @@
-//! The management credential and the only place it is read from.
+//! The management credential and the only type that holds one.
 
-use std::env::{self, VarError};
 use std::fmt;
 
 use reqwest::header::HeaderValue;
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize as _;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use super::error::ApiError;
 
-/// The one environment variable Keymaster reads a credential from.
+/// The one environment variable the `openrouter-keymaster` binary reads a
+/// credential from, and the one every diagnostic here names.
 ///
-/// There is deliberately no command-line option and no configuration key: a
-/// credential in either would end up in a shell history, a process list, or a
-/// Git repository.
+/// The read itself is the binary's (`crate::app::env`); this module holds the
+/// name because the errors that name it are here. There is deliberately no
+/// command-line option and no configuration key: a credential in either would
+/// end up in a shell history, a process list, or a Git repository.
 pub const MANAGEMENT_KEY_VAR: &str = "OPENROUTER_MANAGEMENT_KEY";
 
 /// Longest accepted credential. Far above any real management key, and short
-/// enough that a whole file pasted into the variable is rejected rather than
+/// enough that a whole file handed in by mistake is rejected rather than
 /// sent.
 const MAX_LENGTH: usize = 512;
 
@@ -30,44 +31,21 @@ const MAX_LENGTH: usize = 512;
 pub struct ManagementKey(String);
 
 impl ManagementKey {
-    /// Reads the credential from [`MANAGEMENT_KEY_VAR`].
+    /// Wraps a credential the caller already holds.
+    ///
+    /// This is the only constructor. The caller's copy is taken by value in a
+    /// [`Zeroizing`] wrapper, so it is cleared when this returns whether or not
+    /// the value turned out to be usable, and a host that keeps its secrets
+    /// somewhere other than the environment — a vault, a request header, a
+    /// database — has a way in that does not go through a process variable.
     ///
     /// # Errors
     ///
-    /// Returns [`ApiError::MissingCredential`] when the variable is unset or
-    /// empty, or [`ApiError::UnusableCredential`] when its value cannot be sent
-    /// as an HTTP header.
-    pub fn from_env() -> Result<Self, ApiError> {
-        match env::var(MANAGEMENT_KEY_VAR) {
-            Ok(value) => Self::new(value),
-            Err(VarError::NotPresent) => Err(ApiError::MissingCredential),
-            Err(VarError::NotUnicode(_)) => Err(ApiError::UnusableCredential {
-                reason: "it is not valid Unicode",
-            }),
-        }
-    }
-
-    /// Wraps a credential supplied by a test.
-    ///
-    /// This is not a second production path. Nothing in the binary calls it,
-    /// and no command-line option or configuration key reaches it. It exists
-    /// because `std::env::set_var` is `unsafe` in Rust 2024 and this crate
-    /// forbids unsafe code, so a test cannot install a credential in the
-    /// process environment to reach [`ManagementKey::from_env`].
-    ///
-    /// # Errors
-    ///
-    /// As [`ManagementKey::from_env`].
-    pub fn for_tests(value: &str) -> Result<Self, ApiError> {
-        Self::new(value.to_owned())
-    }
-
-    /// Takes ownership of the caller's copy so it can be cleared, whether or
-    /// not the value turns out to be usable.
-    fn new(mut value: String) -> Result<Self, ApiError> {
-        let checked = Self::checked(value.trim());
-        value.zeroize();
-        checked
+    /// Returns [`ApiError::MissingCredential`] when the value is empty or all
+    /// whitespace, or [`ApiError::UnusableCredential`] when it cannot be sent
+    /// as an HTTP header. Neither ever repeats the value.
+    pub fn from_secret(secret: Zeroizing<String>) -> Result<Self, ApiError> {
+        Self::checked(secret.trim())
     }
 
     /// Validates a credential's shape without ever quoting it.

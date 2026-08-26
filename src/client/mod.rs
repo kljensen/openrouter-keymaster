@@ -31,10 +31,13 @@
 //! choosing its own response type.
 //!
 //! **Nothing that leaves here carries a credential or a `reqwest` type.** The
-//! management key is read only from the environment, is held as a
-//! [`ManagementKey`] that cannot be serialized or printed, and reaches the wire
-//! as a header marked sensitive. Errors are [`ApiError`], whose text has been
-//! redacted.
+//! management key is handed in by the caller, is held as a [`ManagementKey`]
+//! that cannot be serialized or printed, and reaches the wire as a header
+//! marked sensitive. Errors are [`ApiError`], whose text has been redacted.
+//!
+//! Nothing here reads the environment. Where the credential and the endpoint
+//! come from is the caller's to decide; the binary reads them in
+//! [`crate::app::env`].
 
 mod create;
 mod error;
@@ -60,16 +63,6 @@ pub use secret::{MANAGEMENT_KEY_VAR, ManagementKey};
 
 /// OpenRouter's production API root.
 pub const PRODUCTION_BASE_URL: &str = "https://openrouter.ai/api/v1";
-
-/// The environment variable that overrides [`PRODUCTION_BASE_URL`].
-///
-/// It exists so the compiled binary can be pointed at a local server — the
-/// integration tests run it against the harness in `tests/support/http.rs` —
-/// and so an operator behind a gateway can name it explicitly rather than
-/// having ambient proxy settings redirect a credential. The value is validated
-/// like any other base URL: absolute, HTTP or HTTPS, no trailing slash, no
-/// query. It is not a credential and never appears in output.
-pub const BASE_URL_VAR: &str = "OPENROUTER_BASE_URL";
 
 /// Identifies Keymaster and its version to OpenRouter, so a problem caused by
 /// one release is attributable.
@@ -135,43 +128,6 @@ pub struct Client {
 }
 
 impl Client {
-    /// Builds the production client, reading the credential from
-    /// [`MANAGEMENT_KEY_VAR`] and honouring [`BASE_URL_VAR`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ApiError::MissingCredential`] when the variable is unset,
-    /// [`ApiError::Invariant`] when [`BASE_URL_VAR`] is set to something that
-    /// cannot be a base URL, or the errors of [`Client::new`].
-    pub fn from_env() -> Result<Self, ApiError> {
-        Self::new(Self::options_from_env()?, &ManagementKey::from_env()?)
-    }
-
-    /// The API root this process should talk to.
-    ///
-    /// An override that is present but unusable is an error rather than a
-    /// fallback. Quietly ignoring it would send the management credential to
-    /// production while the operator believes it is going to the endpoint they
-    /// named — the one mistake an override like this must not be able to make.
-    /// A variable that is unset, or set to nothing at all, is not an override
-    /// and means production.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ApiError::Invariant`] when [`BASE_URL_VAR`] is set to
-    /// something that cannot be a base URL.
-    pub fn options_from_env() -> Result<Options, ApiError> {
-        match std::env::var(BASE_URL_VAR) {
-            Ok(base_url) if base_url.trim().is_empty() => Ok(Options::default()),
-            Ok(base_url) => Ok(Options::new(base_url.trim())),
-            Err(std::env::VarError::NotPresent) => Ok(Options::default()),
-            Err(std::env::VarError::NotUnicode(_)) => Err(ApiError::invariant(&format!(
-                "{BASE_URL_VAR} is set to a value that is not valid Unicode, so it cannot be a \
-                 base URL; unset it to use the production API root"
-            ))),
-        }
-    }
-
     /// Whether a value can be used as a base URL, without building anything.
     ///
     /// The same parser [`Client::new`] resolves requests with, exposed so a

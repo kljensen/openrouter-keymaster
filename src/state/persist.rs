@@ -177,12 +177,6 @@ impl StateFile {
         }
     }
 
-    /// The documented default location, relative to the working directory.
-    #[must_use]
-    pub fn default_path() -> PathBuf {
-        PathBuf::from(crate::cli::DEFAULT_STATE_PATH)
-    }
-
     /// The file this reads and writes.
     #[must_use]
     pub fn path(&self) -> &Path {

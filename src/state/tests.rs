@@ -2163,11 +2163,3 @@ fn a_bare_state_filename_still_names_a_directory_to_sync() {
     );
     assert_eq!(containing_directory(Path::new("/")), Path::new("."));
 }
-
-#[test]
-fn the_default_state_path_is_the_one_the_command_line_documents() {
-    assert_eq!(
-        StateFile::default_path(),
-        PathBuf::from(crate::cli::DEFAULT_STATE_PATH)
-    );
-}

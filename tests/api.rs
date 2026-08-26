@@ -23,9 +23,11 @@ use support::http::{Scripted, TestServer, json_response};
 use support::sentinel::SECRET_SENTINEL_KEY;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
+use zeroize::Zeroizing;
 
 fn client(server: &TestServer) -> Client {
-    let key = ManagementKey::for_tests(SECRET_SENTINEL_KEY).expect("a usable fake credential");
+    let key = ManagementKey::from_secret(Zeroizing::new(SECRET_SENTINEL_KEY.to_owned()))
+        .expect("a usable fake credential");
     let options = Options {
         request_timeout: Duration::from_secs(10),
         retry: RetryPolicy::never(),

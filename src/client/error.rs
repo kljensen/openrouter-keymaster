@@ -182,7 +182,11 @@ impl ApiError {
     }
 
     /// An invariant error carrying redacted text.
-    pub(super) fn invariant(message: &str) -> Self {
+    ///
+    /// Visible to the whole crate because the binary's environment reader
+    /// (`crate::app::env`) refuses an endpoint that cannot be a base URL, and
+    /// that refusal is this error like any other.
+    pub(crate) fn invariant(message: &str) -> Self {
         Self::Invariant {
             message: excerpt(message),
         }

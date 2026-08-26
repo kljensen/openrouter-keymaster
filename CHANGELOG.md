@@ -42,6 +42,15 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
   apply that refuses returns the fresh plan with its writes held back, under
   the new error kind `plan_changed`, having written nothing anywhere.
 
+- `ManagementKey::from_secret` takes a credential the caller already holds, in
+  a `Zeroizing<String>`, so a host that keeps its secrets somewhere other than
+  the process environment has a constructor. With it, reading
+  `OPENROUTER_MANAGEMENT_KEY` and `OPENROUTER_BASE_URL` moved to the binary
+  (`app::env`) and `state` is handed the path it works on, so nothing under
+  `client`, `ops`, or `state` reads the environment. A Rust API addition only:
+  the variables, the defaults, and every message are unchanged. Second step of
+  [ADR-0003](docs/adr/0003-core-library-split.md).
+
 - The Unlicense: a `LICENSE` file and `license = "Unlicense"` in `Cargo.toml`.
   `deny.toml` no longer exempts the crate from the license policy.
 

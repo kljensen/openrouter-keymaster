@@ -46,7 +46,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use assert_cmd::Command;
 use openrouter_keymaster::api::pagination::PageLimits;
 use openrouter_keymaster::api::{Reader, Writer};
-use openrouter_keymaster::client::Client;
+use openrouter_keymaster::app::env;
+use openrouter_keymaster::client::{ApiError, Client};
 use openrouter_keymaster::ids::{KeyHash, Uuid};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -317,7 +318,7 @@ fn gate() -> Option<Live> {
         );
         return None;
     }
-    let client = match Client::from_env() {
+    let client = match client_from_env() {
         Ok(client) => client,
         Err(error) => panic!(
             "{OPT_IN_VAR}=1 asks for a live run, but the credential is unusable ({kind}). \
@@ -326,6 +327,11 @@ fn gate() -> Option<Live> {
         ),
     };
     Some(Live::new(client))
+}
+
+/// The live client, from the same two variables the binary reads.
+fn client_from_env() -> Result<Client, ApiError> {
+    Client::new(env::options()?, &env::management_key()?)
 }
 
 // ------------------------------------------------------------- the live run

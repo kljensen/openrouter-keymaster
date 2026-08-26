@@ -7,6 +7,8 @@
 //! each command does, what it refuses, and in what order it reads and writes
 //! are all `ops`'.
 
+pub mod env;
+
 use std::fmt::Display;
 use std::io::Write;
 
@@ -110,7 +112,7 @@ fn context(cli: &Cli) -> Result<Context, Error> {
         return Ok(offline(paths));
     }
 
-    let endpoint = Client::options_from_env();
+    let endpoint = env::options();
     // `recover inspect` is offline once the journal records a hash, and it is
     // the command that explains a broken operation — precisely when the
     // environment may be broken too. An endpoint that cannot be read, or that
@@ -160,7 +162,7 @@ fn usable(endpoint: Result<&Options, &ApiError>) -> bool {
 /// endpoint: it has to go on explaining a broken operation when the credential
 /// is the broken thing.
 fn credential(command: &Command) -> Result<Option<ManagementKey>, Error> {
-    match ManagementKey::from_env() {
+    match env::management_key() {
         Ok(key) => Ok(Some(key)),
         Err(ApiError::MissingCredential) => Ok(None),
         Err(_) if inspecting(command) => Ok(None),

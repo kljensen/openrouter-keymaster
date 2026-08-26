@@ -10,8 +10,9 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-/// Where local state lives unless `--state` says otherwise. Defaulting here
-/// rather than in each handler keeps one answer to "which file is it?".
+/// Where local state lives unless `--state` says otherwise. The command line
+/// is the only place this default lives: [`crate::state`] is handed the path
+/// it works on, so a host that keeps state somewhere else names it (ADR-0003).
 /// Issue #10 owns the file's format, permissions, and locking.
 pub const DEFAULT_STATE_PATH: &str = ".openrouter-keymaster/state.json";
 

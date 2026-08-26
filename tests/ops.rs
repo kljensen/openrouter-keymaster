@@ -27,6 +27,7 @@ use support::project::{Project, address, at, hash, uuid};
 use support::sentinel::SECRET_SENTINEL_KEY;
 use wiremock::Mock;
 use wiremock::matchers::{method, path};
+use zeroize::Zeroizing;
 
 const JOBFEED_HASH: &str = "hash-jobfeed-1";
 const ASSIGNMENT_ID: &str = "44444444-4444-4444-8444-444444444444";
@@ -113,7 +114,10 @@ fn context(project: &Project) -> Context {
             state: project.state_path(),
         },
         options: Options::new(project.server.api_base_url()),
-        key: Some(ManagementKey::for_tests(SECRET_SENTINEL_KEY).expect("a usable test credential")),
+        key: Some(
+            ManagementKey::from_secret(Zeroizing::new(SECRET_SENTINEL_KEY.to_owned()))
+                .expect("a usable test credential"),
+        ),
     }
 }
 
@@ -287,8 +291,10 @@ fn a_different_credential_refuses_the_bound_apply() {
 
     let mut context = context(&project);
     context.key = Some(
-        ManagementKey::for_tests("sk-or-v1-A-DIFFERENT-FAKE-CREDENTIAL")
-            .expect("a usable test credential"),
+        ManagementKey::from_secret(Zeroizing::new(
+            "sk-or-v1-A-DIFFERENT-FAKE-CREDENTIAL".to_owned(),
+        ))
+        .expect("a usable test credential"),
     );
 
     assert_refused(&project, context, &expected);

@@ -28,6 +28,7 @@ use support::http::{
 use support::sentinel::{SECRET_SENTINEL_KEY, assert_absent, assert_present};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
+use zeroize::Zeroizing;
 
 /// Options for a test: the harness's base URL, short timeouts, and a retry
 /// policy with every delay flattened to zero, so a case that exercises the
@@ -46,7 +47,8 @@ fn options(server: &TestServer) -> Options {
 }
 
 fn client_with(options: Options) -> Client {
-    let key = ManagementKey::for_tests(SECRET_SENTINEL_KEY).expect("a usable fake credential");
+    let key = ManagementKey::from_secret(Zeroizing::new(SECRET_SENTINEL_KEY.to_owned()))
+        .expect("a usable fake credential");
     Client::new(options, &key).expect("a client")
 }
 
@@ -1013,21 +1015,34 @@ fn only_transient_statuses_are_retryable() {
 
 #[test]
 fn a_credential_is_checked_without_ever_being_quoted() {
-    let missing = ManagementKey::for_tests("   ").expect_err("blank is missing");
-    assert_eq!(missing.kind(), "missing_credential");
+    for blank in ["", "   ", "\t\n"] {
+        let missing = ManagementKey::from_secret(Zeroizing::new(blank.to_owned()))
+            .expect_err("a blank credential is no credential");
+        assert_eq!(missing.kind(), "missing_credential", "{blank:?}");
+    }
 
-    let unusable = ManagementKey::for_tests(&format!("{SECRET_SENTINEL_KEY} trailing words"))
-        .expect_err("a header value cannot contain a space");
-    assert_eq!(unusable.kind(), "unusable_credential");
-    assert_absent("the credential error", &unusable.to_string());
+    // A header value cannot carry a space or a control character, and a
+    // newline in one would let the value forge a second header.
+    for unusable in [
+        format!("{SECRET_SENTINEL_KEY} trailing words"),
+        format!("{SECRET_SENTINEL_KEY}\nX-Evil: 1"),
+        format!("{SECRET_SENTINEL_KEY}\u{7}"),
+    ] {
+        let refused = ManagementKey::from_secret(Zeroizing::new(unusable))
+            .expect_err("a credential that cannot be sent as a header is refused");
+        assert_eq!(refused.kind(), "unusable_credential");
+        assert_absent("the credential error", &refused.to_string());
+    }
 
-    let key = ManagementKey::for_tests(SECRET_SENTINEL_KEY).expect("a usable fake credential");
+    let key = ManagementKey::from_secret(Zeroizing::new(SECRET_SENTINEL_KEY.to_owned()))
+        .expect("a credential-shaped value is accepted");
     assert_absent("the credential's Debug output", &format!("{key:?}"));
 }
 
 #[test]
 fn the_base_url_must_be_an_absolute_http_url() {
-    let key = ManagementKey::for_tests(SECRET_SENTINEL_KEY).expect("a usable fake credential");
+    let key = ManagementKey::from_secret(Zeroizing::new(SECRET_SENTINEL_KEY.to_owned()))
+        .expect("a usable fake credential");
     for rejected in ["openrouter.ai/api/v1", "", "https://ai?token=x"] {
         let failure = Client::new(Options::new(rejected), &key)
             .err()
