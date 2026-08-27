@@ -64,6 +64,7 @@ fn the_example_configuration_is_valid() {
     let config = parse(include_str!(
         "../../../../examples/openrouter-keymaster.toml"
     ));
+    assert_eq!(config.workspaces.len(), 1);
     assert_eq!(config.guardrails.len(), 1);
     assert_eq!(config.keys.len(), 1);
     assert_eq!(config.receivers.len(), 2);
@@ -1006,4 +1007,244 @@ fn reset_intervals_render_the_way_they_are_written() {
     assert_eq!(ResetInterval::Daily.to_string(), "daily");
     assert_eq!(ResetInterval::Weekly.as_str(), "weekly");
     assert_eq!(ResetInterval::Monthly.as_str(), "monthly");
+}
+
+// --- workspaces (ADR-0004) --------------------------------------------------
+
+/// A workspace with everything a block can carry.
+const WORKSPACE: &str = r#"
+version = 1
+
+[workspaces.club]
+name = "Golf Club"
+slug = "golf-club"
+description = "the golf club's inference workspace"
+budgets = { daily = 5, weekly = 20, monthly = 50, lifetime = 500 }
+include_byok_in_budgets = true
+default_guardrail = "house"
+
+[guardrails.house]
+name = "house-rail"
+"#;
+
+fn workspace<'a>(config: &'a Config, name: &str) -> &'a Workspace {
+    config
+        .workspaces
+        .get(&address(name))
+        .expect("the configured workspace")
+}
+
+#[test]
+fn a_workspace_block_normalizes_into_the_desired_state() {
+    let config = parse(WORKSPACE);
+    let club = workspace(&config, "club");
+
+    assert_eq!(club.name.as_str(), "Golf Club");
+    assert_eq!(club.slug, "golf-club");
+    assert_eq!(club.include_byok_in_budgets, Some(true));
+    assert_eq!(club.default_guardrail.as_ref(), Some(&address("house")));
+    assert_eq!(
+        club.budgets.as_ref().expect("a managed budget table"),
+        &BTreeMap::from([
+            (BudgetInterval::Daily, Usd::from_dollars(5.0).expect("5")),
+            (BudgetInterval::Weekly, Usd::from_dollars(20.0).expect("20")),
+            (
+                BudgetInterval::Monthly,
+                Usd::from_dollars(50.0).expect("50")
+            ),
+            (
+                BudgetInterval::Lifetime,
+                Usd::from_dollars(500.0).expect("500")
+            ),
+        ])
+    );
+}
+
+#[test]
+fn a_slug_must_be_lowercase_segments_separated_by_single_hyphens() {
+    for accepted in ["golf", "golf-club", "club2", "a-b-c", "0"] {
+        let source =
+            format!("version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"{accepted}\"\n");
+        assert_eq!(
+            parse(&source).workspaces[&address("club")].slug,
+            accepted,
+            "{accepted} is a slug OpenRouter accepts"
+        );
+    }
+    for rejected in [
+        "",
+        "Golf-Club",
+        "golf_club",
+        "-golf",
+        "golf-",
+        "golf--club",
+        "golf club",
+        "golf.club",
+        "gölf",
+    ] {
+        let source =
+            format!("version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"{rejected}\"\n");
+        assert_eq!(
+            paths(&source),
+            vec!["workspaces.club.slug"],
+            "{rejected:?} is not a slug"
+        );
+    }
+}
+
+#[test]
+fn a_workspace_needs_a_name_and_a_slug() {
+    assert_eq!(
+        paths("version = 1\n\n[workspaces.club]\n"),
+        vec!["workspaces.club.name", "workspaces.club.slug"]
+    );
+}
+
+#[test]
+fn budgets_must_grow_as_the_interval_widens() {
+    // The server checks lifetime > monthly > weekly > daily on every write, so
+    // a table that violates it can never be applied in any order.
+    let source = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+                  budgets = { daily = 50, monthly = 20 }\n";
+    assert_eq!(paths(source), vec!["workspaces.club.budgets.monthly"]);
+
+    // Equal is not greater.
+    let equal = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+                 budgets = { weekly = 20, monthly = 20 }\n";
+    assert_eq!(paths(equal), vec!["workspaces.club.budgets.monthly"]);
+
+    // Only the intervals actually written are compared: a daily budget with no
+    // weekly one is checked against the monthly one.
+    let sparse = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+                  budgets = { daily = 5, lifetime = 500 }\n";
+    assert!(Config::parse(sparse).is_ok());
+}
+
+#[test]
+fn a_budget_must_be_greater_than_zero() {
+    let source = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+                  budgets = { monthly = 0 }\n";
+    assert_eq!(paths(source), vec!["workspaces.club.budgets.monthly"]);
+}
+
+#[test]
+fn byok_in_budgets_needs_a_budget_to_travel_with() {
+    // OpenRouter writes the setting only as part of a budget `PUT`, so there is
+    // no request a configuration without one could carry it in.
+    for source in [
+        "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+         include_byok_in_budgets = true\n",
+        "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+         budgets = {}\ninclude_byok_in_budgets = false\n",
+    ] {
+        assert_eq!(
+            paths(source),
+            vec!["workspaces.club.include_byok_in_budgets"],
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn a_guardrail_is_the_default_of_at_most_one_workspace() {
+    let source = "version = 1\n\n[workspaces.one]\nname = \"One\"\nslug = \"one\"\n\
+                  default_guardrail = \"house\"\n\n\
+                  [workspaces.two]\nname = \"Two\"\nslug = \"two\"\n\
+                  default_guardrail = \"house\"\n\n\
+                  [guardrails.house]\nname = \"house-rail\"\n";
+    assert_eq!(paths(source), vec!["workspaces.two.default_guardrail"]);
+}
+
+#[test]
+fn a_default_guardrail_belongs_to_its_own_workspace() {
+    let elsewhere = "version = 1\n\n[workspaces.one]\nname = \"One\"\nslug = \"one\"\n\
+                     default_guardrail = \"house\"\n\n\
+                     [workspaces.two]\nname = \"Two\"\nslug = \"two\"\n\n\
+                     [guardrails.house]\nname = \"house-rail\"\nworkspace = \"two\"\n";
+    assert_eq!(paths(elsewhere), vec!["guardrails.house.workspace"]);
+
+    // Omitted and equal are both fine.
+    for placement in ["", "workspace = \"one\"\n"] {
+        let source = format!(
+            "version = 1\n\n[workspaces.one]\nname = \"One\"\nslug = \"one\"\n\
+             default_guardrail = \"house\"\n\n[guardrails.house]\nname = \"house-rail\"\n{placement}"
+        );
+        assert!(Config::parse(&source).is_ok(), "{source}");
+    }
+}
+
+#[test]
+fn a_default_guardrail_must_be_a_configured_block() {
+    let source = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+                  default_guardrail = \"missing\"\n";
+    assert_eq!(paths(source), vec!["workspaces.club.default_guardrail"]);
+}
+
+#[test]
+fn a_block_names_its_workspace_by_address_or_by_uuid_and_never_both() {
+    let base = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\n\
+                [receivers.vault]\ntype = \"file\"\npath = \"/tmp/vault.key\"\n\n";
+    let both = format!(
+        "{base}[keys.jobfeed]\nname = \"jobfeed\"\nreceiver = \"vault\"\n\
+         workspace = \"club\"\nworkspace_id = \"00000000-0000-4000-8000-000000000001\"\n"
+    );
+    assert_eq!(paths(&both), vec!["keys.jobfeed.workspace"]);
+
+    let rail = format!(
+        "{base}[guardrails.house]\nname = \"house-rail\"\n\
+         workspace = \"club\"\nworkspace_id = \"00000000-0000-4000-8000-000000000001\"\n"
+    );
+    assert_eq!(paths(&rail), vec!["guardrails.house.workspace"]);
+
+    let one = format!("{base}[guardrails.house]\nname = \"house-rail\"\nworkspace = \"club\"\n");
+    assert_eq!(
+        parse(&one).guardrails[&address("house")].workspace.as_ref(),
+        Some(&address("club"))
+    );
+}
+
+#[test]
+fn a_workspace_reference_must_name_a_configured_block() {
+    let source = "version = 1\n\n[receivers.vault]\ntype = \"file\"\npath = \"/tmp/vault.key\"\n\n\
+                  [keys.jobfeed]\nname = \"jobfeed\"\nreceiver = \"vault\"\n\
+                  workspace = \"missing\"\n";
+    assert_eq!(paths(source), vec!["keys.jobfeed.workspace"]);
+}
+
+#[test]
+fn a_workspace_description_can_be_cleared() {
+    let source = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+                  clear = [\"description\"]\n";
+    assert_eq!(
+        parse(source).workspaces[&address("club")].description,
+        Managed::Cleared
+    );
+
+    let both = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+                description = \"a club\"\nclear = [\"description\"]\n";
+    assert_eq!(paths(both), vec!["workspaces.club.description"]);
+}
+
+#[test]
+fn a_misspelled_budget_interval_is_a_syntax_error_rather_than_a_silent_omission() {
+    let source = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+                  budgets = { montly = 50 }\n";
+    let error = Config::parse(source).expect_err("an unknown budget interval is rejected");
+    assert_eq!(error.kind(), "config_syntax", "{error}");
+}
+
+#[test]
+fn a_default_guardrail_takes_its_placement_from_the_relationship_and_not_a_uuid() {
+    // Being a workspace's default *is* the placement, so a second spelling of
+    // it can only disagree — and nothing offline can check a raw UUID against a
+    // workspace whose identity is whatever its binding says.
+    let source = "version = 1\n\n[workspaces.one]\nname = \"One\"\nslug = \"one\"\n\
+                  default_guardrail = \"house\"\n\n[guardrails.house]\nname = \"house-rail\"\n\
+                  workspace_id = \"00000000-0000-4000-8000-000000000001\"\n";
+    assert_eq!(paths(source), vec!["guardrails.house.workspace_id"]);
+
+    // A guardrail that is nobody's default may name one freely.
+    let ordinary = "version = 1\n\n[guardrails.house]\nname = \"house-rail\"\n\
+                    workspace_id = \"00000000-0000-4000-8000-000000000001\"\n";
+    assert!(Config::parse(ordinary).is_ok());
 }

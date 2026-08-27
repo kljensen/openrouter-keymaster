@@ -30,6 +30,9 @@ pub(super) struct Document {
     pub(super) defaults: Defaults,
 
     #[serde(default)]
+    pub(super) workspaces: BTreeMap<String, Workspace>,
+
+    #[serde(default)]
     pub(super) guardrails: BTreeMap<String, Guardrail>,
 
     #[serde(default)]
@@ -37,6 +40,35 @@ pub(super) struct Document {
 
     #[serde(default)]
     pub(super) receivers: BTreeMap<String, Receiver>,
+}
+
+/// One `[workspaces.<address>]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Workspace {
+    pub(super) name: Option<String>,
+    pub(super) slug: Option<String>,
+    pub(super) description: Option<String>,
+    pub(super) budgets: Option<Budgets>,
+    pub(super) include_byok_in_budgets: Option<bool>,
+    pub(super) default_guardrail: Option<String>,
+
+    /// See [`Guardrail::clear`].
+    #[serde(default)]
+    pub(super) clear: Vec<String>,
+}
+
+/// The `budgets` table of a workspace block.
+///
+/// Four named fields rather than a map, so `budgets = { montly = 10 }` is a
+/// deserializer error naming the table rather than a budget silently ignored.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Budgets {
+    pub(super) daily: Option<Number>,
+    pub(super) weekly: Option<Number>,
+    pub(super) monthly: Option<Number>,
+    pub(super) lifetime: Option<Number>,
 }
 
 /// The `[defaults]` table.
@@ -60,6 +92,8 @@ pub(super) struct Guardrail {
     pub(super) reset_interval: Option<String>,
     pub(super) include_byok_in_limit: Option<bool>,
     pub(super) require_zdr: Option<bool>,
+    pub(super) workspace: Option<String>,
+    pub(super) workspace_id: Option<String>,
 
     /// Fields to clear remotely. TOML has no null literal, so this list is how
     /// a configuration distinguishes "leave the remote value alone" (omit the
@@ -77,6 +111,7 @@ pub(super) struct Key {
     pub(super) limit_reset: Option<String>,
     pub(super) expires_at: Option<String>,
     pub(super) disabled: Option<bool>,
+    pub(super) workspace: Option<String>,
     pub(super) workspace_id: Option<String>,
     pub(super) creator_user_id: Option<String>,
     pub(super) guardrail: Option<String>,

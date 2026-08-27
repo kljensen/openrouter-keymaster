@@ -89,6 +89,27 @@ impl ImportReport {
         )
     }
 
+    /// Describes an imported workspace.
+    #[must_use]
+    pub(crate) fn workspace(
+        address: &Address,
+        id: &Uuid,
+        origin: Origin,
+        remote_name: &str,
+        changes: &[FieldChange],
+        bound: bool,
+    ) -> Self {
+        Self::new(
+            "workspace",
+            format!("workspaces.{address}"),
+            format!("workspace {id}"),
+            origin,
+            remote_name,
+            changes,
+            bound,
+        )
+    }
+
     fn new(
         resource: &'static str,
         address: String,

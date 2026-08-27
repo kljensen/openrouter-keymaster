@@ -333,8 +333,10 @@ letting go of. Afterwards `openrouter-keymaster plan` reports whichever of them 
 OpenRouter still has as unmanaged, and no Keymaster command will touch them \
 again.
 
-ADDRESS is `keys.NAME` or `guardrails.NAME`. A bare NAME is accepted when only \
-one of the two is bound, and refused when both are.
+ADDRESS is `keys.NAME`, `guardrails.NAME`, or `workspaces.NAME`. A bare NAME is \
+accepted when only one of the three is bound, and refused when more than one \
+is. Forgetting a workspace releases the default guardrail bound to it as well: \
+that guardrail cannot outlive its workspace, and nothing else can reach it.
 
 Forgetting an address with an operation in progress is refused: the journal is \
 the only record that the attempt happened, and in the create phases the only \
@@ -370,6 +372,25 @@ pub enum ImportResource {
         name: String,
 
         /// UUID of the remote guardrail.
+        #[arg(long, value_name = "UUID")]
+        id: String,
+    },
+
+    /// Bind an existing workspace by its UUID.
+    #[command(long_about = "\
+Bind an existing workspace by its UUID.
+
+Like every import, this makes no remote write: it reads that one workspace and \
+records a binding. It also records the workspace's `default_guardrail_id`, and \
+binds the guardrail block the configuration names as `default_guardrail` to \
+that identity — the default guardrail appears in no listing until its \
+configuration is first written, so the identity the workspace carries is the \
+only handle on it, and it can never be imported by name.")]
+    Workspace {
+        /// Local workspace address, as written in the configuration.
+        name: String,
+
+        /// UUID of the remote workspace.
         #[arg(long, value_name = "UUID")]
         id: String,
     },
@@ -423,6 +444,31 @@ pub enum DeleteResource {
         /// Immutable hash of the tracked key to delete.
         #[arg(long, value_name = "HASH")]
         hash: String,
+    },
+
+    /// Permanently delete a tracked workspace, identified by its UUID.
+    #[command(long_about = "\
+Permanently delete a tracked workspace, identified by its UUID.
+
+Deleting a workspace permanently deletes its budgets and its guardrails, so \
+this refuses while OpenRouter shows the workspace holding any key or guardrail \
+— tracked or not, because Keymaster does not destroy what it does not manage. \
+Remove them first; the refusal lists exactly what it found.
+
+The one exception is the workspace's own default guardrail. It is part of the \
+workspace, cannot outlive it, and cannot be deleted on its own, so it is not \
+counted as an occupant and its binding is released along with the workspace's.
+
+The UUID must be one a local address already tracks. The request is sent \
+exactly once, and only a 404 on the read that follows proves the workspace is \
+gone; anything else leaves the binding tracked.
+
+Exit code 0 means OpenRouter is known not to have the workspace. Exit code 1 \
+means that is not established, or that the workspace still holds something.")]
+    Workspace {
+        /// UUID of the tracked workspace to delete.
+        #[arg(long, value_name = "UUID")]
+        id: String,
     },
 }
 

@@ -47,10 +47,10 @@ use time::OffsetDateTime;
 use crate::api::{Reader, Writer};
 use crate::client::ApiError;
 use crate::error::Error;
-use crate::ids::{Address, IdError, KeyHash};
+use crate::ids::{Address, IdError, KeyHash, Uuid};
 use crate::report::{
-    DecommissionReport, DeleteAttempt, DeleteOutcome, DeleteReport, Ending, ForgetReport, Released,
-    RetireReport,
+    DecommissionReport, DeleteAttempt, DeleteOutcome, DeleteReport, DeleteWorkspaceReport, Ending,
+    ForgetReport, Released, RetireReport,
 };
 use crate::state::{
     KeyBinding, Phase, RetainedKey, RetainedStatus, State, StateFile, StateLock, TransitionError,
@@ -353,6 +353,172 @@ fn attempt_delete(
     }
 }
 
+// --- delete workspace ----------------------------------------------------------
+
+/// Deletes one tracked workspace permanently.
+///
+/// Refused while OpenRouter shows the workspace holding anything — a key, a
+/// guardrail, and, once ADR-0006 lands, a log destination — whether or not
+/// Keymaster tracks it, because deleting a workspace takes its children with it
+/// and ADR-0001 forbids destroying what Keymaster does not manage. The one
+/// exception is the workspace's own default guardrail: it is part of the
+/// workspace, cannot outlive it, and cannot be deleted on its own, so its
+/// binding is released along with the workspace's (ADR-0004, item 1).
+///
+/// # Errors
+///
+/// Returns [`LifecycleError`] for a value this command cannot use, a UUID no
+/// local address tracks, or a workspace that still holds something; and the
+/// state and API errors of the steps it performs, including
+/// `missing_credential`. A deletion that could not be confirmed is reported
+/// beside the result document rather than in place of it.
+pub fn delete_workspace(
+    context: Context,
+    id: &str,
+) -> Result<Outcome<DeleteWorkspaceReport>, Error> {
+    let attempt = delete_tracked_workspace(&context, id)?;
+    if attempt.report.settled() {
+        return Ok(Outcome::ok(attempt.report));
+    }
+    Ok(Outcome::failed(
+        attempt.report,
+        LifecycleError::WorkspaceDeleteUnconfirmed { id: attempt.id },
+    ))
+}
+
+/// One workspace deletion's result document and the identity it acted on.
+struct WorkspaceDeletion {
+    report: DeleteWorkspaceReport,
+    id: Uuid,
+}
+
+fn delete_tracked_workspace(context: &Context, id: &str) -> Result<WorkspaceDeletion, Error> {
+    let id = Uuid::parse(id).map_err(|error| argument("--id", &error))?;
+
+    let file = StateFile::new(&context.paths.state);
+    let lock = file.lock()?;
+    let mut state = lock.read()?;
+
+    let address = state
+        .address_owning_workspace(&id)
+        .cloned()
+        .ok_or_else(|| LifecycleError::WorkspaceUntracked { id: id.clone() })?;
+    let default_guardrail = state
+        .workspace(&address)
+        .and_then(|binding| binding.default_guardrail_id.clone());
+
+    let client = context.client()?;
+    let (reader, writer) = (Reader::new(&client), Writer::new(&client));
+    let children = observed_children(&reader, &id, default_guardrail.as_ref())?;
+    if !children.is_empty() {
+        return Err(LifecycleError::WorkspaceInhabited {
+            address,
+            id,
+            children,
+        }
+        .into());
+    }
+
+    let (outcome, detail) = attempt_workspace_delete(&reader, &writer, &id);
+    let mut released = Vec::new();
+    if outcome.is_gone() {
+        if let Some(binding) = state.forget_workspace(&address) {
+            released.push(format!("workspaces.{address} ({id})", id = binding.id));
+        }
+        // The default guardrail goes with the workspace: it cannot outlive one,
+        // and there is no request that deletes it on its own.
+        if let Some(default) = &default_guardrail
+            && let Some(guardrail) = state.address_owning_guardrail(default).cloned()
+        {
+            state.forget_guardrail(&guardrail);
+            released.push(format!("guardrails.{guardrail} ({default})"));
+        }
+        lock.write(&mut state)?;
+    }
+
+    Ok(WorkspaceDeletion {
+        report: DeleteWorkspaceReport::new(&address, &id, outcome, detail, released),
+        id,
+    })
+}
+
+/// What OpenRouter shows the workspace holding, other than its own default
+/// guardrail.
+///
+/// Read rather than taken from state: a key another operator made in this
+/// workspace is exactly the thing this refusal exists for, and state does not
+/// know about it. Log destinations (ADR-0006) join this list when they exist.
+fn observed_children(
+    reader: &Reader<'_>,
+    id: &Uuid,
+    default_guardrail: Option<&Uuid>,
+) -> Result<Vec<String>, ApiError> {
+    let mut children: Vec<String> = reader
+        .list_keys(Some(id))?
+        .into_iter()
+        .map(|key| format!("key {hash}", hash = key.hash))
+        .collect();
+    children.extend(
+        reader
+            .list_guardrails(Some(id))?
+            .into_iter()
+            .filter(|guardrail| Some(&guardrail.id) != default_guardrail)
+            .map(|guardrail| format!("guardrail {id}", id = guardrail.id)),
+    );
+    Ok(children)
+}
+
+/// Sends the one `DELETE` and establishes what it achieved by reading back.
+///
+/// The same rule as [`attempt_delete`]: a 2xx is checked against a fresh read,
+/// and only a 404 proves absence.
+fn attempt_workspace_delete(
+    reader: &Reader<'_>,
+    writer: &Writer<'_>,
+    id: &Uuid,
+) -> (DeleteOutcome, String) {
+    if let Err(error) = writer.delete_workspace(id) {
+        if error.status() == Some(404) {
+            return (
+                DeleteOutcome::AlreadyAbsent,
+                "OpenRouter has no such workspace, so there was nothing to delete; the binding is \
+                 no longer tracked."
+                    .to_owned(),
+            );
+        }
+        return (
+            DeleteOutcome::Failed,
+            format!(
+                "the delete failed and was sent exactly once: {error}. Whether it took effect is \
+                 unknown, so the binding stays tracked."
+            ),
+        );
+    }
+
+    match reader.get_workspace(id) {
+        Err(error) if error.status() == Some(404) => (
+            DeleteOutcome::Deleted,
+            "OpenRouter returned 404 for the workspace after the delete, which is what proves it \
+             is gone; the binding is no longer tracked."
+                .to_owned(),
+        ),
+        Ok(_) => (
+            DeleteOutcome::Unconfirmed,
+            "OpenRouter accepted the delete and still returns the workspace, so it is not \
+             confirmed gone; the binding stays tracked and the delete is never resent \
+             automatically."
+                .to_owned(),
+        ),
+        Err(error) => (
+            DeleteOutcome::Unconfirmed,
+            format!(
+                "OpenRouter accepted the delete and the read that would confirm it failed: \
+                 {error}. The binding stays tracked."
+            ),
+        ),
+    }
+}
+
 // --- decommission ------------------------------------------------------------
 
 /// Takes an address's working key out of service, and optionally deletes it.
@@ -622,7 +788,9 @@ enum Target {
     Key(Address),
     /// `guardrails.NAME`.
     Guardrail(Address),
-    /// A bare `NAME`, which is whichever of the two is bound.
+    /// `workspaces.NAME`.
+    Workspace(Address),
+    /// A bare `NAME`, which is whichever of the three is bound.
     Either(Address),
 }
 
@@ -663,6 +831,7 @@ fn forget_address(context: &Context, address: &str) -> Result<ForgetReport, Erro
 enum Resource {
     Key,
     Guardrail,
+    Workspace,
 }
 
 impl Resource {
@@ -671,6 +840,7 @@ impl Resource {
         match self {
             Self::Key => "key",
             Self::Guardrail => "guardrail",
+            Self::Workspace => "workspace",
         }
     }
 }
@@ -689,6 +859,9 @@ fn parse_target(value: &str) -> Result<Target, LifecycleError> {
     if let Some(name) = value.strip_prefix("guardrails.") {
         return Ok(Target::Guardrail(local_address(name)?));
     }
+    if let Some(name) = value.strip_prefix("workspaces.") {
+        return Ok(Target::Workspace(local_address(name)?));
+    }
     Ok(Target::Either(local_address(value)?))
 }
 
@@ -703,16 +876,26 @@ fn resolve<'a>(
             state.guardrail(address).map(|_| Resource::Guardrail),
             address,
         )),
+        Target::Workspace(address) => Ok((
+            state.workspace(address).map(|_| Resource::Workspace),
+            address,
+        )),
         Target::Either(address) => {
-            let key = state.key(address).is_some();
-            let guardrail = state.guardrail(address).is_some();
-            match (key, guardrail) {
-                (true, true) => Err(LifecycleError::ForgetAmbiguous {
+            let bound: Vec<Resource> = [
+                state.key(address).map(|_| Resource::Key),
+                state.guardrail(address).map(|_| Resource::Guardrail),
+                state.workspace(address).map(|_| Resource::Workspace),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            match bound.as_slice() {
+                [] => Ok((None, address)),
+                [only] => Ok((Some(*only), address)),
+                several => Err(LifecycleError::ForgetAmbiguous {
                     address: address.clone(),
+                    kinds: several.iter().map(|kind| kind.as_str()).collect(),
                 }),
-                (true, false) => Ok((Some(Resource::Key), address)),
-                (false, true) => Ok((Some(Resource::Guardrail), address)),
-                (false, false) => Ok((None, address)),
             }
         }
     }
@@ -729,6 +912,22 @@ fn release(
             .forget_guardrail(address)
             .map(|binding| vec![Released::guardrail(&binding.id, binding.origin)])
             .unwrap_or_default()),
+        Resource::Workspace => {
+            let Some(binding) = state.forget_workspace(address) else {
+                return Ok(Vec::new());
+            };
+            let mut released = vec![Released::workspace(&binding.id, binding.origin)];
+            // The workspace's default guardrail goes with it, wherever it is
+            // bound: it cannot outlive the workspace, and nothing else can
+            // reach it (ADR-0004, item 1).
+            if let Some(default) = &binding.default_guardrail_id
+                && let Some(guardrail) = state.address_owning_guardrail(default).cloned()
+                && let Some(guardrail) = state.forget_guardrail(&guardrail)
+            {
+                released.push(Released::guardrail(&guardrail.id, guardrail.origin));
+            }
+            Ok(released)
+        }
         Resource::Key => {
             let binding = state.forget_key(address).map_err(|error| match error {
                 TransitionError::AlreadyPending { phase, .. } => LifecycleError::ForgetPending {
@@ -968,14 +1167,17 @@ pub enum LifecycleError {
         hash: KeyHash,
     },
 
-    /// A bare address is bound as both a key and a guardrail.
+    /// A bare address is bound as more than one kind of resource.
     #[error(
-        "`{address}` is bound as both a key and a guardrail, so it is not clear which to forget; \
-         say `keys.{address}` or `guardrails.{address}`"
+        "`{address}` is bound as more than one kind of resource ({kinds}), so it is not clear \
+         which to forget; say `keys.{address}`, `guardrails.{address}`, or `workspaces.{address}`",
+        kinds = kinds.join(", ")
     )]
     ForgetAmbiguous {
         /// The local address.
         address: Address,
+        /// The kinds that are bound there.
+        kinds: Vec<&'static str>,
     },
 
     /// The address has an operation in progress.
@@ -991,6 +1193,47 @@ pub enum LifecycleError {
         phase: Phase,
         /// The command that clears it, from [`Resolution`].
         resolution: String,
+    },
+
+    /// No local address owns the workspace named.
+    #[error(
+        "no local address tracks workspace {id}, so Keymaster will not delete it. A workspace it \
+         does not own belongs to whoever made it; `openrouter-keymaster import workspace NAME \
+         --id {id}` is how one becomes Keymaster's."
+    )]
+    WorkspaceUntracked {
+        /// The UUID that was named.
+        id: Uuid,
+    },
+
+    /// The workspace still holds resources, so deleting it would destroy them.
+    #[error(
+        "workspace {id} at `{address}` still holds {count}, and deleting a workspace permanently \
+         deletes what is in it — tracked or not. Remove {them} first: {children}. Only the \
+         workspace's own default guardrail is exempt, because it cannot outlive the workspace or \
+         be deleted on its own.",
+        count = crate::report::plural(children.len(), "resource"),
+        them = if children.len() == 1 { "it" } else { "them" },
+        children = children.join(", "),
+    )]
+    WorkspaceInhabited {
+        /// The local address.
+        address: Address,
+        /// The UUID that was named.
+        id: Uuid,
+        /// What OpenRouter shows the workspace holding.
+        children: Vec<String>,
+    },
+
+    /// The workspace delete did not take, or could not be proved to have taken.
+    #[error(
+        "workspace {id} is not confirmed deleted, so it stays tracked; the request was sent \
+         exactly once and is never resent automatically. The result document says what the \
+         attempt established."
+    )]
+    WorkspaceDeleteUnconfirmed {
+        /// The UUID that was named.
+        id: Uuid,
     },
 
     /// The state API refused the change.
@@ -1017,6 +1260,9 @@ impl LifecycleError {
             Self::DecommissionPending { .. } => "decommission_pending",
             Self::DecommissionUnconfirmed { .. } => "decommission_unconfirmed",
             Self::DecommissionDeleteUnconfirmed { .. } => "decommission_delete_unconfirmed",
+            Self::WorkspaceUntracked { .. } => "delete_workspace_untracked",
+            Self::WorkspaceInhabited { .. } => "delete_workspace_inhabited",
+            Self::WorkspaceDeleteUnconfirmed { .. } => "delete_workspace_unconfirmed",
             Self::ForgetAmbiguous { .. } => "forget_ambiguous",
             Self::ForgetPending { .. } => "forget_pending",
             Self::Refused(_) => "lifecycle_refused",

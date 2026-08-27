@@ -35,8 +35,9 @@
 
 use time::OffsetDateTime;
 
-use crate::api::Reader;
+use crate::api::{ObservedGuardrail, Reader};
 use crate::client::ApiError;
+use crate::config::Config;
 use crate::error::Error;
 use crate::ids::{Address, IdError, KeyHash, Uuid};
 use crate::plan;
@@ -73,6 +74,7 @@ pub fn import_key(
         .get(&address)
         .ok_or_else(|| ImportError::not_configured("key", &address))?;
     let mut state = lock.read()?;
+    context.check_scope(&config, &state)?;
 
     let client = context.client()?;
     let observed = Reader::new(&client)
@@ -80,7 +82,8 @@ pub fn import_key(
         .map_err(|error| absent_or(error, &format!("key {hash}")))?;
     check_key_bindings(&state, &address, &hash)?;
 
-    let changes = plan::key_changes(desired, Some(&observed));
+    let workspace = plan::key_placement(&state, desired);
+    let changes = plan::key_changes(desired, Some(&observed), workspace.identity());
     let bound = record(&lock, &mut state, |state| {
         state.bind_key(&address, hash.clone(), desired.generation, now())
     })?;
@@ -118,12 +121,14 @@ pub fn import_guardrail(
         .get(&address)
         .ok_or_else(|| ImportError::not_configured("guardrail", &address))?;
     let mut state = lock.read()?;
+    context.check_scope(&config, &state)?;
 
     let client = context.client()?;
     let observed = Reader::new(&client)
         .get_guardrail(&id)
         .map_err(|error| absent_or(error, &format!("guardrail {id}")))?;
     check_guardrail_bindings(&state, &address, &id)?;
+    check_guardrail_workspace(&context, &config, &state, &address, desired, &observed)?;
 
     let changes = plan::guardrail_changes(desired, Some(&observed));
     let bound = record(&lock, &mut state, |state| {
@@ -138,6 +143,89 @@ pub fn import_guardrail(
         &changes,
         bound,
     )))
+}
+
+/// Binds one workspace to a local address, by its immutable UUID.
+///
+/// Records the workspace's `default_guardrail_id` with the binding, and — when
+/// the block names a `default_guardrail` — binds that guardrail block to it in
+/// the same write. The default guardrail is not a resource an operator can
+/// import by name: it appears in no listing until its configuration is first
+/// written, and the only handle on it is the identity the workspace names
+/// (ADR-0004, item 3).
+///
+/// # Errors
+///
+/// As [`import_key`].
+pub fn import_workspace(
+    context: Context,
+    name: &str,
+    id: &str,
+) -> Result<Outcome<ImportReport>, Error> {
+    let address = local_address(name)?;
+    let id = Uuid::parse(id).map_err(|error| identifier("--id", &error))?;
+
+    let file = StateFile::new(&context.paths.state);
+    let lock = file.lock()?;
+    let config = context.config()?;
+    let desired = config
+        .workspaces
+        .get(&address)
+        .ok_or_else(|| ImportError::not_configured("workspace", &address))?;
+    let mut state = lock.read()?;
+    context.check_scope(&config, &state)?;
+
+    let client = context.client()?;
+    let observed = Reader::new(&client)
+        .get_workspace(&id)
+        .map_err(|error| absent_or(error, &format!("workspace {id}")))?;
+    check_workspace_bindings(&state, &address, &id)?;
+
+    let changes = plan::workspace_changes(desired, Some(&observed));
+    let default = desired.default_guardrail.clone();
+    let default_id = observed.default_guardrail_id.clone();
+    let bound = record(&lock, &mut state, |state| {
+        state.bind_workspace(
+            &address,
+            id.clone(),
+            default_id.clone(),
+            Origin::Imported,
+            now(),
+        )?;
+        bind_default_guardrail(
+            state,
+            default.as_ref(),
+            default_id.as_ref(),
+            Origin::Imported,
+        )
+    })?;
+
+    Ok(Outcome::ok(ImportReport::workspace(
+        &address,
+        &id,
+        origin_of(state.workspace(&address).map(|binding| binding.origin)),
+        &observed.name,
+        &changes,
+        bound,
+    )))
+}
+
+/// Binds the guardrail block a workspace names as its default to the
+/// deterministic identity the workspace object carries.
+///
+/// Shared by `import workspace` and by apply's workspace create, because both
+/// are moments a workspace binding is recorded and both have to leave the
+/// default guardrail reachable. Repeating it is a no-op.
+pub(super) fn bind_default_guardrail(
+    state: &mut State,
+    address: Option<&Address>,
+    id: Option<&Uuid>,
+    origin: Origin,
+) -> Result<(), BindError> {
+    let (Some(address), Some(id)) = (address, id) else {
+        return Ok(());
+    };
+    state.bind_guardrail(address, id.clone(), origin, now())
 }
 
 /// Applies a binding and writes state only if the binding changed it.
@@ -207,6 +295,70 @@ fn check_guardrail_bindings(
             address: address.clone(),
             bound: format!("guardrail {id}", id = binding.id),
             offered: format!("guardrail {id}"),
+        });
+    }
+    Ok(())
+}
+
+/// Refuses a guardrail whose workspace is not the one the address would place
+/// it in.
+///
+/// A guardrail's workspace is fixed when it is created and a guardrail is never
+/// replaced, so binding one that sits somewhere else would record a difference
+/// no later apply could ever converge. Both halves are checked: the workspace
+/// the block names — a raw UUID, an address state binds, or the workspace whose
+/// `default_guardrail` this block is — and the run's own scope, since a scoped
+/// run manages nothing outside it.
+fn check_guardrail_workspace(
+    context: &Context,
+    config: &Config,
+    state: &State,
+    address: &Address,
+    desired: &crate::config::Guardrail,
+    observed: &ObservedGuardrail,
+) -> Result<(), ImportError> {
+    let default_of = plan::workspace_defaulting_to(config, address);
+    let expected =
+        plan::configured_workspace_of(state, desired, default_of, context.workspace.as_ref());
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if observed.workspace_id.as_ref() == Some(&expected) {
+        return Ok(());
+    }
+    Err(ImportError::WorkspaceMismatch {
+        address: address.clone(),
+        identity: format!("guardrail {id}", id = observed.id),
+        observed: observed
+            .workspace_id
+            .as_ref()
+            .map_or_else(|| "no workspace".to_owned(), |id| format!("workspace {id}")),
+        expected,
+    })
+}
+
+/// Refuses a workspace binding that would break the one-to-one rule.
+fn check_workspace_bindings(
+    state: &State,
+    address: &Address,
+    id: &Uuid,
+) -> Result<(), ImportError> {
+    if let Some(owner) = state.address_owning_workspace(id)
+        && owner != address
+    {
+        return Err(ImportError::OwnedElsewhere {
+            identity: format!("workspace {id}"),
+            address: address.clone(),
+            owner: owner.clone(),
+        });
+    }
+    if let Some(binding) = state.workspace(address)
+        && binding.id != *id
+    {
+        return Err(ImportError::AddressBound {
+            address: address.clone(),
+            bound: format!("workspace {id}", id = binding.id),
+            offered: format!("workspace {id}"),
         });
     }
     Ok(())
@@ -317,6 +469,25 @@ pub enum ImportError {
         offered: String,
     },
 
+    /// The remote object is in a workspace this address could never place it
+    /// in.
+    #[error(
+        "{identity} is in {observed}, and `{address}` places it in workspace {expected}. A \
+         guardrail's workspace is fixed when it is created and a guardrail is never replaced, so \
+         binding this one would record a difference no apply could converge. Nothing was imported \
+         and state is unchanged."
+    )]
+    WorkspaceMismatch {
+        /// The local address.
+        address: Address,
+        /// The remote object, as it is addressed.
+        identity: String,
+        /// Where OpenRouter has it.
+        observed: String,
+        /// Where the configuration and the run's scope put it.
+        expected: Uuid,
+    },
+
     /// The state API refused the binding.
     #[error(transparent)]
     Refused(#[from] BindError),
@@ -332,6 +503,7 @@ impl ImportError {
             Self::Absent { .. } => "import_absent",
             Self::OwnedElsewhere { .. } => "import_owned_elsewhere",
             Self::AddressBound { .. } => "import_address_bound",
+            Self::WorkspaceMismatch { .. } => "import_workspace_mismatch",
             Self::Refused(_) => "import_refused",
         }
     }

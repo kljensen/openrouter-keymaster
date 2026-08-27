@@ -65,6 +65,7 @@ pub fn rotate(mut context: Context, name: &str) -> Result<Outcome<RotateReport>,
     let lock = file.lock()?;
     let config = context.config()?;
     let mut state = lock.read()?;
+    context.check_scope(&config, &state)?;
 
     check_nothing_pending(&state)?;
     let predecessor = state

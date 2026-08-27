@@ -38,8 +38,8 @@ use crate::state::Phase;
 pub use apply::{ActionOutcome, ApplyReport};
 pub use import::ImportReport;
 pub use lifecycle::{
-    DecommissionReport, DeleteAttempt, DeleteOutcome, DeleteReport, Ending, ForgetReport,
-    Predecessor, Released, RetireReport, RotateReport,
+    DecommissionReport, DeleteAttempt, DeleteOutcome, DeleteReport, DeleteWorkspaceReport, Ending,
+    ForgetReport, Predecessor, Released, RetireReport, RotateReport,
 };
 pub use plan::PlanReport;
 pub(crate) use recover::created_near;
@@ -187,7 +187,7 @@ fn money(dollars: f64) -> String {
 }
 
 /// A count with a plural `s` when it needs one.
-fn plural(count: usize, noun: &str) -> String {
+pub(crate) fn plural(count: usize, noun: &str) -> String {
     let suffix = if count == 1 { "" } else { "s" };
     format!("{count} {noun}{suffix}")
 }

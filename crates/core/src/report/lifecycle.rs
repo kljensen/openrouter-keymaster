@@ -281,6 +281,107 @@ impl fmt::Display for RetireReport {
 /// cover it: a key OpenRouter never had is the desired end state reached
 /// without a deletion, and a delete it accepted but a read still finds is
 /// neither a success nor a failure.
+/// What `delete workspace` established, and what it released.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeleteWorkspaceReport {
+    command: &'static str,
+    /// The local address that tracked the workspace.
+    address: String,
+    /// The UUID that was named.
+    id: String,
+    /// What the attempt established.
+    outcome: DeleteOutcome,
+    /// Whether Keymaster still tracks the workspace after this run.
+    tracked: bool,
+    /// The bindings this run released: the workspace, and the default guardrail
+    /// that cannot outlive it.
+    released: Vec<String>,
+    /// How the outcome was established. Never contains secret material.
+    detail: String,
+    /// What this run established.
+    summary: String,
+    /// Diagnostics an operator should see.
+    warnings: Vec<String>,
+}
+
+impl DeleteWorkspaceReport {
+    /// Describes one workspace deletion attempt.
+    #[must_use]
+    pub(crate) fn new(
+        address: &Address,
+        id: &Uuid,
+        outcome: DeleteOutcome,
+        detail: String,
+        released: Vec<String>,
+    ) -> Self {
+        let gone = outcome.is_gone();
+        Self {
+            command: "delete workspace",
+            address: format!("workspaces.{address}"),
+            id: id.as_str().to_owned(),
+            outcome,
+            tracked: !gone,
+            released,
+            detail,
+            summary: if gone {
+                format!(
+                    "OpenRouter has no workspace {id}, and `{address}` no longer tracks it. \
+                     Deletion is permanent: the workspace's budgets and its default guardrail went \
+                     with it, and there is nothing left to recover."
+                )
+            } else {
+                format!(
+                    "workspace {id} is not confirmed gone, so `{address}` still tracks it. The \
+                     request was sent exactly once and is never resent automatically."
+                )
+            },
+            warnings: if gone {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "workspace {id} may or may not still exist; the binding stays tracked so this \
+                     can be retried"
+                )]
+            },
+        }
+    }
+
+    /// Whether the run reached a state OpenRouter confirmed.
+    #[must_use]
+    pub const fn settled(&self) -> bool {
+        self.outcome.is_gone()
+    }
+
+    /// The diagnostics that belong on stderr in a human run.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    fn lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!(
+                "delete workspace: {address}  {id}  {outcome}",
+                address = self.address,
+                id = self.id,
+                outcome = self.outcome.as_str()
+            ),
+            format!("  {}", self.detail),
+        ];
+        for released in &self.released {
+            lines.push(format!("  released: {released}"));
+        }
+        lines.push(format!("  {}", self.summary));
+        lines
+    }
+}
+
+impl fmt::Display for DeleteWorkspaceReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.lines().join("\n"))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteOutcome {
@@ -664,9 +765,20 @@ impl Released {
         }
     }
 
+    /// The workspace the address owned.
+    #[must_use]
+    pub(crate) fn workspace(id: &Uuid, origin: Origin) -> Self {
+        Self::by_identity(id, origin)
+    }
+
     /// The guardrail the address owned.
     #[must_use]
     pub(crate) fn guardrail(id: &Uuid, origin: Origin) -> Self {
+        Self::by_identity(id, origin)
+    }
+
+    /// A resource whose whole local record is a UUID and where it came from.
+    fn by_identity(id: &Uuid, origin: Origin) -> Self {
         Self {
             role: origin.as_str(),
             identity: id.as_str().to_owned(),

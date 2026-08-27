@@ -90,6 +90,57 @@ pub fn guardrail(id: &str, name: &str, allowed_models: &[&str]) -> Value {
     })
 }
 
+/// The deterministic default-guardrail identity of [`FAKE_WORKSPACE_ID`].
+///
+/// OpenRouter derives it from the workspace's own UUID; here it is simply a
+/// distinct constant, because nothing in Keymaster derives it — the workspace
+/// object is the only thing that ever names it (ADR-0004, item 3).
+pub const FAKE_DEFAULT_GUARDRAIL_ID: &str = "33333333-3333-4333-8333-333333333333";
+
+/// One workspace as a list or get response returns it.
+#[must_use]
+pub fn workspace(id: &str, name: &str, slug: &str) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "slug": slug,
+        "description": null,
+        "default_guardrail_id": FAKE_DEFAULT_GUARDRAIL_ID,
+        "include_byok_in_budgets": false,
+        "io_logging_sampling_rate": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    })
+}
+
+/// The budgets of one workspace, as `GET /workspaces/{id}/budgets` returns
+/// them.
+///
+/// Each entry is an interval spelling and a limit in dollars; `lifetime` is the
+/// one the API reports as a `null` reset interval.
+#[must_use]
+pub fn workspace_budgets(budgets: &[(&str, f64)], include_byok_in_budgets: bool) -> Value {
+    let data: Vec<Value> = budgets
+        .iter()
+        .enumerate()
+        .map(|(index, (interval, limit))| {
+            json!({
+                "id": format!("44444444-4444-4444-8444-00000000000{index}"),
+                "workspace_id": FAKE_WORKSPACE_ID,
+                "limit_usd": limit,
+                "reset_interval": if *interval == "lifetime" {
+                    Value::Null
+                } else {
+                    json!(interval)
+                },
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-02T00:00:00Z",
+            })
+        })
+        .collect();
+    json!({ "data": data, "include_byok_in_budgets": include_byok_in_budgets })
+}
+
 /// One key-to-guardrail assignment.
 #[must_use]
 pub fn assignment(id: &str, key_hash: &str, guardrail_id: &str) -> Value {

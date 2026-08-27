@@ -237,9 +237,14 @@ impl Issuer<'_> {
             receiver,
             guardrail: self.converged_guardrail(desired, state)?,
             generation: next_generation(address, state, desired)?,
-            workspace: desired
-                .workspace_id
-                .clone()
+            // The block's own workspace first — a raw UUID, or the identity a
+            // `workspace` address is bound to — and this run's scope only when
+            // it names none. A block naming an unbound workspace resolves to
+            // nothing here, which the planner has already held this create back
+            // for (ADR-0004, item 2).
+            workspace: plan::key_placement(state, desired)
+                .identity()
+                .cloned()
                 .or_else(|| self.workspace.cloned()),
         })
     }
@@ -459,7 +464,11 @@ impl Issuer<'_> {
             .reader
             .get_key(hash)
             .map_err(|error| format!("the new key could not be read back: {error}"))?;
-        let differences = plan::key_changes(prepared.desired, Some(&observed));
+        let differences = plan::key_changes(
+            prepared.desired,
+            Some(&observed),
+            prepared.workspace.as_ref(),
+        );
         if !differences.is_empty() {
             let fields: Vec<&str> = differences.iter().map(|change| change.field).collect();
             return Err(format!(

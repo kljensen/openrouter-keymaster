@@ -16,6 +16,26 @@ version = 1
 # Individual guardrails and keys may override this.
 include_byok_in_limit = false
 
+# A workspace carries a pooled spending cap and a default guardrail. Identity is
+# the workspace UUID: removing this block orphans the binding, and
+# `openrouter-keymaster delete workspace --id UUID` is the only deletion.
+[workspaces.golf_club]
+name = "Golf Club"
+slug = "golf-club"
+description = "The golf club's inference workspace."
+# Any of daily, weekly, monthly, lifetime, in USD. OpenRouter checks
+# lifetime > monthly > weekly > daily on every budget write, and so does
+# Keymaster, before anything is sent. Omitting the table leaves OpenRouter's
+# budgets alone; writing one makes it the complete desired set.
+budgets = { monthly = 50, lifetime = 500 }
+# Only a budget PUT can write this, so it needs at least one budget.
+include_byok_in_budgets = false
+# Every workspace has a default guardrail, under an identity derived from the
+# workspace's own, which governs all traffic in it. Naming a block here binds it
+# to that identity; the guardrail is never created by POST and never imported by
+# name.
+default_guardrail = "cheap_summarization"
+
 # A guardrail holds the model, provider, and budget policy. A key is assigned
 # at most one guardrail.
 [guardrails.cheap_summarization]
@@ -29,6 +49,10 @@ denied_providers = ["example-untrusted-provider"]
 limit_usd = 10
 reset_interval = "monthly"
 require_zdr = true
+# This block is `golf_club`'s default guardrail, so its workspace is that one.
+# A guardrail that is not a workspace default names its workspace here, by local
+# address — or by raw `workspace_id`, for a workspace Keymaster does not manage.
+workspace = "golf_club"
 
 [keys.golf_jobfeed]
 name = "golf-jobfeed"
@@ -36,7 +60,11 @@ limit_usd = 5
 limit_reset = "monthly"
 expires_at = "2027-01-01T00:00:00Z"
 disabled = false
-workspace_id = "6c7f5f5a-4f1b-4e2d-9a3c-1b2d3e4f5a6b"
+# The workspace this key is created in, by local address. A key resolves it
+# through the workspace's binding at plan time, and is held back until there is
+# one. The raw `workspace_id = "…"` form stays for a workspace Keymaster does
+# not manage; a block may write one or the other, never both.
+workspace = "golf_club"
 # The organization member the key is created on behalf of. Only meaningful for
 # organization-owned keys, and — like `expires_at` and `workspace_id` — fixed
 # when the key is created: `POST /keys` accepts it and `PATCH /keys/{hash}` has

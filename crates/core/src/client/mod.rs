@@ -283,6 +283,20 @@ impl Client {
             .map(|_| ())
     }
 
+    /// Sends one `PUT` and reads its response without interpreting it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::post_json_once`].
+    pub(crate) fn put_once_discarding_body<B: Serialize>(
+        &self,
+        segments: &[&str],
+        body: &B,
+    ) -> Result<(), ApiError> {
+        self.write_once(reqwest::Method::PUT, segments, body)
+            .map(|_| ())
+    }
+
     /// Sends one `DELETE` and reads its response without interpreting it.
     ///
     /// No body: the resource is named in the path, and a permanent removal

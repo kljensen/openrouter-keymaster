@@ -45,6 +45,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub struct Config {
     /// Values that individual resources inherit unless they say otherwise.
     pub defaults: Defaults,
+    /// Workspaces by local address.
+    pub workspaces: BTreeMap<Address, Workspace>,
     /// Guardrails by local address.
     pub guardrails: BTreeMap<Address, Guardrail>,
     /// Keys by local address.
@@ -121,6 +123,100 @@ impl<T> Managed<T> {
     }
 }
 
+/// An OpenRouter workspace: the unit that carries a pooled spending cap and a
+/// default guardrail (ADR-0004).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Workspace {
+    /// Remote display name. Mutable remotely, never an identifier.
+    pub name: RemoteName,
+    /// URL-friendly slug: lowercase alphanumeric segments separated by single
+    /// hyphens. Mutable remotely, and never an identifier here either.
+    pub slug: String,
+    /// Remote description.
+    pub description: Managed<String>,
+    /// The pooled spending caps, one per interval.
+    ///
+    /// Absent means Keymaster does not manage the workspace's budgets at all.
+    /// Present is the complete desired set: an interval OpenRouter has and this
+    /// table does not is removed.
+    pub budgets: Option<BTreeMap<BudgetInterval, Usd>>,
+    /// Whether BYOK spend counts against the budgets. Only a budget `PUT` can
+    /// write it, so it is only allowed alongside at least one budget.
+    pub include_byok_in_budgets: Option<bool>,
+    /// The guardrail block bound to this workspace's `default_guardrail_id`.
+    pub default_guardrail: Option<Address>,
+}
+
+/// How often a workspace budget resets.
+///
+/// Ordered from the narrowest interval to the widest, which is the order the
+/// server's rule is written in — lifetime > monthly > weekly > daily — and the
+/// order apply sorts budget writes by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum BudgetInterval {
+    Daily,
+    Weekly,
+    Monthly,
+    /// A one-time budget that never resets.
+    Lifetime,
+}
+
+/// Every interval, narrowest first.
+pub(crate) const BUDGET_INTERVALS: [BudgetInterval; 4] = [
+    BudgetInterval::Daily,
+    BudgetInterval::Weekly,
+    BudgetInterval::Monthly,
+    BudgetInterval::Lifetime,
+];
+
+impl BudgetInterval {
+    /// The spelling used in configuration and in the URL path.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::Weekly => "weekly",
+            Self::Monthly => "monthly",
+            Self::Lifetime => "lifetime",
+        }
+    }
+
+    /// The configuration path this budget is written at, for a plan's field
+    /// names. A `'static` string per variant, because a [`crate::plan::
+    /// FieldChange`] names its field without allocating.
+    #[must_use]
+    pub const fn field(self) -> &'static str {
+        match self {
+            Self::Daily => "budgets.daily",
+            Self::Weekly => "budgets.weekly",
+            Self::Monthly => "budgets.monthly",
+            Self::Lifetime => "budgets.lifetime",
+        }
+    }
+
+    /// Reads the interval back from the API.
+    ///
+    /// `GET /workspaces/{id}/budgets` reports a lifetime budget as a `null`
+    /// reset interval, which is why the absent case is [`Self::Lifetime`]
+    /// rather than an error.
+    pub(crate) fn parse(value: Option<&str>) -> Option<Self> {
+        match value {
+            None => Some(Self::Lifetime),
+            Some("daily") => Some(Self::Daily),
+            Some("weekly") => Some(Self::Weekly),
+            Some("monthly") => Some(Self::Monthly),
+            Some("lifetime") => Some(Self::Lifetime),
+            Some(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for BudgetInterval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A guardrail: the model, provider, and budget policy assigned to keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Guardrail {
@@ -146,6 +242,12 @@ pub struct Guardrail {
     /// Whether inference is restricted to zero-data-retention providers.
     /// Absent means Keymaster does not manage the setting.
     pub require_zdr: Option<bool>,
+    /// The workspace block this guardrail is created in, by local address.
+    /// Resolved through the binding at plan time (ADR-0004, item 2).
+    pub workspace: Option<Address>,
+    /// The workspace this guardrail is created in, by raw UUID, for a
+    /// workspace Keymaster does not manage. Fixed at creation.
+    pub workspace_id: Option<Uuid>,
 }
 
 /// An OpenRouter inference key Keymaster manages.
@@ -161,7 +263,11 @@ pub struct Key {
     pub expires_at: Managed<OffsetDateTime>,
     /// Whether the key is disabled. Always managed; defaults to enabled.
     pub disabled: bool,
-    /// Workspace the key belongs to. Immutable once the key exists.
+    /// The workspace block this key belongs to, by local address. Resolved
+    /// through the binding at plan time (ADR-0004, item 2).
+    pub workspace: Option<Address>,
+    /// Workspace the key belongs to, by raw UUID. Immutable once the key
+    /// exists.
     pub workspace_id: Option<Uuid>,
     /// The organization member the key is created on behalf of. `POST /keys`
     /// accepts it and `PATCH /keys/{hash}` has no field for it, so it is

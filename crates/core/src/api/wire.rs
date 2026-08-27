@@ -144,6 +144,67 @@ impl GuardrailEnvelope {
     }
 }
 
+/// A workspace as `GET /workspaces` and `GET /workspaces/{id}` return it.
+#[derive(Debug, Deserialize)]
+pub(super) struct Workspace {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// A deterministic identity derived from the workspace's own, which the
+    /// default guardrail is materialized under.
+    #[serde(default)]
+    pub default_guardrail_id: Option<String>,
+    #[serde(default)]
+    pub include_byok_in_budgets: bool,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+/// A workspace as a write returns it. See [`GuardrailEnvelope`].
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(super) enum WorkspaceEnvelope {
+    Wrapped(One<Workspace>),
+    Bare(Workspace),
+}
+
+impl WorkspaceEnvelope {
+    pub(super) fn into_workspace(self) -> Workspace {
+        match self {
+            Self::Wrapped(one) => one.data,
+            Self::Bare(workspace) => workspace,
+        }
+    }
+}
+
+/// The budgets of one workspace, as `GET /workspaces/{id}/budgets` returns
+/// them.
+///
+/// `include_byok_in_budgets` sits beside the list rather than inside each
+/// budget, because it is one workspace-wide setting the budget endpoints are
+/// the only way to write.
+#[derive(Debug, Deserialize)]
+pub(super) struct Budgets {
+    pub data: Vec<Budget>,
+    #[serde(default)]
+    pub include_byok_in_budgets: bool,
+}
+
+/// One workspace budget. A `null` reset interval is a lifetime budget.
+#[derive(Debug, Deserialize)]
+pub(super) struct Budget {
+    #[serde(default)]
+    pub limit_usd: Option<f64>,
+    #[serde(default)]
+    pub reset_interval: Option<String>,
+}
+
 /// One key-to-guardrail assignment.
 #[derive(Debug, Deserialize)]
 pub(super) struct Assignment {

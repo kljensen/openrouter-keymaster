@@ -81,15 +81,15 @@ use std::collections::BTreeSet;
 
 use time::OffsetDateTime;
 
-use crate::api::{GuardrailBody, Reader, UpdateKey, Writer};
+use crate::api::{BudgetBody, GuardrailBody, Reader, UpdateKey, WorkspaceBody, Writer};
 use crate::client::Client;
-use crate::config::{Config, Receiver};
+use crate::config::{BUDGET_INTERVALS, BudgetInterval, Config, Receiver, Usd};
 use crate::error::Error;
 use crate::ids::{Address, KeyHash, Uuid};
 use crate::plan::{self, Action, ActionKind, Identity, Plan, Reason, ResourceAddress, Snapshot};
 use crate::receiver::Deliver;
 use crate::report::{ActionOutcome, ApplyReport, PlanReport};
-use crate::state::{KeyBinding, Phase as JournalPhase, State, StateFile, StateLock};
+use crate::state::{KeyBinding, Origin, Phase as JournalPhase, State, StateFile, StateLock};
 
 use super::issuance::Issuer;
 use super::{Context, Outcome, PlanFingerprint, fingerprint};
@@ -133,6 +133,7 @@ pub fn apply(
     let lock = file.lock()?;
     let config = context.config()?;
     let mut state = lock.read()?;
+    context.check_scope(&config, &state)?;
 
     // The credential, before the first write of any kind. Apply always needs
     // the API to plan, so an apply without one converges nothing — and the
@@ -157,6 +158,17 @@ pub fn apply(
 
     // Read and planned here, under the lock, from this run's own snapshot.
     let snapshot = super::snapshot(&reader)?;
+
+    // Also before anything is planned, and local for the same reason: a
+    // workspace binding that never learned its default guardrail's identity
+    // learns it from the snapshot. A bound run skips it, as it skips the
+    // promotion above, so its comparison stays a comparison.
+    let backfilled = if expected.is_some() {
+        None
+    } else {
+        record_default_identities(&lock, &mut state, &snapshot)?
+    };
+
     let plan = plan::plan(&config, &state, &snapshot, context.scope());
 
     if let Some(expected) = &expected
@@ -164,6 +176,10 @@ pub fn apply(
     {
         return Ok(refusal);
     }
+    debug_assert!(
+        expected.is_none() || backfilled.is_none(),
+        "a bound run skips the backfill, so a refusal cannot be hiding one"
+    );
 
     // Before the first remote write, not inside the transaction that would
     // discover it: a plan is a sequence, and a guardrail create ahead of the
@@ -175,6 +191,7 @@ pub fn apply(
         &plan,
         context.deliver.is_some(),
         promoted.as_deref(),
+        backfilled.as_deref(),
     ) {
         return Ok(refusal);
     }
@@ -207,6 +224,7 @@ pub fn apply(
     );
 
     let mut report = ApplyReport::new(&plan, &outcomes, failure);
+    report.note(backfilled);
     report.note(promoted);
 
     if report.succeeded() {
@@ -288,6 +306,7 @@ fn refuse_undeliverable_issuance(
     plan: &Plan,
     has_callback: bool,
     promoted: Option<&str>,
+    backfilled: Option<&str>,
 ) -> Option<Outcome<ApplyReport>> {
     if has_callback {
         return None;
@@ -310,10 +329,11 @@ fn refuse_undeliverable_issuance(
         })
         .collect();
     let mut report = ApplyReport::new(plan, &outcomes, None);
-    // The promotion this run completed before it planned anything is reported
-    // here exactly as a converging run reports it. A refusal that swallowed it
-    // would tell an operator nothing had changed when the address's current key
-    // just had.
+    // The local writes this run completed before it planned anything are
+    // reported here exactly as a converging run reports them. A refusal that
+    // swallowed one would tell an operator nothing had changed when the
+    // address's current key just had.
+    report.note(backfilled.map(str::to_owned));
     report.note(promoted.map(str::to_owned));
     Some(Outcome::failed(
         report,
@@ -387,15 +407,87 @@ fn fast_forward(lock: &StateLock<'_>, state: &mut State) -> Result<Option<String
     )))
 }
 
+/// Records a `default_guardrail_id` a workspace binding never learned.
+///
+/// `POST /workspaces` is documented to return one, and the create records it —
+/// but a response that omitted it would leave the binding with nothing, and a
+/// workspace's default guardrail is reachable *only* through that identity. It
+/// is never listed until its configuration is written, never `POST`ed, and
+/// never imported by name, so a binding without it would hold that guardrail
+/// back for good (ADR-0004, item 3).
+///
+/// The listing carries the identity too, so this fills it in from the snapshot
+/// before anything is planned — which is what makes the guardrail plannable on
+/// this run rather than the next one. It is local, it touches nothing remote,
+/// and it only ever fills a gap: a binding that already records an identity is
+/// left exactly as it is.
+///
+/// Returns the sentence explaining what was recorded, when anything was.
+///
+/// # Errors
+///
+/// Returns the state errors of making the change durable. Nothing remote is
+/// touched either way.
+fn record_default_identities(
+    lock: &StateLock<'_>,
+    state: &mut State,
+    snapshot: &Snapshot,
+) -> Result<Option<String>, Error> {
+    let learned: Vec<(Address, Uuid, Uuid, Origin)> = state
+        .workspaces()
+        .iter()
+        .filter(|(_, binding)| binding.default_guardrail_id.is_none())
+        .filter_map(|(address, binding)| {
+            let observed = snapshot
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == binding.id)?;
+            let default = observed.default_guardrail_id.clone()?;
+            Some((address.clone(), binding.id.clone(), default, binding.origin))
+        })
+        .collect();
+    if learned.is_empty() {
+        return Ok(None);
+    }
+
+    let mut recorded = Vec::new();
+    for (address, id, default, origin) in learned {
+        // Re-binding an address to the identity it already holds is how a
+        // binding takes a `default_guardrail_id` it did not have; it changes
+        // nothing else.
+        state
+            .bind_workspace(&address, id, Some(default.clone()), origin, now())
+            .map_err(|error| ApplyError::Backfill {
+                address: address.clone(),
+                message: error.to_string(),
+            })?;
+        recorded.push(format!("`{address}` ({default})"));
+    }
+    lock.write(state)?;
+
+    Ok(Some(format!(
+        "recorded the default guardrail identity of {recorded}, which is the only handle on that \
+         guardrail there is and which this run read from the workspace itself; that is a local \
+         state write and touches nothing remote",
+        recorded = recorded.join(", ")
+    )))
+}
+
 /// The fixed order the phases run in.
 ///
 /// Dependencies before dependents: a guardrail exists before the key it
 /// secures, and both exist before the assignment that joins them.
-const PHASES: [Phase; 3] = [Phase::Guardrails, Phase::Keys, Phase::Assignments];
+const PHASES: [Phase; 4] = [
+    Phase::Workspaces,
+    Phase::Guardrails,
+    Phase::Keys,
+    Phase::Assignments,
+];
 
 /// One phase of an apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
+    Workspaces,
     Guardrails,
     Keys,
     Assignments,
@@ -404,10 +496,13 @@ enum Phase {
 /// Which phase an action belongs to, or `None` for one apply never executes.
 const fn phase_of(address: &ResourceAddress) -> Option<Phase> {
     match address {
+        ResourceAddress::Workspace(_) => Some(Phase::Workspaces),
         ResourceAddress::Guardrail(_) => Some(Phase::Guardrails),
         ResourceAddress::Key(_) => Some(Phase::Keys),
         ResourceAddress::Assignment(_) => Some(Phase::Assignments),
-        ResourceAddress::RemoteKey(_) | ResourceAddress::RemoteGuardrail(_) => None,
+        ResourceAddress::RemoteKey(_)
+        | ResourceAddress::RemoteGuardrail(_)
+        | ResourceAddress::RemoteWorkspace(_) => None,
     }
 }
 
@@ -494,11 +589,17 @@ impl Apply<'_> {
     /// Dispatches one action to the write that performs it.
     fn attempt(&mut self, action: &Action, state: &mut State) -> Result<ActionOutcome, String> {
         match (&action.address, action.kind) {
+            (ResourceAddress::Workspace(address), ActionKind::Create) => {
+                self.create_workspace(address, action, state)
+            }
+            (ResourceAddress::Workspace(address), ActionKind::Update) => {
+                self.update_workspace(address, action)
+            }
             (ResourceAddress::Guardrail(address), ActionKind::Create) => {
                 self.create_guardrail(address, state)
             }
             (ResourceAddress::Guardrail(address), ActionKind::Update) => {
-                self.update_guardrail(address, action)
+                self.update_guardrail(address, action, state)
             }
             (ResourceAddress::Key(address), ActionKind::Create | ActionKind::Replace) => {
                 self.issue_key(address, state)
@@ -560,6 +661,74 @@ impl Apply<'_> {
         }))
     }
 
+    /// The identity a guardrail block is written to when that identity is a
+    /// workspace's to give rather than a `POST`'s to return.
+    ///
+    /// Two ways in, and the planner resolves the same two: the address is bound
+    /// to an identity some workspace names as its default, or the block is a
+    /// workspace's `default_guardrail` and the workspace binding supplies the
+    /// identity even though nothing has written the guardrail binding down yet
+    /// (ADR-0004, item 3).
+    fn workspace_default(&self, address: &Address, state: &State) -> Option<Uuid> {
+        match state.guardrail(address).map(|binding| binding.id.clone()) {
+            Some(id) => state
+                .workspaces()
+                .values()
+                .any(|binding| binding.default_guardrail_id.as_ref() == Some(&id))
+                .then_some(id),
+            None => {
+                let workspace = self
+                    .config
+                    .workspaces
+                    .iter()
+                    .find(|(_, workspace)| workspace.default_guardrail.as_ref() == Some(address))
+                    .map(|(address, _)| address)?;
+                state.workspace(workspace)?.default_guardrail_id.clone()
+            }
+        }
+    }
+
+    /// Records the binding a default guardrail's identity implies, when state
+    /// does not hold it yet.
+    ///
+    /// After the write rather than before it, unlike a created guardrail's
+    /// UUID: this identity cannot be lost. The workspace object carries it and
+    /// the workspace binding records it, so a run that wrote the guardrail and
+    /// died before this would derive the same identity again next time. What
+    /// this buys is that `status` names the guardrail and `delete workspace`
+    /// releases it with the workspace it belongs to.
+    fn record_default_binding(
+        &self,
+        address: &Address,
+        id: &Uuid,
+        origin: Origin,
+        state: &mut State,
+    ) -> Result<(), String> {
+        if state.guardrail(address).is_some() {
+            return Ok(());
+        }
+        state
+            .bind_guardrail(address, id.clone(), origin, now())
+            .map_err(|error| untracked(id, &error.to_string()))?;
+        self.lock
+            .write(state)
+            .map_err(|error| untracked(id, &error.to_string()))
+    }
+
+    /// The workspace a created guardrail is placed in: the one its block names,
+    /// or this run's scope.
+    ///
+    /// A block naming a workspace nothing binds yet resolves to nothing, and
+    /// falls back to the scope like a block that names none — which is
+    /// unreachable, because the planner holds such a create back until the
+    /// binding exists (ADR-0004, item 2).
+    fn placement(&self, desired: &crate::config::Guardrail, state: &State) -> Option<Uuid> {
+        plan::guardrail_placement(state, desired)
+            .identity()
+            .cloned()
+            .or_else(|| self.workspace.cloned())
+    }
+
     /// What this run's read said about a key's `disabled`, if it saw the key.
     ///
     /// The only caller is the predecessor note, and the snapshot is the one
@@ -574,6 +743,161 @@ impl Apply<'_> {
             .map(|key| key.disabled)
     }
 
+    /// Creates a workspace, records its identity, and sets its budgets.
+    ///
+    /// Two things are persisted before anything else runs, and for the same
+    /// reason a created guardrail's UUID is: the workspace's own identity, and
+    /// the `default_guardrail_id` it names. The second is the only handle on
+    /// the workspace's default guardrail there is, and the guardrail block that
+    /// is its default is bound to it here, so the guardrail phase that follows
+    /// can materialize it (ADR-0004, item 3).
+    fn create_workspace(
+        &self,
+        address: &Address,
+        action: &Action,
+        state: &mut State,
+    ) -> Result<ActionOutcome, String> {
+        let desired = self
+            .config
+            .workspaces
+            .get(address)
+            .ok_or_else(|| unconfigured("workspace", address))?;
+
+        let created = self
+            .writer
+            .create_workspace(&WorkspaceBody::create(desired))
+            .map_err(|error| {
+                format!(
+                    "the workspace could not be created: {error}. It may exist all the same — the \
+                     request was sent once and is never repeated — and the next plan reports a \
+                     name collision if it does."
+                )
+            })?;
+
+        let id = created.id.clone();
+        state
+            .bind_workspace(
+                address,
+                id.clone(),
+                created.default_guardrail_id.clone(),
+                Origin::Created,
+                now(),
+            )
+            .and_then(|()| {
+                super::import::bind_default_guardrail(
+                    state,
+                    desired.default_guardrail.as_ref(),
+                    created.default_guardrail_id.as_ref(),
+                    Origin::Created,
+                )
+            })
+            .map_err(|error| untracked_workspace(&id, &error.to_string()))?;
+        self.lock
+            .write(state)
+            .map_err(|error| untracked_workspace(&id, &error.to_string()))?;
+
+        let budgets = self.write_budgets(&id, desired, action);
+        Ok(budgets.outcome(format!(
+            "created workspace {id}, and recorded its identity before anything else ran"
+        )))
+    }
+
+    /// Brings an existing workspace's managed fields to the configured values.
+    fn update_workspace(
+        &self,
+        address: &Address,
+        action: &Action,
+    ) -> Result<ActionOutcome, String> {
+        let desired = self
+            .config
+            .workspaces
+            .get(address)
+            .ok_or_else(|| unconfigured("workspace", address))?;
+        let Some(Identity::Workspace(id)) = &action.identity else {
+            return Err(
+                "the workspace's identity is not known, so it cannot be patched".to_owned(),
+            );
+        };
+
+        // The workspace's own `PATCH` carries the name, the slug, and the
+        // description; nothing else it manages can travel in one. A run whose
+        // only difference is a budget sends no `PATCH` at all.
+        let patched = action
+            .changes
+            .iter()
+            .any(|change| matches!(change.field, "name" | "slug" | "description"));
+        if patched {
+            self.writer
+                .update_workspace(id, &WorkspaceBody::update(desired))
+                .map_err(|error| ambiguous("workspace", &error.to_string()))?;
+        }
+
+        let budgets = self.write_budgets(id, desired, action);
+        Ok(budgets.outcome(if patched {
+            format!("patched workspace {id}")
+        } else {
+            format!("workspace {id} needed no patch of its own")
+        }))
+    }
+
+    /// Writes every budget interval this action changes, in an order the server
+    /// accepts.
+    ///
+    /// Deletes first, then increases from the widest interval to the narrowest,
+    /// then decreases from the narrowest to the widest. OpenRouter checks
+    /// lifetime > monthly > weekly > daily on *every* write, so any other order
+    /// can pass through an intermediate state it refuses — raising the daily
+    /// budget before the monthly one it will exceed, say.
+    ///
+    /// A refusal is definite and names its interval, and the intervals that
+    /// follow are still attempted: the writes are independent, and a plan the
+    /// account cannot buy should not hide the ones it can. Because the planner
+    /// already held back every issuing and expanding write in this workspace
+    /// (ADR-0004, item 4), a refused budget leaves nothing widened behind it.
+    fn write_budgets(
+        &self,
+        id: &Uuid,
+        desired: &crate::config::Workspace,
+        action: &Action,
+    ) -> Budgets {
+        let byok = action
+            .changes
+            .iter()
+            .find(|change| change.field == "include_byok_in_budgets")
+            .and_then(|change| match change.to {
+                plan::FieldValue::Flag(flag) => Some(flag),
+                _ => None,
+            });
+
+        let mut written = Budgets::default();
+        for (interval, amount) in budget_writes(desired, action) {
+            let attempt = match amount {
+                None => self.writer.delete_workspace_budget(id, interval),
+                Some(limit) => {
+                    self.writer
+                        .put_workspace_budget(id, interval, &BudgetBody::new(limit, byok))
+                }
+            };
+            let Err(error) = attempt else {
+                written.done.push(interval.as_str());
+                continue;
+            };
+            let named = format!("{interval}: {error}", interval = interval.as_str());
+            // Only a well-formed 4xx — a plan restriction among them — says the
+            // server saw the write and declined it. A timeout, a reset, or a
+            // 5xx leaves it unknown whether the budget took, and calling that a
+            // refusal would tell an operator a cap is not in force when it may
+            // be. The read that follows the apply settles it, as it does for
+            // every other ambiguous write.
+            if error.is_definite_rejection() {
+                written.refused.push(named);
+            } else {
+                written.ambiguous.push(named);
+            }
+        }
+        written
+    }
+
     /// Creates a guardrail and records its identity before anything else runs.
     fn create_guardrail(
         &self,
@@ -586,9 +910,28 @@ impl Apply<'_> {
             .get(address)
             .ok_or_else(|| unconfigured("guardrail", address))?;
 
+        // A workspace's default guardrail is never `POST`ed. It exists as an
+        // identity from the moment its workspace does, and OpenRouter
+        // materializes it the first time its configuration is written — so the
+        // create the planner proposed is one `PATCH` to an identity state
+        // already binds (ADR-0004, item 3).
+        if let Some(id) = self.workspace_default(address, state) {
+            self.writer
+                .update_guardrail(&id, &GuardrailBody::create(desired, None))
+                .map_err(|error| ambiguous("guardrail", &error.to_string()))?;
+            self.record_default_binding(address, &id, Origin::Created, state)?;
+            return Ok(ActionOutcome::applied(format!(
+                "materialized guardrail {id}, the default guardrail of the workspace that names \
+                 it, by writing its configuration for the first time"
+            )));
+        }
+
         let created = self
             .writer
-            .create_guardrail(&GuardrailBody::create(desired, self.workspace))
+            .create_guardrail(&GuardrailBody::create(
+                desired,
+                self.placement(desired, state).as_ref(),
+            ))
             .map_err(|error| {
                 format!(
                     "the guardrail could not be created: {error}. It may exist all the same — the \
@@ -620,6 +963,7 @@ impl Apply<'_> {
         &self,
         address: &Address,
         action: &Action,
+        state: &mut State,
     ) -> Result<ActionOutcome, String> {
         let desired = self
             .config
@@ -635,6 +979,12 @@ impl Apply<'_> {
         self.writer
             .update_guardrail(id, &GuardrailBody::update(desired))
             .map_err(|error| ambiguous("guardrail", &error.to_string()))?;
+        // A default guardrail that already existed when its block was added:
+        // the identity came from the workspace binding, and this run is the
+        // first to write it down.
+        if self.workspace_default(address, state).as_ref() == Some(id) {
+            self.record_default_binding(address, id, Origin::Imported, state)?;
+        }
         Ok(ActionOutcome::applied(format!("patched guardrail {id}")))
     }
 
@@ -878,6 +1228,131 @@ fn ambiguous(resource: &str, error: &str) -> String {
     )
 }
 
+/// What became of one workspace's budget writes.
+#[derive(Debug, Default)]
+struct Budgets {
+    /// The intervals a write settled, in the order they were written.
+    done: Vec<&'static str>,
+    /// The intervals the server definitely declined, each with the refusal.
+    refused: Vec<String>,
+    /// The intervals whose write never got an answer that settles anything.
+    ambiguous: Vec<String>,
+}
+
+impl Budgets {
+    /// The action's outcome, given what the rest of the action achieved.
+    ///
+    /// A refused budget is a failed action rather than an error, so the run
+    /// carries on: the refusal is definite and belongs to one interval, and the
+    /// planner has already held back everything that would have spent under the
+    /// cap it could not set (ADR-0004, item 4).
+    fn outcome(self, detail: String) -> ActionOutcome {
+        let written = if self.done.is_empty() {
+            String::new()
+        } else {
+            format!(" Budgets written: {}.", self.done.join(", "))
+        };
+        if self.refused.is_empty() && self.ambiguous.is_empty() {
+            return ActionOutcome::applied(format!("{detail}.{written}"));
+        }
+
+        let mut trouble = String::new();
+        if !self.refused.is_empty() {
+            trouble.push_str(&format!(
+                " OpenRouter refused {count}: {refusals}. Workspace budgets are a plan feature, \
+                 and a refusal that persists means removing the `budgets` table is the only way \
+                 this configuration converges.",
+                count = crate::report::plural(self.refused.len(), "budget write"),
+                refusals = self.refused.join("; "),
+            ));
+        }
+        if !self.ambiguous.is_empty() {
+            trouble.push_str(&format!(
+                " {count} got no answer that settles anything: {failures}. Whether the budget \
+                 took effect is unknown, and the read that follows this apply reports it.",
+                count = crate::report::plural(self.ambiguous.len(), "budget write"),
+                failures = self.ambiguous.join("; "),
+            ));
+        }
+        ActionOutcome::failed(format!(
+            "{detail}.{written}{trouble} Each was sent once and is never repeated. Nothing was \
+             issued or widened in this workspace."
+        ))
+    }
+}
+
+/// The budget writes one workspace action calls for, in the order the server
+/// accepts them.
+///
+/// Deletes first, then increases from the widest interval to the narrowest,
+/// then decreases from the narrowest to the widest, so no intermediate state
+/// violates lifetime > monthly > weekly > daily.
+///
+/// A changed `include_byok_in_budgets` adds one more pass. The setting is
+/// workspace-wide and only a budget `PUT` can carry it, so an interval that is
+/// otherwise converged is written again with the value it already has —
+/// otherwise a configuration that changed nothing but the flag would drift
+/// forever with no request able to fix it. Rewriting a value the server already
+/// holds cannot break the ordering rule, so those go last.
+fn budget_writes(
+    desired: &crate::config::Workspace,
+    action: &Action,
+) -> Vec<(BudgetInterval, Option<Usd>)> {
+    let mut deletes = Vec::new();
+    let mut increases = Vec::new();
+    let mut decreases = Vec::new();
+
+    for change in &action.changes {
+        let Some(interval) = BUDGET_INTERVALS
+            .into_iter()
+            .find(|interval| interval.field() == change.field)
+        else {
+            continue;
+        };
+        match (&change.from, &change.to) {
+            (_, plan::FieldValue::Absent) => deletes.push((interval, None)),
+            (plan::FieldValue::Money(before), plan::FieldValue::Money(after)) if after < before => {
+                decreases.push((interval, Some(*after)));
+            }
+            (_, plan::FieldValue::Money(after)) => increases.push((interval, Some(*after))),
+            _ => {}
+        }
+    }
+
+    // `BudgetInterval` is ordered narrowest first, so widest-first is simply
+    // the reverse.
+    increases.sort_by(|left, right| right.0.cmp(&left.0));
+    decreases.sort_by(|left, right| left.0.cmp(&right.0));
+    deletes.extend(increases);
+    deletes.extend(decreases);
+
+    if action
+        .changes
+        .iter()
+        .any(|change| change.field == "include_byok_in_budgets")
+    {
+        let mut carriers: Vec<(BudgetInterval, Option<Usd>)> = desired
+            .budgets
+            .iter()
+            .flatten()
+            .filter(|(interval, _)| !deletes.iter().any(|(written, _)| written == *interval))
+            .map(|(interval, limit)| (*interval, Some(*limit)))
+            .collect();
+        carriers.sort_by(|left, right| right.0.cmp(&left.0));
+        deletes.extend(carriers);
+    }
+    deletes
+}
+
+/// A workspace that exists remotely and could not be recorded locally.
+fn untracked_workspace(id: &Uuid, why: &str) -> String {
+    format!(
+        "workspace {id} was created but its identity could not be recorded: {why}. Bind it with \
+         `openrouter-keymaster import workspace <address> --id {id}` before applying again, or a \
+         second workspace will be created under the same name."
+    )
+}
+
 /// A guardrail that exists remotely and could not be recorded locally.
 fn untracked(id: &crate::ids::Uuid, why: &str) -> String {
     format!(
@@ -957,6 +1432,19 @@ pub enum ApplyError {
         promoted: bool,
     },
 
+    /// A workspace's default guardrail identity could not be recorded.
+    #[error(
+        "`{address}`'s default guardrail identity could not be recorded: {message}. Nothing \
+         remote is outstanding — the identity was read from the workspace itself — but apply will \
+         not plan against a binding it could not complete."
+    )]
+    Backfill {
+        /// The local address.
+        address: Address,
+        /// Why the state API refused it.
+        message: String,
+    },
+
     /// A delivered key could not be promoted to current.
     #[error(
         "`{address}` has a delivered key that could not be promoted to current: {message}. \
@@ -981,6 +1469,7 @@ impl ApplyError {
             Self::PlanChanged => "plan_changed",
             Self::Undeliverable { .. } => "apply_undeliverable",
             Self::Promotion { .. } => "apply_promotion",
+            Self::Backfill { .. } => "apply_backfill",
         }
     }
 }

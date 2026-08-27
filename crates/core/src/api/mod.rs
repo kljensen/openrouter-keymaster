@@ -18,17 +18,17 @@ pub mod pagination;
 mod wire;
 mod write;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::client::{ApiError, Client};
-use crate::config::{ResetInterval, Usd};
+use crate::config::{BudgetInterval, ResetInterval, Usd};
 use crate::ids::{KeyHash, UserId, Uuid};
 use pagination::{Page, PageLimits};
 
-pub use write::{AssignKeys, DisableKey, GuardrailBody, UpdateKey};
+pub use write::{AssignKeys, BudgetBody, DisableKey, GuardrailBody, UpdateKey, WorkspaceBody};
 
 /// How a USD budget resets, as OpenRouter reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +127,28 @@ pub struct ObservedGuardrail {
     pub include_byok_in_budgets: bool,
     pub zero_data_retention: ZeroDataRetention,
     pub workspace_id: Option<Uuid>,
+    pub timestamps: RemoteTimestamps,
+}
+
+/// A workspace as OpenRouter currently has it, with its budgets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedWorkspace {
+    /// Immutable identity.
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+    /// The deterministic identity of this workspace's default guardrail.
+    ///
+    /// Optional only because a response could omit it; every workspace has one,
+    /// and the guardrail it names does not appear in `GET /guardrails` until
+    /// its configuration is first written (ADR-0004, item 3).
+    pub default_guardrail_id: Option<Uuid>,
+    /// Whether BYOK spend counts against the budgets. Readable here, writable
+    /// only through a budget `PUT`.
+    pub include_byok_in_budgets: bool,
+    /// The pooled spending caps, by interval.
+    pub budgets: BTreeMap<BudgetInterval, Usd>,
     pub timestamps: RemoteTimestamps,
 }
 
@@ -252,6 +274,88 @@ impl<'client> Reader<'client> {
         ObservedGuardrail::from_wire(one.data)
     }
 
+    /// Every workspace, each with the budgets it currently has.
+    ///
+    /// The budgets are a second request per workspace, because the listing does
+    /// not carry them. That is one request per workspace an organization has,
+    /// which is a handful.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reader::list_keys`].
+    pub fn list_workspaces(&self) -> Result<Vec<ObservedWorkspace>, ApiError> {
+        let workspaces: Vec<ObservedWorkspace> = pagination::collect(
+            self.limits,
+            "workspaces",
+            |workspace: &ObservedWorkspace| workspace.id.clone(),
+            |offset, page_size| {
+                let query = [
+                    ("offset", offset.to_string()),
+                    ("limit", page_size.to_string()),
+                ];
+                let page: wire::List<wire::Workspace> =
+                    self.client.get_json(&["workspaces"], &query)?;
+                Ok(Page {
+                    items: convert(page.data, ObservedWorkspace::from_wire)?,
+                    total: page.total_count,
+                })
+            },
+        )?;
+
+        workspaces
+            .into_iter()
+            .map(|workspace| self.with_budgets(workspace))
+            .collect()
+    }
+
+    /// One workspace, by its immutable UUID, with its budgets.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reader::get_key`].
+    pub fn get_workspace(&self, id: &Uuid) -> Result<ObservedWorkspace, ApiError> {
+        let one: wire::One<wire::Workspace> =
+            self.client.get_json(&["workspaces", id.as_str()], &[])?;
+        self.with_budgets(ObservedWorkspace::from_wire(one.data)?)
+    }
+
+    /// Fills in one workspace's budgets and its workspace-wide BYOK setting.
+    ///
+    /// A `403` is read as "this account's plan has no workspace budgets", not
+    /// as a failure: budgets are an Enterprise feature, and refusing every plan
+    /// and status an ordinary account runs would be a far worse answer than
+    /// observing no budgets. A configured budget then shows as drift and its
+    /// write is refused on every run, which is exactly what ADR-0004 item 4
+    /// asks for. A `404` is read the same way, for a workspace that has none.
+    fn with_budgets(
+        &self,
+        mut workspace: ObservedWorkspace,
+    ) -> Result<ObservedWorkspace, ApiError> {
+        let read: Result<wire::Budgets, ApiError> = self
+            .client
+            .get_json(&["workspaces", workspace.id.as_str(), "budgets"], &[]);
+        let budgets = match read {
+            Ok(budgets) => budgets,
+            Err(error) if matches!(error.status(), Some(403 | 404)) => return Ok(workspace),
+            Err(error) => return Err(error),
+        };
+
+        workspace.include_byok_in_budgets = budgets.include_byok_in_budgets;
+        for observed in budgets.data {
+            let Some(interval) = BudgetInterval::parse(observed.reset_interval.as_deref()) else {
+                // An interval this build does not know is left out rather than
+                // failing the snapshot, exactly as an unrecognized key reset
+                // schedule is: it is not one the configuration can ask for.
+                continue;
+            };
+            let identity = format!("the workspace {id}", id = workspace.id);
+            if let Some(limit) = budget(observed.limit_usd, interval.field(), &identity)? {
+                workspace.budgets.insert(interval, limit);
+            }
+        }
+        Ok(workspace)
+    }
+
     /// Every key-to-guardrail assignment in the organization.
     ///
     /// # Errors
@@ -350,6 +454,86 @@ impl<'client> Writer<'client> {
     pub fn update_guardrail(&self, id: &Uuid, body: &GuardrailBody) -> Result<(), ApiError> {
         self.client
             .patch_once_discarding_body(&["guardrails", id.as_str()], body)
+    }
+
+    /// Creates one workspace and returns it, as OpenRouter recorded it.
+    ///
+    /// As with a guardrail, the identity is what matters and matters
+    /// immediately — and here so does `default_guardrail_id`, which is the only
+    /// way to reach the workspace's default guardrail at all (ADR-0004, item
+    /// 3). The response carries no budgets, because a create cannot set one.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_guardrail`].
+    pub fn create_workspace(&self, body: &WorkspaceBody) -> Result<ObservedWorkspace, ApiError> {
+        let created: wire::WorkspaceEnvelope = self.client.post_json_once(&["workspaces"], body)?;
+        ObservedWorkspace::from_wire(created.into_workspace())
+    }
+
+    /// Brings one workspace's managed fields to the configured values.
+    ///
+    /// Budgets are not among them: each interval is its own request.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_guardrail`].
+    pub fn update_workspace(&self, id: &Uuid, body: &WorkspaceBody) -> Result<(), ApiError> {
+        self.client
+            .patch_once_discarding_body(&["workspaces", id.as_str()], body)
+    }
+
+    /// Permanently deletes one workspace.
+    ///
+    /// Like [`Writer::delete_key`], never sent on Keymaster's own initiative:
+    /// deleting a workspace takes its budgets and guardrails with it, so only
+    /// `openrouter-keymaster delete workspace` reaches this, and only after a
+    /// read has shown the workspace holds nothing but its own default
+    /// guardrail.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::delete_key`].
+    pub fn delete_workspace(&self, id: &Uuid) -> Result<(), ApiError> {
+        self.client
+            .delete_once_discarding_body(&["workspaces", id.as_str()])
+    }
+
+    /// Sets one workspace budget interval.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_guardrail`]. A `403` is the account's plan refusing
+    /// the feature, which the caller reports as a definite failure naming the
+    /// interval (ADR-0004, item 4).
+    pub fn put_workspace_budget(
+        &self,
+        id: &Uuid,
+        interval: BudgetInterval,
+        body: &BudgetBody,
+    ) -> Result<(), ApiError> {
+        self.client.put_once_discarding_body(
+            &["workspaces", id.as_str(), "budgets", interval.as_str()],
+            body,
+        )
+    }
+
+    /// Removes one workspace budget interval.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::put_workspace_budget`].
+    pub fn delete_workspace_budget(
+        &self,
+        id: &Uuid,
+        interval: BudgetInterval,
+    ) -> Result<(), ApiError> {
+        self.client.delete_once_discarding_body(&[
+            "workspaces",
+            id.as_str(),
+            "budgets",
+            interval.as_str(),
+        ])
     }
 
     /// Brings one existing key's managed fields to the configured values.
@@ -499,6 +683,40 @@ impl ObservedGuardrail {
             timestamps: timestamps(
                 guardrail.created_at.as_deref(),
                 guardrail.updated_at.as_deref(),
+            ),
+            id,
+        })
+    }
+}
+
+impl ObservedWorkspace {
+    fn from_wire(workspace: wire::Workspace) -> Result<Self, ApiError> {
+        let id = Uuid::parse(&workspace.id)
+            .map_err(|error| unusable("a workspace", "id", &error.to_string()))?;
+        let identity = format!("the workspace {id}");
+
+        Ok(Self {
+            name: workspace.name,
+            slug: workspace.slug,
+            description: workspace.description,
+            // Strict, like a key's creator: the default guardrail's binding is
+            // derived from this value, so one that cannot be read must not look
+            // like a workspace that has no default guardrail.
+            default_guardrail_id: workspace
+                .default_guardrail_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    Uuid::parse(value).map_err(|error| {
+                        unusable(&identity, "default_guardrail_id", &error.to_string())
+                    })
+                })
+                .transpose()?,
+            include_byok_in_budgets: workspace.include_byok_in_budgets,
+            budgets: BTreeMap::new(),
+            timestamps: timestamps(
+                workspace.created_at.as_deref(),
+                workspace.updated_at.as_deref(),
             ),
             id,
         })

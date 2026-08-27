@@ -530,6 +530,30 @@ pub struct GuardrailBinding {
     pub bound_at: OffsetDateTime,
 }
 
+/// What one local workspace address owns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceBinding {
+    /// The workspace's immutable identity.
+    pub id: Uuid,
+    /// Whether it was imported or created by Keymaster.
+    pub origin: Origin,
+    /// When the binding was recorded.
+    #[serde(with = "time::serde::rfc3339")]
+    pub bound_at: OffsetDateTime,
+    /// The deterministic identity of this workspace's default guardrail, as
+    /// the workspace object named it.
+    ///
+    /// Recorded because it is the only handle on that guardrail there is: it
+    /// does not appear in `GET /guardrails` until its configuration is first
+    /// written, it is never created by `POST`, and it cannot outlive its
+    /// workspace (ADR-0004, items 1 and 3). A guardrail address bound to this
+    /// identity is the workspace's own, which is what lets `delete workspace`
+    /// tell it apart from a child it must refuse to destroy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_guardrail_id: Option<Uuid>,
+}
+
 /// The whole local state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -540,6 +564,8 @@ pub struct State {
     keys: BTreeMap<Address, KeyBinding>,
     #[serde(deserialize_with = "distinct_addresses")]
     guardrails: BTreeMap<Address, GuardrailBinding>,
+    #[serde(default, deserialize_with = "distinct_addresses")]
+    workspaces: BTreeMap<Address, WorkspaceBinding>,
 }
 
 impl Default for State {
@@ -557,6 +583,7 @@ impl State {
             serial: 0,
             keys: BTreeMap::new(),
             guardrails: BTreeMap::new(),
+            workspaces: BTreeMap::new(),
         }
     }
 
@@ -590,10 +617,40 @@ impl State {
         self.keys.get(address)
     }
 
+    /// Every workspace binding, by local address.
+    #[must_use]
+    pub const fn workspaces(&self) -> &BTreeMap<Address, WorkspaceBinding> {
+        &self.workspaces
+    }
+
     /// One guardrail binding.
     #[must_use]
     pub fn guardrail(&self, address: &Address) -> Option<&GuardrailBinding> {
         self.guardrails.get(address)
+    }
+
+    /// One workspace binding.
+    #[must_use]
+    pub fn workspace(&self, address: &Address) -> Option<&WorkspaceBinding> {
+        self.workspaces.get(address)
+    }
+
+    /// Which address owns a workspace UUID, if any.
+    #[must_use]
+    pub fn address_owning_workspace(&self, id: &Uuid) -> Option<&Address> {
+        self.workspaces
+            .iter()
+            .find(|(_, binding)| binding.id == *id)
+            .map(|(address, _)| address)
+    }
+
+    /// Which address owns a guardrail UUID, if any.
+    #[must_use]
+    pub fn address_owning_guardrail(&self, id: &Uuid) -> Option<&Address> {
+        self.guardrails
+            .iter()
+            .find(|(_, binding)| binding.id == *id)
+            .map(|(address, _)| address)
     }
 
     /// Which address owns a key hash, if any.
@@ -801,6 +858,70 @@ impl State {
                 },
             );
             Ok(())
+        }
+    }
+
+    mutation! {
+        /// Binds a workspace UUID to an address. Repeating it is a no-op.
+        ///
+        /// `default_guardrail_id` is the deterministic identity the workspace
+        /// object names, and it is recorded with the binding because it is the
+        /// only handle on that guardrail there is (ADR-0004, item 3). Re-binding
+        /// the same workspace records it if the first binding did not have it.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`BindError`] when the address or the UUID already belongs to
+        /// something else.
+        fn bind_workspace(
+            &mut self,
+            address: &Address,
+            id: Uuid,
+            default_guardrail_id: Option<Uuid>,
+            origin: Origin,
+            at: OffsetDateTime,
+        ) -> Result<(), BindError> {
+            if let Some(owner) = self.address_owning_workspace(&id)
+                && owner != address
+            {
+                return Err(BindError::WorkspaceOwnedElsewhere {
+                    id,
+                    owner: owner.clone(),
+                });
+            }
+            if let Some(existing) = self.workspaces.get_mut(address) {
+                if existing.id != id {
+                    return Err(BindError::WorkspaceBound {
+                        address: address.clone(),
+                        id: existing.id.clone(),
+                    });
+                }
+                if existing.default_guardrail_id.is_none() {
+                    existing.default_guardrail_id = default_guardrail_id;
+                }
+                return Ok(());
+            }
+
+            self.workspaces.insert(
+                address.clone(),
+                WorkspaceBinding {
+                    id,
+                    origin,
+                    bound_at: at,
+                    default_guardrail_id,
+                },
+            );
+            Ok(())
+        }
+    }
+
+    mutation! {
+        /// Relinquishes the workspace this address owns.
+        ///
+        /// As [`State::forget_guardrail`]: purely local, and with nothing to
+        /// refuse.
+        fn forget_workspace(&mut self, address: &Address) -> Option<WorkspaceBinding> {
+            self.workspaces.remove(address)
         }
     }
 
@@ -1496,6 +1617,16 @@ impl State {
                 ));
             }
         }
+
+        let mut workspaces: BTreeSet<&Uuid> = BTreeSet::new();
+        for (address, binding) in &self.workspaces {
+            if !workspaces.insert(&binding.id) {
+                return Err(format!(
+                    "the workspace bound at `{address}` is bound more than once; one remote \
+                     workspace belongs to exactly one local address"
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -1824,6 +1955,26 @@ pub enum BindError {
         "guardrail {id} is already bound to `{owner}`; one remote guardrail belongs to one address"
     )]
     GuardrailOwnedElsewhere {
+        /// The UUID that is already owned.
+        id: Uuid,
+        /// The address that owns it.
+        owner: Address,
+    },
+
+    /// The address already owns a different workspace.
+    #[error("`{address}` is already bound to workspace {id}")]
+    WorkspaceBound {
+        /// The local address.
+        address: Address,
+        /// The UUID it is already bound to.
+        id: Uuid,
+    },
+
+    /// Another address already owns this workspace.
+    #[error(
+        "workspace {id} is already bound to `{owner}`; one remote workspace belongs to one address"
+    )]
+    WorkspaceOwnedElsewhere {
         /// The UUID that is already owned.
         id: Uuid,
         /// The address that owns it.

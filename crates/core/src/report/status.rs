@@ -6,7 +6,7 @@ use std::fmt;
 use serde::Serialize;
 
 use super::{RecoveryReport, money, plural, scrubbed, timestamp};
-use crate::api::{KeyUsage, ObservedGuardrail, ObservedKey};
+use crate::api::{KeyUsage, ObservedGuardrail, ObservedKey, ObservedWorkspace};
 use crate::config::Config;
 use crate::ids::{Address, KeyHash, Uuid};
 use crate::plan::Snapshot;
@@ -26,6 +26,8 @@ pub struct StatusReport {
     /// under `--json` they travel here, because a stream carries exactly one
     /// document.
     warnings: Vec<String>,
+    /// Every workspace address the configuration or state names.
+    workspaces: Vec<WorkspaceStatus>,
     /// Every key address the configuration or state names, in address order.
     keys: Vec<KeyStatus>,
     /// Every guardrail address the configuration or state names.
@@ -54,6 +56,7 @@ impl StatusReport {
         let mut report = Self {
             command: "status",
             warnings: Vec::new(),
+            workspaces: workspace_statuses(config, state, &index),
             keys: key_statuses(config, state, &index),
             guardrails: guardrail_statuses(config, state, &index),
             unmanaged: unmanaged_statuses(state, &index, workspace),
@@ -102,7 +105,19 @@ impl StatusReport {
     }
 
     fn lines(&self) -> Vec<String> {
-        let mut lines = vec![format!("keys ({count}):", count = self.keys.len())];
+        let mut lines = Vec::new();
+        if !self.workspaces.is_empty() {
+            lines.push(format!(
+                "workspaces ({count}):",
+                count = self.workspaces.len()
+            ));
+            for workspace in &self.workspaces {
+                lines.extend(workspace.lines());
+            }
+            lines.push(String::new());
+        }
+
+        lines.push(format!("keys ({count}):", count = self.keys.len()));
         if self.keys.is_empty() {
             lines.push("  (none)".to_owned());
         }
@@ -443,6 +458,80 @@ impl GuardrailStatus {
     }
 }
 
+/// One local workspace address, with the budgets OpenRouter has in force.
+///
+/// The budgets are observed rather than desired, like a key's usage: they are
+/// what an operator checks before deciding whether spend in the workspace is
+/// actually capped.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct WorkspaceStatus {
+    address: String,
+    configured: bool,
+    bound: bool,
+    orphaned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    present_remotely: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slug: Option<String>,
+    /// The workspace's default guardrail, which governs every key in it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_guardrail_id: Option<String>,
+    /// Whether BYOK spend counts against those budgets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include_byok_in_budgets: Option<bool>,
+    /// The budgets in force, by interval, in dollars.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    budgets: BTreeMap<&'static str, f64>,
+}
+
+impl WorkspaceStatus {
+    fn lines(&self) -> Vec<String> {
+        let mut headline = format!("  {address}", address = self.address);
+        match (&self.id, self.origin) {
+            (Some(id), Some(origin)) => headline.push_str(&format!("  {id}  {origin}")),
+            _ => headline.push_str("  not bound"),
+        }
+        if self.orphaned {
+            headline.push_str("  (orphaned: no longer in the configuration)");
+        }
+        let mut lines = vec![headline];
+        match self.present_remotely {
+            Some(true) => lines.push(format!(
+                "      remote: present, named \"{name}\", slug \"{slug}\"",
+                name = self.remote_name.as_deref().unwrap_or(""),
+                slug = self.slug.as_deref().unwrap_or(""),
+            )),
+            Some(false) => lines.push("      remote: absent from the snapshot".to_owned()),
+            None => {}
+        }
+        if let Some(id) = &self.default_guardrail_id {
+            lines.push(format!("      default guardrail: {id}"));
+        }
+        if self.present_remotely == Some(true) {
+            let budgets = if self.budgets.is_empty() {
+                "none".to_owned()
+            } else {
+                self.budgets
+                    .iter()
+                    .map(|(interval, amount)| format!("{interval} {}", money(*amount)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            lines.push(format!(
+                "      budgets: {budgets} (byok counted: {byok})",
+                byok = self.include_byok_in_budgets.unwrap_or(false)
+            ));
+        }
+        lines
+    }
+}
+
 /// A remote resource no local address owns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct UnmanagedStatus {
@@ -506,6 +595,7 @@ impl OperationStatus {
 struct Observed<'a> {
     keys: BTreeMap<&'a KeyHash, &'a ObservedKey>,
     guardrails: BTreeMap<&'a Uuid, &'a ObservedGuardrail>,
+    workspaces: BTreeMap<&'a Uuid, &'a ObservedWorkspace>,
     assignments: BTreeMap<&'a KeyHash, BTreeSet<&'a Uuid>>,
 }
 
@@ -524,6 +614,11 @@ impl<'a> Observed<'a> {
                 .guardrails
                 .iter()
                 .map(|guardrail| (&guardrail.id, guardrail))
+                .collect(),
+            workspaces: observed
+                .workspaces
+                .iter()
+                .map(|workspace| (&workspace.id, workspace))
                 .collect(),
             assignments,
         }
@@ -568,6 +663,44 @@ fn guardrail_statuses(
         .collect()
 }
 
+/// Every workspace address either input names, in address order.
+fn workspace_statuses(
+    config: &Config,
+    state: &State,
+    index: &Observed<'_>,
+) -> Vec<WorkspaceStatus> {
+    addresses(config.workspaces.keys(), state.workspaces().keys())
+        .map(|address| {
+            let binding = state.workspace(address);
+            let observed = binding.and_then(|binding| index.workspaces.get(&binding.id).copied());
+            WorkspaceStatus {
+                address: format!("workspaces.{address}"),
+                configured: config.workspaces.contains_key(address),
+                bound: binding.is_some(),
+                orphaned: !config.workspaces.contains_key(address),
+                id: binding.map(|binding| binding.id.as_str().to_owned()),
+                origin: binding.map(|binding| binding.origin.as_str()),
+                present_remotely: binding.map(|_| observed.is_some()),
+                remote_name: observed.map(|workspace| scrubbed(&workspace.name)),
+                slug: observed.map(|workspace| scrubbed(&workspace.slug)),
+                default_guardrail_id: binding
+                    .and_then(|binding| binding.default_guardrail_id.as_ref())
+                    .map(|id| id.as_str().to_owned()),
+                include_byok_in_budgets: observed.map(|w| w.include_byok_in_budgets),
+                budgets: observed
+                    .map(|workspace| {
+                        workspace
+                            .budgets
+                            .iter()
+                            .map(|(interval, amount)| (interval.as_str(), amount.dollars()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
 /// Remote resources no local address owns, by immutable identity.
 ///
 /// A scoped run leaves out everything outside its workspace: those resources
@@ -604,6 +737,19 @@ fn unmanaged_statuses(
                     resource: "guardrail",
                     identity: guardrail.id.as_str().to_owned(),
                     name: scrubbed(&guardrail.name),
+                }),
+        )
+        .chain(
+            index
+                .workspaces
+                .values()
+                // A workspace is in scope when it *is* the scope.
+                .filter(|workspace| in_scope(Some(&workspace.id)))
+                .filter(|workspace| state.address_owning_workspace(&workspace.id).is_none())
+                .map(|workspace| UnmanagedStatus {
+                    resource: "workspace",
+                    identity: workspace.id.as_str().to_owned(),
+                    name: scrubbed(&workspace.name),
                 }),
         )
         .collect()

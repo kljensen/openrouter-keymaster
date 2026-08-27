@@ -294,6 +294,7 @@ pub fn recover_replace(mut context: Context, name: &str) -> Result<Outcome<Repla
     let lock = file.lock()?;
     let config = context.config()?;
     let mut state = lock.read()?;
+    context.check_scope(&config, &state)?;
 
     let operation =
         pending_at(&state, &address)

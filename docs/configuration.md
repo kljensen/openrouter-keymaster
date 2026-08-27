@@ -54,7 +54,8 @@ Optional.
 
 ## Local addresses
 
-The table key in `[guardrails.NAME]`, `[keys.NAME]`, and `[receivers.NAME]` is a
+The table key in `[workspaces.NAME]`, `[guardrails.NAME]`, `[keys.NAME]`, and
+`[receivers.NAME]` is a
 **local address**. It is Keymaster's name for the resource, it is never sent to
 OpenRouter, and it is what `state forget`, `rotate`, `retire`, and `import` take
 as an argument. Changing one is not a rename — it is a new address bound to
@@ -63,6 +64,100 @@ nothing, and the old binding becomes an orphan.
 An address is 1 to 64 characters of ASCII letters, digits, `_`, and `-`,
 starting with a letter or a digit, and may not contain `sk-or-`. Two addresses
 of the same kind may not differ only by letter case.
+
+## `[workspaces.ADDRESS]`
+
+A workspace is the unit that carries a pooled spending cap and a default
+guardrail. Identity is the workspace UUID: removing the block orphans the
+binding, `openrouter-keymaster import workspace NAME --id UUID` binds an
+existing one, and `openrouter-keymaster delete workspace --id UUID` is the only
+deletion.
+
+```toml
+[workspaces.golf_club]
+name = "Golf Club"
+slug = "golf-club"
+description = "The golf club's inference workspace."
+budgets = { daily = 5, weekly = 20, monthly = 50, lifetime = 500 }
+include_byok_in_budgets = false
+default_guardrail = "cheap_summarization"
+```
+
+| Field | Type | Required | Clearable | Notes |
+| --- | --- | --- | --- | --- |
+| `name` | string | yes | no | Remote display name. Mutable remotely and never an identifier. |
+| `slug` | string | yes | no | 1 to 50 characters of lowercase letters and digits in segments separated by single hyphens, with no leading or trailing hyphen. |
+| `description` | string | no | yes | At most 1000 characters. |
+| `budgets` | table | no | no | Any of `daily`, `weekly`, `monthly`, `lifetime`, in USD and greater than zero. |
+| `include_byok_in_budgets` | bool | no | no | Needs at least one budget. Omitted leaves the remote setting alone. |
+| `default_guardrail` | local address | no | no | Names a `[guardrails.*]` block, which is bound to this workspace's `default_guardrail_id`. |
+| `clear` | array of string | no | — | `"description"`. |
+
+**`budgets` is managed as a whole or not at all.** Omitting the table leaves
+OpenRouter's budgets alone; writing one makes it the complete desired set, so an
+interval OpenRouter has and the table does not is removed. Every configured
+interval must be strictly larger than the next narrower one — OpenRouter checks
+lifetime > monthly > weekly > daily on every budget write — and that is checked
+before anything is sent. Apply writes one request per interval, ordered deletes
+first, then increases from the widest interval to the narrowest, then decreases
+from the narrowest to the widest, so no intermediate state violates the rule.
+
+**A refused budget holds back everything it would have capped.** Workspace
+budgets are a plan feature, and a well-formed `4xx` — a `403` plan restriction
+among them — is reported as a definite failure naming the interval. Anything
+else (a timeout, a reset, a `5xx`) settles nothing, so it is reported as a write
+whose effect is unknown and left to the read that follows the apply. While a configured budget has not converged, every write in that
+workspace the plan classifies `issuing` or `expanding` is held back — a key
+create or replacement, an enable, a raised limit, a widened guardrail — and
+routine writes go on as usual. The workspace's own budget writes are exempt,
+because they are what converges it.
+
+**`include_byok_in_budgets` travels with a budget.** It is a workspace-wide
+setting that only a budget `PUT` can write, which is why it needs at least one
+budget to be written at all.
+
+**A `default_guardrail` is that workspace's own guardrail.** Every workspace has
+a `default_guardrail_id`, derived from the workspace's UUID, which governs all
+traffic in the workspace; it appears in no listing until its configuration is
+first written. Naming a guardrail block here binds the block to that identity —
+including when the block is added after the workspace was already imported,
+since the workspace binding records the identity and the address takes it. Such
+a guardrail is never created by `POST`, never imported by name, and never
+deleted on its own: it is created by the first `PATCH` to the identity its
+workspace names, and `delete workspace` releases its binding along with the
+workspace's.
+
+A guardrail address may be the default of at most one workspace, that block must
+omit `workspace` or name the same one, and it may not set `workspace_id` at all:
+being a workspace's default *is* the placement, so a second spelling of it can
+only disagree. If the address already owns a different guardrail, nothing is
+written — writing the bound identity would edit a guardrail that is not the
+default, and writing the workspace's would leave two at one address — and the
+plan says so, naming both. Nothing is written either when the identity the
+workspace names is owned by *another* address, since one remote guardrail
+belongs to exactly one local address. Release the address with `state forget`,
+or give the default guardrail a block of its own.
+
+**A guardrail's workspace is fixed when it is created.** Unlike a key, a
+guardrail is never replaced — it is policy other resources are attached to, not
+a credential a successor can stand in for — so a guardrail OpenRouter has in one
+workspace and the configuration places in another is a difference nothing can
+converge. The plan reports it and writes nothing, and `import guardrail` refuses
+a guardrail whose workspace is not the one the address would place it in. Both
+read the same rule, in the same order: the workspace the block names, then the
+workspace whose `default_guardrail` it is, then the run's `--workspace` scope —
+so under a scope a bound guardrail living elsewhere is held back rather than
+patched from a run that may not touch that workspace at all. The
+never-materialized case obeys the same rule: a block still bound to one
+workspace's default identity but placed in another is held back, not written,
+because writing it would materialize the first workspace's default guardrail
+while the configuration asks for one in the second.
+
+**A workspace that is bound and absent is reported, never recreated.** A
+guardrail may be recreated, because a guardrail is policy and a new one governs
+the same keys. A workspace is a container: a new one has a new UUID, so every
+key, guardrail, and budget the old one held would be somewhere Keymaster could
+no longer reach. It is reported as `missing`, like a missing key.
 
 ## `[guardrails.ADDRESS]`
 
@@ -92,6 +187,8 @@ require_zdr = true
 | `reset_interval` | `"daily"`, `"weekly"`, `"monthly"` | no | yes | Needs `limit_usd`, and is required whenever `limit_usd` is set. |
 | `include_byok_in_limit` | bool | no | no | Inherits `defaults`. Always managed. |
 | `require_zdr` | bool | no | no | Restrict inference to zero-data-retention providers. Omitted means unmanaged. Sent as `enforce_zdr`. |
+| `workspace` | local address | no | no | Names a `[workspaces.*]` block. Fixed at creation. |
+| `workspace_id` | UUID string | no | no | A workspace Keymaster does not manage. Never alongside `workspace`, and never on a workspace's `default_guardrail`. |
 | `clear` | array of string | no | — | `"description"`, `"limit_usd"`, `"reset_interval"`. |
 
 ## `[keys.ADDRESS]`
@@ -119,7 +216,8 @@ generation = 1
 | `limit_reset` | `"daily"`, `"weekly"`, `"monthly"` | no | yes | Needs `limit_usd`, but is optional with it: a key limit with no reset never refills. Note the key-level spelling differs from a guardrail's `reset_interval`. |
 | `expires_at` | RFC 3339 string | no | yes | Quoted string, not a bare TOML datetime. Normalized to UTC. |
 | `disabled` | bool | no (default `false`) | no | Always managed. |
-| `workspace_id` | UUID string | no | no | |
+| `workspace` | local address | no | no | Names a `[workspaces.*]` block, resolved through its binding at plan time. |
+| `workspace_id` | UUID string | no | no | A workspace Keymaster does not manage. Never alongside `workspace`. |
 | `creator_user_id` | string | no | no | The organization member the key is created for. |
 | `guardrail` | local address | no | yes | Names a `[guardrails.*]` block. Clearing unassigns. |
 | `receiver` | local address | no | no | Names a `[receivers.*]` block. |
@@ -131,6 +229,11 @@ generation = 1
 `POST /keys` accepts them and `PATCH /keys/{hash}` has no field for any of them,
 so changing one here plans a replacement rather than an update. So does raising
 `generation` or changing which receiver the key delivers to.
+
+**A key or guardrail whose `workspace` block is not bound yet is held back.**
+OpenRouter fixes a workspace at creation, so the identity has to exist before
+anything is placed in it. The first run creates the workspace; the next one
+creates what goes inside.
 
 **A key with no `receiver` can be managed and imported but never created.**
 There is no fallback destination for a plaintext key and Keymaster will not

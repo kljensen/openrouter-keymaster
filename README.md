@@ -150,9 +150,12 @@ the full contract.
 
 `Context.workspace`, and the `--workspace UUID` global option that sets it, name
 the one OpenRouter workspace a run places resources in and reports on. With a
-scope, a configuration whose key names a different `workspace_id` is refused
-before any request; every key and guardrail the run creates is placed in the
-scope; `plan` and `status` leave out `unmanaged` resources from other
+scope, a configuration that names a different workspace is refused before any
+request — a key or guardrail whose `workspace_id` or `workspace` block resolves
+elsewhere, and a `[workspaces.NAME]` block that is not already bound to the
+scope, since a scoped run cannot create a workspace whose new UUID could never
+be the one it was scoped to; every key and guardrail the run creates is placed
+in the scope; `plan` and `status` leave out `unmanaged` resources from other
 workspaces; and matching by *name* — adoption candidates, and the collision
 check before a guarded recreation — considers only resources in the scope, so
 another club's identically named key cannot block this one. The plan
@@ -194,6 +197,7 @@ openrouter-keymaster status                        report bindings and incomplet
 openrouter-keymaster apply                         converge OpenRouter with the configuration
 openrouter-keymaster import key NAME --hash HASH   bind an existing key by its hash
 openrouter-keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID
+openrouter-keymaster import workspace NAME --id ID bind an existing workspace by its UUID
 openrouter-keymaster rotate NAME                   stage a replacement key
 openrouter-keymaster recover inspect NAME          report an interrupted key operation
 openrouter-keymaster recover resolve NAME ...      attest what an ambiguous operation did
@@ -201,6 +205,7 @@ openrouter-keymaster recover replace NAME          replace a key after resolving
 openrouter-keymaster retire NAME --hash HASH       disable a tracked retained key
 openrouter-keymaster decommission NAME --hash HASH end the key an address is using
 openrouter-keymaster delete key --hash HASH        permanently delete a tracked key
+openrouter-keymaster delete workspace --id UUID    permanently delete a tracked workspace
 openrouter-keymaster state forget ADDRESS          relinquish local ownership of an address
 ```
 
@@ -296,10 +301,77 @@ actionable category — `config_invalid`, `config_read`, `config_syntax`,
 `missing_credential`, `authentication`, `transport`, `timeout`, `http_status`,
 `state_parse`, and the rest — in the diagnostic's `kind` field.
 
+## Workspaces
+
+A workspace is the unit that carries a pooled spending cap and a default
+guardrail, and Keymaster manages one like any other resource: a
+`[workspaces.NAME]` block describes it, identity is the UUID, removing the block
+orphans the binding, and nothing is ever deleted implicitly.
+
+```toml
+[workspaces.golf_club]
+name = "Golf Club"
+slug = "golf-club"
+budgets = { monthly = 50, lifetime = 500 }
+default_guardrail = "house_rail"
+
+[guardrails.house_rail]
+name = "golf-house-rail"
+
+[keys.golf_jobfeed]
+name = "golf-jobfeed"
+receiver = "jobfeed_vault"
+workspace = "golf_club"
+```
+
+Keys and guardrails name their workspace by local address, which is resolved
+through the binding at plan time; the raw `workspace_id` stays for a workspace
+Keymaster does not manage, and a block that writes both is refused. The planner
+orders workspaces before guardrails before keys, because OpenRouter fixes a
+workspace at creation on both — so a key whose workspace is not bound yet is
+held back, and the run after the one that created the workspace creates it.
+
+**Budgets are written one interval at a time.** Each configured interval is one
+`PUT` and a removed one is a `DELETE`, ordered deletes first, then increases
+from the widest interval to the narrowest, then decreases from the narrowest to
+the widest, so no intermediate state violates the server's rule that lifetime >
+monthly > weekly > daily. That rule is also checked offline, so a table that
+could never be applied is refused before anything is sent.
+
+Workspace budgets are a plan feature, and a refusal is definite: it names the
+interval, the other intervals are still attempted, and the failure is reported
+on every run until the `budgets` table leaves the configuration. Meanwhile every
+`issuing` or `expanding` write in that workspace is held back — no new keys, no
+raised limits — because spend enabled under a cap that is not in force is
+exactly what the budget was for. Routine writes proceed.
+
+**The default guardrail is a guardrail block bound to the workspace's
+`default_guardrail_id`.** That identity is derived from the workspace's own and
+governs all traffic in it, but the guardrail appears in no listing until its
+configuration is first written. So it is the one exception to "bound but absent
+means missing": the plan shows a `create` that already knows its identity, and
+apply performs it as the first `PATCH`. After that it is an ordinary guardrail.
+It is never `POST`ed, never imported by name, and never deleted on its own; if
+the address it names already owns another guardrail, or if the identity the
+workspace names belongs to another address, the plan writes nothing and says
+which. A guardrail's workspace is fixed when it is created and a guardrail is
+never replaced, so one OpenRouter has somewhere else is reported rather than
+patched, and `import guardrail` refuses it. A workspace itself is never
+recreated — a new one has a new UUID, so everything
+the old one held would be beyond reach, and a bound workspace that is absent is
+reported as `missing` like a missing key.
+
+`openrouter-keymaster delete workspace --id UUID` refuses while OpenRouter shows
+the workspace holding any key or guardrail, tracked or not, because deleting a
+workspace deletes what is in it and Keymaster does not destroy what it does not
+manage. The workspace's own default guardrail is not an occupant: it cannot
+outlive the workspace, so its binding is released with it.
+
 ## Import
 
-`openrouter-keymaster import key NAME --hash HASH` and
-`openrouter-keymaster import guardrail NAME --id UUID` bind an existing remote
+`openrouter-keymaster import key NAME --hash HASH`,
+`openrouter-keymaster import guardrail NAME --id UUID`, and
+`openrouter-keymaster import workspace NAME --id UUID` bind an existing remote
 object to a local address. **Import is the operator's authority to make that
 binding**; Keymaster never makes it on its own, because a display name is
 mutable and not unique. A remote object whose name matches an unbound address
@@ -681,9 +753,14 @@ it. The result document lists each identity and its role, so you can see what
 you are letting go of before it stops being yours. Afterwards
 `openrouter-keymaster plan` reports them as unmanaged.
 
-`ADDRESS` is `keys.NAME` or `guardrails.NAME`. A bare `NAME` is accepted when
-only one of the two is bound and refused when both are — the same word can name
-a key and a guardrail.
+Forgetting a workspace address releases the default guardrail bound to it as
+well: that guardrail cannot outlive its workspace and nothing else can reach it,
+so leaving the binding behind would leave an address bound to an identity that
+no longer means anything.
+
+`ADDRESS` is `keys.NAME`, `guardrails.NAME`, or `workspaces.NAME`. A bare `NAME`
+is accepted when only one of the three is bound and refused when more than one
+is — the same word can name a key, a guardrail, and a workspace.
 
 - **An address with an operation in progress is refused.** The journal is the
   only record that the attempt happened, and in the create phases the only

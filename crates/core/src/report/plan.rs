@@ -399,9 +399,11 @@ impl ActionReport {
 fn recovery_of(action: &Action) -> Option<RecoveryReport> {
     let address = match &action.address {
         ResourceAddress::Key(address) | ResourceAddress::Assignment(address) => Some(address),
-        ResourceAddress::Guardrail(_)
+        ResourceAddress::Workspace(_)
+        | ResourceAddress::Guardrail(_)
         | ResourceAddress::RemoteKey(_)
-        | ResourceAddress::RemoteGuardrail(_) => None,
+        | ResourceAddress::RemoteGuardrail(_)
+        | ResourceAddress::RemoteWorkspace(_) => None,
     };
     let hash = match &action.identity {
         Some(Identity::Key(hash)) => Some(hash),
@@ -560,6 +562,25 @@ pub(super) enum ReasonReport {
     BlockedBy {
         dependency: String,
     },
+    DefaultGuardrailUnmaterialized {
+        workspace: String,
+    },
+    DefaultGuardrailConflict {
+        bound: String,
+        expected: String,
+    },
+    DefaultGuardrailOwnedElsewhere {
+        id: String,
+        owner: String,
+    },
+    WorkspaceFixedAtCreation {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        observed: Option<String>,
+        desired: String,
+    },
+    BudgetNotConverged {
+        workspace: String,
+    },
 }
 
 impl ReasonReport {
@@ -610,6 +631,32 @@ impl ReasonReport {
             Reason::PlaintextLost => Self::PlaintextLost,
             Reason::BlockedBy { dependency } => Self::BlockedBy {
                 dependency: dependency.to_string(),
+            },
+            Reason::DefaultGuardrailUnmaterialized { workspace } => {
+                Self::DefaultGuardrailUnmaterialized {
+                    workspace: workspace.to_string(),
+                }
+            }
+            Reason::DefaultGuardrailConflict { bound, expected } => {
+                Self::DefaultGuardrailConflict {
+                    bound: bound.as_str().to_owned(),
+                    expected: expected.as_str().to_owned(),
+                }
+            }
+            Reason::DefaultGuardrailOwnedElsewhere { id, owner } => {
+                Self::DefaultGuardrailOwnedElsewhere {
+                    id: id.as_str().to_owned(),
+                    owner: owner.as_str().to_owned(),
+                }
+            }
+            Reason::WorkspaceFixedAtCreation { observed, desired } => {
+                Self::WorkspaceFixedAtCreation {
+                    observed: observed.as_ref().map(|id| id.as_str().to_owned()),
+                    desired: desired.as_str().to_owned(),
+                }
+            }
+            Reason::BudgetNotConverged { workspace } => Self::BudgetNotConverged {
+                workspace: workspace.to_string(),
             },
         }
     }
@@ -690,6 +737,58 @@ impl ReasonReport {
             Self::BlockedBy { dependency } => {
                 format!("{dependency} is unresolved, so this will not run")
             }
+            Self::DefaultGuardrailUnmaterialized { workspace } => unmaterialized(workspace),
+            Self::DefaultGuardrailConflict { bound, expected } => conflicted(bound, expected),
+            Self::DefaultGuardrailOwnedElsewhere { id, owner } => owned_elsewhere(id, owner),
+            Self::WorkspaceFixedAtCreation { observed, desired } => misplaced(observed, desired),
+            Self::BudgetNotConverged { workspace } => unbudgeted(workspace),
         }
     }
+}
+
+/// Why a guardrail nothing has listed is planned as a create (ADR-0004, item 3).
+fn unmaterialized(workspace: &str) -> String {
+    format!(
+        "this is {workspace}'s default guardrail, which OpenRouter materializes the first time \
+         its configuration is written; apply writes it to the identity the workspace already names"
+    )
+}
+
+/// Why a default guardrail whose address owns something else writes nothing.
+fn conflicted(bound: &str, expected: &str) -> String {
+    format!(
+        "this address owns guardrail {bound}, but the workspace that names it as its default \
+         guardrail names {expected}; release the address with `openrouter-keymaster state forget \
+         guardrails.<address>`, or give the default guardrail a block of its own"
+    )
+}
+
+/// Why a default guardrail another address owns writes nothing.
+fn owned_elsewhere(id: &str, owner: &str) -> String {
+    format!(
+        "the workspace that names this block as its default guardrail names {id}, which \
+         `{owner}` already owns; one remote guardrail belongs to exactly one local address, so \
+         point the workspace at `{owner}` or release it with `openrouter-keymaster state forget \
+         guardrails.{owner}`"
+    )
+}
+
+/// Why a guardrail in the wrong workspace can never converge.
+fn misplaced(observed: &Option<String>, desired: &str) -> String {
+    let where_it_is = observed
+        .as_deref()
+        .map_or_else(|| "no workspace".to_owned(), |id| format!("workspace {id}"));
+    format!(
+        "OpenRouter has this guardrail in {where_it_is} and the configuration places it in \
+         workspace {desired}; a guardrail's workspace is fixed when it is created and a guardrail \
+         is never replaced, so no write can move it"
+    )
+}
+
+/// Why nothing is issued or widened inside a workspace (ADR-0004, item 4).
+fn unbudgeted(workspace: &str) -> String {
+    format!(
+        "{workspace}'s configured budget is not in force, so nothing is issued or widened inside \
+         it until it is"
+    )
 }

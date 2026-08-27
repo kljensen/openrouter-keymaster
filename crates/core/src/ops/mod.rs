@@ -65,8 +65,8 @@ pub use crate::receiver::{Acknowledgement, DeliveryMetadata, Outcome as Delivery
 
 pub use apply::apply;
 pub use fingerprint::PlanFingerprint;
-pub use import::{import_guardrail, import_key};
-pub use lifecycle::{decommission, delete_key, forget, retire};
+pub use import::{import_guardrail, import_key, import_workspace};
+pub use lifecycle::{decommission, delete_key, delete_workspace, forget, retire};
 pub use recover::{Finding, recover_inspect, recover_replace, recover_resolve};
 pub use rotate::rotate;
 
@@ -168,6 +168,21 @@ impl Context {
     const fn scope(&self) -> Option<&Uuid> {
         self.workspace.as_ref()
     }
+
+    /// Refuses a scoped run whose blocks resolve to another workspace, or whose
+    /// workspace blocks this scope could never own.
+    ///
+    /// Separate from [`Context::config`] because it needs state: a `workspace`
+    /// address means whatever the binding says it means, and a workspace block
+    /// is in scope only when it is already bound to the scope itself. Every
+    /// caller runs it as soon as it has both files, before it builds a client
+    /// or writes anything.
+    fn check_scope(&self, config: &Config, state: &State) -> Result<(), ConfigError> {
+        let Some(scope) = &self.workspace else {
+            return Ok(());
+        };
+        refuse_out_of_scope(config, state, scope)
+    }
 }
 
 /// Refuses a configuration that names a workspace other than `scope`.
@@ -177,25 +192,94 @@ impl Context {
 /// nothing outside its scope and reports nothing from outside it either, so
 /// such a block could never converge.
 fn refuse_other_workspaces(config: &Config, scope: &Uuid) -> Result<(), ConfigError> {
-    // `[workspaces.NAME]` blocks (#33) are checked in this same pass once they
-    // exist: a scoped run rejects one not already bound to `scope`, since the
-    // UUID a create returns could never be the one it was scoped to.
     let problems: Vec<Problem> = config
         .keys
         .iter()
         .filter(|(_, key)| key.workspace_id.as_ref().is_some_and(|id| id != scope))
         .map(|(address, _)| Problem {
             path: format!("keys.{address}.workspace_id"),
-            message: format!(
-                "this run is scoped to workspace {scope} and places every resource it creates \
-                 there, so a block may name that workspace or none"
-            ),
+            message: misplaced(scope),
         })
+        .chain(
+            config
+                .guardrails
+                .iter()
+                .filter(|(_, rail)| rail.workspace_id.as_ref().is_some_and(|id| id != scope))
+                .map(|(address, _)| Problem {
+                    path: format!("guardrails.{address}.workspace_id"),
+                    message: misplaced(scope),
+                }),
+        )
         .collect();
     if problems.is_empty() {
         return Ok(());
     }
     Err(ConfigError::Invalid { problems })
+}
+
+/// Refuses the blocks a scoped run could never place or own (ADR-0004, item 5).
+///
+/// Three rules, all the same rule seen from different sides. A key or guardrail
+/// whose `workspace` address is bound elsewhere would be created outside the
+/// scope. A workspace block bound elsewhere is another club's. And a workspace
+/// block bound to nothing at all cannot be created here either: a scoped run
+/// places what it creates in the scope, and the UUID `POST /workspaces` returns
+/// could never be the one it was scoped to. The operator applies unscoped once,
+/// or imports, and scopes from then on.
+fn refuse_out_of_scope(config: &Config, state: &State, scope: &Uuid) -> Result<(), ConfigError> {
+    refuse_other_workspaces(config, scope)?;
+
+    let elsewhere = |address: &Address| {
+        state
+            .workspace(address)
+            .is_none_or(|binding| binding.id != *scope)
+    };
+    let problems: Vec<Problem> = config
+        .keys
+        .iter()
+        .filter(|(_, key)| key.workspace.as_ref().is_some_and(elsewhere))
+        .map(|(address, _)| Problem {
+            path: format!("keys.{address}.workspace"),
+            message: misplaced(scope),
+        })
+        .chain(
+            config
+                .guardrails
+                .iter()
+                .filter(|(_, rail)| rail.workspace.as_ref().is_some_and(elsewhere))
+                .map(|(address, _)| Problem {
+                    path: format!("guardrails.{address}.workspace"),
+                    message: misplaced(scope),
+                }),
+        )
+        .chain(
+            config
+                .workspaces
+                .keys()
+                .filter(|address| elsewhere(address))
+                .map(|address| Problem {
+                    path: format!("workspaces.{address}"),
+                    message: format!(
+                        "this run is scoped to workspace {scope}, and a scoped run neither creates \
+                         a workspace nor manages another one; import this block with \
+                         `openrouter-keymaster import workspace {address} --id {scope}`, or apply \
+                         it once without `--workspace`"
+                    ),
+                }),
+        )
+        .collect();
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(ConfigError::Invalid { problems })
+}
+
+/// What every refusal of a block placed outside the scope says.
+fn misplaced(scope: &Uuid) -> String {
+    format!(
+        "this run is scoped to workspace {scope} and places every resource it creates there, so a \
+         block may name that workspace or none"
+    )
 }
 
 /// A report, and the failure that stands beside it.
@@ -357,6 +441,7 @@ struct Observation {
 fn observe(context: &Context) -> Result<Observation, Error> {
     let config = context.config()?;
     let state = StateFile::new(&context.paths.state).read()?;
+    context.check_scope(&config, &state)?;
 
     let client = context.client()?;
     let snapshot = snapshot(&Reader::new(&client))?;
@@ -377,6 +462,7 @@ fn snapshot(reader: &Reader<'_>) -> Result<Snapshot, ApiError> {
         keys: reader.list_keys(None)?,
         guardrails: reader.list_guardrails(None)?,
         assignments: reader.list_assignments()?,
+        workspaces: reader.list_workspaces()?,
     })
 }
 

@@ -21,8 +21,8 @@ use std::collections::BTreeSet;
 use time::OffsetDateTime;
 
 use super::{Expansion, FieldChange, FieldValue};
-use crate::api::{ObservedGuardrail, ObservedKey, ResetPolicy};
-use crate::config::{Guardrail, Key, Managed, ResetInterval, Usd};
+use crate::api::{ObservedGuardrail, ObservedKey, ObservedWorkspace, ResetPolicy};
+use crate::config::{BUDGET_INTERVALS, Guardrail, Key, Managed, ResetInterval, Usd, Workspace};
 use crate::ids::{RemoteName, UserId, Uuid};
 
 /// Key fields OpenRouter fixes when the key is created.
@@ -36,7 +36,16 @@ pub(super) const IMMUTABLE_KEY_FIELDS: [&str; 3] =
 ///
 /// `observed` is `None` when the key does not exist, which makes the same
 /// function describe a create: every managed field differs from nothing.
-pub fn key_changes(desired: &Key, observed: Option<&ObservedKey>) -> Vec<FieldChange> {
+///
+/// `workspace` is the workspace the key belongs to once the block's `workspace`
+/// address has been resolved through its binding — or the raw `workspace_id` it
+/// names, or nothing. It is passed in rather than read from `desired` because
+/// resolving an address needs state, which a pure comparison does not have.
+pub fn key_changes(
+    desired: &Key,
+    observed: Option<&ObservedKey>,
+    workspace: Option<&Uuid>,
+) -> Vec<FieldChange> {
     let mut diff = Diff::new(observed.is_some());
     diff.name("name", observed.map(|key| key.name.as_str()), &desired.name);
     diff.budget(
@@ -69,7 +78,7 @@ pub fn key_changes(desired: &Key, observed: Option<&ObservedKey>) -> Vec<FieldCh
     diff.uuid(
         "workspace_id",
         observed.and_then(|key| key.workspace_id.as_ref()),
-        desired.workspace_id.as_ref(),
+        workspace,
     );
     diff.user(
         "creator_user_id",
@@ -143,6 +152,49 @@ pub fn guardrail_changes(
     diff.changes
 }
 
+/// Every managed difference between a desired workspace and the observed one.
+///
+/// The budgets are one field per interval, because that is how they are written
+/// — one request each, in an order the server accepts (ADR-0004, item 4) — and
+/// a single "budgets" field would hide which interval an apply could not set.
+pub fn workspace_changes(
+    desired: &Workspace,
+    observed: Option<&ObservedWorkspace>,
+) -> Vec<FieldChange> {
+    let mut diff = Diff::new(observed.is_some());
+    diff.name(
+        "name",
+        observed.map(|workspace| workspace.name.as_str()),
+        &desired.name,
+    );
+    diff.plain(
+        "slug",
+        observed.map(|workspace| workspace.slug.as_str()),
+        &desired.slug,
+    );
+    diff.text(
+        "description",
+        observed.and_then(|workspace| workspace.description.as_deref()),
+        &desired.description,
+    );
+    if let Some(budgets) = &desired.budgets {
+        for interval in BUDGET_INTERVALS {
+            diff.budget_interval(
+                interval.field(),
+                observed.and_then(|workspace| workspace.budgets.get(&interval).copied()),
+                budgets.get(&interval).copied(),
+            );
+        }
+    }
+    diff.optional_flag(
+        "include_byok_in_budgets",
+        observed.map(|workspace| workspace.include_byok_in_budgets),
+        desired.include_byok_in_budgets,
+        Expansion::ByokExcludedFromLimit,
+    );
+    diff.changes
+}
+
 /// Accumulates the differences of one resource, in field order.
 struct Diff {
     changes: Vec<FieldChange>,
@@ -182,6 +234,23 @@ impl Diff {
     /// A display name, which is always managed.
     fn name(&mut self, field: &'static str, from: Option<&str>, to: &RemoteName) {
         self.push(field, text_value(from), FieldValue::text(to.as_str()), None);
+    }
+
+    /// A plain string that is always managed, and is not a display name.
+    fn plain(&mut self, field: &'static str, from: Option<&str>, to: &str) {
+        self.push(field, text_value(from), FieldValue::text(to), None);
+    }
+
+    /// One workspace budget interval, which is managed as a whole or not at
+    /// all: an interval the table does not name is removed.
+    fn budget_interval(&mut self, field: &'static str, from: Option<Usd>, to: Option<Usd>) {
+        let raised = budget_raised(from, to);
+        self.push(
+            field,
+            from.map_or(FieldValue::Absent, FieldValue::Money),
+            to.map_or(FieldValue::Absent, FieldValue::Money),
+            raised.then_some(Expansion::BudgetRaised { field }),
+        );
     }
 
     fn text(&mut self, field: &'static str, from: Option<&str>, to: &Managed<String>) {

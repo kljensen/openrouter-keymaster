@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::api::{KeyUsage, RemoteTimestamps, ResetPolicy, ZeroDataRetention};
-use crate::config::Usd;
+use crate::config::{BudgetInterval, Usd};
 use crate::ids::{OperationId, ReceiverFingerprint, RemoteName, UserId};
 use crate::state::{BeginCreate, Origin, Transition};
 
@@ -17,6 +17,9 @@ const RAIL_ID: &str = "11111111-1111-4111-8111-111111111111";
 const OTHER_RAIL_ID: &str = "22222222-2222-4222-8222-222222222222";
 const ASSIGNMENT_ID: &str = "33333333-3333-4333-8333-333333333333";
 const OTHER_ASSIGNMENT_ID: &str = "44444444-4444-4444-8444-444444444444";
+const CLUB_ID: &str = "55555555-5555-4555-8555-555555555555";
+/// The deterministic default-guardrail identity of the `club` workspace.
+const DEFAULT_RAIL_ID: &str = "66666666-6666-4666-8666-666666666666";
 
 /// A configuration with one guardrail, one key, and one receiver.
 const BASE: &str = r#"
@@ -141,6 +144,35 @@ impl World {
             .expect("binding a guardrail");
     }
 
+    fn observe_workspace(&mut self, id: &str, name: &str, slug: &str) -> &mut ObservedWorkspace {
+        self.snapshot.workspaces.push(ObservedWorkspace {
+            id: uuid(id),
+            name: name.to_owned(),
+            slug: slug.to_owned(),
+            description: None,
+            default_guardrail_id: Some(uuid(DEFAULT_RAIL_ID)),
+            include_byok_in_budgets: false,
+            budgets: BTreeMap::new(),
+            timestamps: RemoteTimestamps::default(),
+        });
+        self.snapshot
+            .workspaces
+            .last_mut()
+            .expect("the workspace just pushed")
+    }
+
+    fn bind_workspace(&mut self, local: &str, id: &str) {
+        self.state
+            .bind_workspace(
+                &address(local),
+                uuid(id),
+                Some(uuid(DEFAULT_RAIL_ID)),
+                Origin::Imported,
+                at(0),
+            )
+            .expect("binding a workspace");
+    }
+
     /// Journals a create through to a promoted current key, which is the only
     /// way a binding records where the plaintext went.
     fn deliver_key(
@@ -209,8 +241,13 @@ impl World {
     }
 
     fn plan(&self, config: &str) -> Plan {
+        self.plan_scoped(config, None)
+    }
+
+    fn plan_scoped(&self, config: &str, workspace: Option<&str>) -> Plan {
         let config = Config::parse(config).expect("a valid test configuration");
-        plan(&config, &self.state, &self.snapshot, None)
+        let scope = workspace.map(uuid);
+        plan(&config, &self.state, &self.snapshot, scope.as_ref())
     }
 }
 
@@ -1698,4 +1735,579 @@ fn action_at<'plan>(plan: &'plan Plan, address: &str) -> &'plan Action {
         .iter()
         .find(|action| action.address.to_string() == address)
         .unwrap_or_else(|| panic!("no action at {address}"))
+}
+
+// --- workspaces (ADR-0004) --------------------------------------------------
+
+/// A club: one workspace with a budget, its default guardrail, and one key.
+const CLUB: &str = r#"
+version = 1
+
+[receivers.vault]
+type = "file"
+path = "/var/lib/keymaster/vault.key"
+
+[workspaces.club]
+name = "Golf Club"
+slug = "golf-club"
+budgets = { monthly = 50, lifetime = 500 }
+default_guardrail = "house"
+
+[guardrails.house]
+name = "house-rail"
+
+[keys.jobfeed]
+name = "golf-jobfeed"
+receiver = "vault"
+workspace = "club"
+"#;
+
+#[test]
+fn an_unconfigured_workspace_is_created_and_everything_in_it_waits_for_the_binding() {
+    let world = World::new();
+    let plan = world.plan(CLUB);
+
+    let workspace = action_at(&plan, "workspaces.club");
+    assert_eq!(workspace.kind, ActionKind::Create);
+    assert!(
+        workspace.is_executable(false),
+        "the workspace itself is the one thing this run can do"
+    );
+
+    // Both of its inhabitants name it, and neither can be created before the
+    // create above has run and been recorded (ADR-0004, item 2).
+    for address in ["guardrails.house", "keys.jobfeed"] {
+        let action = action_at(&plan, address);
+        assert_eq!(action.kind, ActionKind::Create, "{address}");
+        assert!(action.is_blocked(), "{address} must wait for the workspace");
+        assert!(
+            action.rationale.iter().any(|reason| matches!(
+                reason,
+                Reason::BlockedBy {
+                    dependency: ResourceAddress::Workspace(_)
+                }
+            )),
+            "{address} says which workspace it waits on: {:?}",
+            action.rationale
+        );
+    }
+}
+
+#[test]
+fn a_bound_workspace_places_its_key_and_needs_no_further_write() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world
+        .observe_workspace(CLUB_ID, "Golf Club", "golf-club")
+        .budgets = BTreeMap::from([
+        (BudgetInterval::Monthly, usd(50.0)),
+        (BudgetInterval::Lifetime, usd(500.0)),
+    ]);
+
+    let plan = world.plan(CLUB);
+    assert_eq!(action_at(&plan, "workspaces.club").kind, ActionKind::NoOp);
+
+    let key = action_at(&plan, "keys.jobfeed");
+    assert_eq!(key.kind, ActionKind::Create);
+    assert!(
+        !key.is_blocked(),
+        "the workspace is bound, so nothing waits"
+    );
+    assert!(
+        key.changes
+            .iter()
+            .any(|change| change.field == "workspace_id"
+                && change.to == FieldValue::Guardrail(uuid(CLUB_ID))),
+        "the key is placed in the workspace the address resolves to: {:?}",
+        key.changes
+    );
+}
+
+#[test]
+fn a_drifted_budget_is_one_field_change_per_interval() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world
+        .observe_workspace(CLUB_ID, "Golf Club", "golf-club")
+        .budgets = BTreeMap::from([
+        (BudgetInterval::Daily, usd(5.0)),
+        (BudgetInterval::Monthly, usd(20.0)),
+        (BudgetInterval::Lifetime, usd(500.0)),
+    ]);
+
+    let plan = world.plan(CLUB);
+    let workspace = action_at(&plan, "workspaces.club");
+    assert_eq!(workspace.kind, ActionKind::Update);
+
+    let changed: Vec<&str> = workspace
+        .changes
+        .iter()
+        .map(|change| change.field)
+        .collect();
+    assert_eq!(
+        changed,
+        vec!["budgets.daily", "budgets.monthly"],
+        "an interval the table drops is removed, and one that differs is rewritten; \
+         `budgets.lifetime` already matches"
+    );
+    assert_eq!(workspace.changes[0].to, FieldValue::Absent);
+    assert_eq!(
+        workspace.changes[1].expansion,
+        Some(Expansion::BudgetRaised {
+            field: "budgets.monthly"
+        }),
+        "raising a pooled cap widens what every key in the workspace may spend"
+    );
+}
+
+#[test]
+fn nothing_is_issued_or_widened_in_a_workspace_whose_budget_has_not_converged() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.bind_guardrail("house", DEFAULT_RAIL_ID);
+    // The budget is absent remotely, so the configured one is not in force.
+    world.observe_workspace(CLUB_ID, "Golf Club", "golf-club");
+    world
+        .observe_guardrail(DEFAULT_RAIL_ID, "house-rail")
+        .workspace_id = Some(uuid(CLUB_ID));
+
+    let plan = world.plan(CLUB);
+    let key = action_at(&plan, "keys.jobfeed");
+    assert_eq!(key.safety.class(), SafetyClass::Issuing);
+    assert!(
+        key.rationale
+            .iter()
+            .any(|reason| matches!(reason, Reason::BudgetNotConverged { .. })),
+        "a key is not issued under a cap that is not in force: {:?}",
+        key.rationale
+    );
+    assert!(!key.is_executable(false));
+
+    let workspace = action_at(&plan, "workspaces.club");
+    assert!(
+        workspace.is_executable(false),
+        "the workspace's own budget writes are exempt: they are what converges it"
+    );
+}
+
+#[test]
+fn a_default_guardrail_absent_from_the_listing_is_created_rather_than_missing() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.bind_guardrail("house", DEFAULT_RAIL_ID);
+    world
+        .observe_workspace(CLUB_ID, "Golf Club", "golf-club")
+        .budgets = BTreeMap::from([
+        (BudgetInterval::Monthly, usd(50.0)),
+        (BudgetInterval::Lifetime, usd(500.0)),
+    ]);
+
+    let plan = world.plan(CLUB);
+    let guardrail = action_at(&plan, "guardrails.house");
+    assert_eq!(
+        guardrail.kind,
+        ActionKind::Create,
+        "bound but absent is `missing` everywhere except here (ADR-0004, item 3)"
+    );
+    assert_eq!(
+        guardrail.identity,
+        Some(Identity::Guardrail(uuid(DEFAULT_RAIL_ID))),
+        "the create already knows the identity it will write to"
+    );
+    assert!(
+        guardrail
+            .rationale
+            .iter()
+            .any(|reason| matches!(reason, Reason::DefaultGuardrailUnmaterialized { .. })),
+        "{:?}",
+        guardrail.rationale
+    );
+    assert!(guardrail.is_executable(false));
+}
+
+#[test]
+fn a_bound_workspace_that_is_gone_is_missing_rather_than_recreated() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.observe_workspace(OTHER_RAIL_ID, "Golf Club", "golf-club");
+
+    let plan = world.plan(CLUB);
+    let workspace = action_at(&plan, "workspaces.club");
+    assert_eq!(workspace.kind, ActionKind::Missing);
+    assert!(
+        workspace
+            .rationale
+            .iter()
+            .any(|reason| matches!(reason, Reason::NameCollision { .. })),
+        "a second workspace under the same name is exactly what a display name cannot resolve"
+    );
+    assert!(
+        action_at(&plan, "keys.jobfeed").is_blocked(),
+        "and nothing is created inside a workspace nobody can find"
+    );
+}
+
+#[test]
+fn removing_a_workspace_block_orphans_its_binding() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.observe_workspace(CLUB_ID, "Golf Club", "golf-club");
+
+    let plan = world.plan(BASE);
+    let workspace = action_at(&plan, "workspaces.club");
+    assert_eq!(workspace.kind, ActionKind::OrphanedBinding);
+    assert_eq!(
+        workspace.rationale,
+        vec![Reason::RemovedFromConfiguration],
+        "nothing is deleted or forgotten (ADR-0001)"
+    );
+}
+
+#[test]
+fn workspaces_are_planned_before_the_guardrails_and_keys_they_hold() {
+    let world = World::new();
+    let ordered: Vec<String> = world
+        .plan(CLUB)
+        .actions()
+        .iter()
+        .map(|action| action.address.to_string())
+        .collect();
+    assert_eq!(
+        ordered,
+        vec!["workspaces.club", "guardrails.house", "keys.jobfeed"],
+        "a workspace is fixed at creation on everything inside it"
+    );
+}
+
+/// The club, with a budget and a default guardrail that carries a limit of its
+/// own — so a case can make the guardrail's own write an expanding one.
+const CLUB_LIMITED: &str = r#"
+version = 1
+
+[workspaces.club]
+name = "Golf Club"
+slug = "golf-club"
+budgets = { monthly = 50 }
+default_guardrail = "house"
+
+[guardrails.house]
+name = "house-rail"
+limit_usd = 20
+reset_interval = "monthly"
+"#;
+
+#[test]
+fn an_unconverged_budget_holds_back_the_default_guardrail_that_names_no_workspace() {
+    // The block names no workspace because it *is* one workspace's, so the
+    // holdback has to resolve the placement through that relationship.
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.bind_guardrail("house", DEFAULT_RAIL_ID);
+    world.observe_workspace(CLUB_ID, "Golf Club", "golf-club");
+    let rail = world.observe_guardrail(DEFAULT_RAIL_ID, "house-rail");
+    rail.workspace_id = Some(uuid(CLUB_ID));
+    rail.limit = Some(usd(10.0));
+    rail.reset_interval = ResetPolicy::Every(ResetInterval::Monthly);
+
+    let plan = world.plan(CLUB_LIMITED);
+    let guardrail = action_at(&plan, "guardrails.house");
+    assert_eq!(guardrail.safety.class(), SafetyClass::Expanding);
+    assert!(
+        guardrail
+            .rationale
+            .iter()
+            .any(|reason| matches!(reason, Reason::BudgetNotConverged { .. })),
+        "a raised guardrail limit is not written under a pooled cap that is not in force: {:?}",
+        guardrail.rationale
+    );
+    assert!(!guardrail.is_executable(false));
+}
+
+/// A key that names no workspace at all, so only a scope can place it.
+const UNPLACED_KEY: &str = r#"
+version = 1
+
+[receivers.vault]
+type = "file"
+path = "/var/lib/keymaster/vault.key"
+
+[workspaces.club]
+name = "Golf Club"
+slug = "golf-club"
+budgets = { monthly = 50 }
+
+[keys.jobfeed]
+name = "golf-jobfeed"
+receiver = "vault"
+"#;
+
+#[test]
+fn an_unconverged_budget_holds_back_an_expanding_write_a_scope_places_in_the_workspace() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.bind_key("jobfeed", KEY_HASH, 1);
+    world.observe_workspace(CLUB_ID, "Golf Club", "golf-club");
+    world.observe_key(KEY_HASH, "golf-jobfeed").disabled = true;
+
+    let unscoped = world.plan(UNPLACED_KEY);
+    let key = action_at(&unscoped, "keys.jobfeed");
+    assert_eq!(key.safety.class(), SafetyClass::Expanding);
+    assert!(
+        key.is_executable(false),
+        "without a scope the key is in no workspace anyone named, so no pooled cap applies"
+    );
+
+    let scoped = world.plan_scoped(UNPLACED_KEY, Some(CLUB_ID));
+    let key = action_at(&scoped, "keys.jobfeed");
+    assert!(
+        key.rationale
+            .iter()
+            .any(|reason| matches!(reason, Reason::BudgetNotConverged { .. })),
+        "a scoped run places this key in the club, so the club's cap governs it: {:?}",
+        key.rationale
+    );
+    assert!(!key.is_executable(false));
+}
+
+#[test]
+fn a_default_guardrail_added_to_a_bound_workspace_takes_the_identity_it_names() {
+    // The workspace was imported before the block named a `default_guardrail`,
+    // so state holds the identity and no guardrail binding.
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world
+        .observe_workspace(CLUB_ID, "Golf Club", "golf-club")
+        .budgets = BTreeMap::from([(BudgetInterval::Monthly, usd(50.0))]);
+    world
+        .observe_guardrail(DEFAULT_RAIL_ID, "renamed-by-hand")
+        .workspace_id = Some(uuid(CLUB_ID));
+
+    let plan = world.plan(CLUB_LIMITED);
+    let guardrail = action_at(&plan, "guardrails.house");
+    assert_eq!(
+        guardrail.identity,
+        Some(Identity::Guardrail(uuid(DEFAULT_RAIL_ID))),
+        "an unbound address named as a workspace's default is bound in effect: {guardrail:?}"
+    );
+    assert_eq!(guardrail.kind, ActionKind::Update);
+    assert!(
+        !guardrail.is_blocked(),
+        "nothing waits: the workspace binding already carries the identity"
+    );
+}
+
+#[test]
+fn a_default_guardrail_address_that_owns_another_guardrail_writes_nothing() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.bind_guardrail("house", RAIL_ID);
+    world.observe_workspace(CLUB_ID, "Golf Club", "golf-club");
+    world.observe_guardrail(RAIL_ID, "some-other-rail");
+
+    let plan = world.plan(CLUB_LIMITED);
+    let guardrail = action_at(&plan, "guardrails.house");
+    assert!(guardrail.is_blocked(), "{guardrail:?}");
+    assert!(!guardrail.is_executable(false));
+    assert!(
+        guardrail.rationale.iter().any(|reason| matches!(
+            reason,
+            Reason::DefaultGuardrailConflict { bound, expected }
+                if bound == &uuid(RAIL_ID) && expected == &uuid(DEFAULT_RAIL_ID)
+        )),
+        "the refusal names both identities: {:?}",
+        guardrail.rationale
+    );
+}
+
+#[test]
+fn a_bound_workspace_that_vanished_is_missing_even_when_no_name_is_taken() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+
+    let plan = world.plan(CLUB);
+    let workspace = action_at(&plan, "workspaces.club");
+    assert_eq!(
+        workspace.kind,
+        ActionKind::Missing,
+        "a workspace is a container: a new one has a new UUID, and everything the old one held \
+         would be beyond reach"
+    );
+    assert_eq!(workspace.rationale, vec![Reason::AbsentRemotely]);
+    assert!(
+        plan.executable().next().is_none(),
+        "and nothing inside it runs either"
+    );
+}
+
+#[test]
+fn a_default_guardrail_another_address_already_owns_writes_nothing() {
+    // Nothing binds `house`, and the identity the workspace names belongs to
+    // `other`. Writing here would be writing to a guardrail somebody else owns.
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.bind_guardrail("other", DEFAULT_RAIL_ID);
+    world.observe_workspace(CLUB_ID, "Golf Club", "golf-club");
+    world
+        .observe_guardrail(DEFAULT_RAIL_ID, "house-rail")
+        .workspace_id = Some(uuid(CLUB_ID));
+
+    let plan = world.plan(&format!(
+        "{CLUB_LIMITED}\n[guardrails.other]\nname = \"other-rail\"\n"
+    ));
+    let guardrail = action_at(&plan, "guardrails.house");
+    assert!(guardrail.is_blocked(), "{guardrail:?}");
+    assert!(!guardrail.is_executable(false));
+    assert!(
+        guardrail.rationale.iter().any(|reason| matches!(
+            reason,
+            Reason::DefaultGuardrailOwnedElsewhere { id, owner }
+                if id == &uuid(DEFAULT_RAIL_ID) && owner == &address("other")
+        )),
+        "the refusal names the identity and the address that owns it: {:?}",
+        guardrail.rationale
+    );
+}
+
+#[test]
+fn a_guardrail_openrouter_has_in_another_workspace_can_never_converge() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.bind_guardrail("house", DEFAULT_RAIL_ID);
+    world
+        .observe_workspace(CLUB_ID, "Golf Club", "golf-club")
+        .budgets = BTreeMap::from([(BudgetInterval::Monthly, usd(50.0))]);
+    // The guardrail exists, and OpenRouter has it somewhere else.
+    world
+        .observe_guardrail(DEFAULT_RAIL_ID, "house-rail")
+        .workspace_id = Some(uuid(OTHER_RAIL_ID));
+
+    let plan = world.plan(CLUB_LIMITED);
+    let guardrail = action_at(&plan, "guardrails.house");
+    assert_eq!(
+        guardrail.kind,
+        ActionKind::NoOp,
+        "a guardrail's workspace is fixed at creation and a guardrail is never replaced"
+    );
+    assert!(!guardrail.is_executable(false));
+    assert!(
+        guardrail.rationale.iter().any(|reason| matches!(
+            reason,
+            Reason::WorkspaceFixedAtCreation { observed, desired }
+                if observed.as_ref() == Some(&uuid(OTHER_RAIL_ID)) && desired == &uuid(CLUB_ID)
+        )),
+        "{:?}",
+        guardrail.rationale
+    );
+}
+
+#[test]
+fn a_guardrail_in_the_workspace_its_block_names_is_ordinary() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.bind_guardrail("house", DEFAULT_RAIL_ID);
+    world
+        .observe_workspace(CLUB_ID, "Golf Club", "golf-club")
+        .budgets = BTreeMap::from([(BudgetInterval::Monthly, usd(50.0))]);
+    let rail = world.observe_guardrail(DEFAULT_RAIL_ID, "house-rail");
+    rail.workspace_id = Some(uuid(CLUB_ID));
+    rail.limit = Some(usd(20.0));
+    rail.reset_interval = ResetPolicy::Every(ResetInterval::Monthly);
+
+    assert_eq!(
+        action_at(&world.plan(CLUB_LIMITED), "guardrails.house").kind,
+        ActionKind::NoOp,
+        "the placement check is about a mismatch, and must not invent one"
+    );
+}
+
+/// The club keeps its budget, but the guardrail block has been moved out of it:
+/// no `default_guardrail` relationship any more, and a workspace of its own.
+const CLUB_MOVED_AWAY: &str = r#"
+version = 1
+
+[workspaces.club]
+name = "Golf Club"
+slug = "golf-club"
+budgets = { monthly = 50 }
+
+[workspaces.other]
+name = "Other Club"
+slug = "other-club"
+
+[guardrails.house]
+name = "house-rail"
+workspace = "other"
+"#;
+
+#[test]
+fn a_default_guardrail_moved_to_another_workspace_is_never_materialized_in_the_old_one() {
+    // The address is still bound to the club's default identity, and that
+    // guardrail has never been written — so the unmaterialized exception would
+    // fire and `PATCH` the club's default while the configuration asks for a
+    // guardrail in another workspace, which no write could ever close.
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.bind_guardrail("house", DEFAULT_RAIL_ID);
+    world
+        .observe_workspace(CLUB_ID, "Golf Club", "golf-club")
+        .budgets = BTreeMap::from([(BudgetInterval::Monthly, usd(50.0))]);
+    world
+        .state
+        .bind_workspace(
+            &address("other"),
+            uuid(OTHER_RAIL_ID),
+            None,
+            Origin::Imported,
+            at(0),
+        )
+        .expect("binding the other workspace");
+    world.observe_workspace(OTHER_RAIL_ID, "Other Club", "other-club");
+
+    let plan = world.plan(CLUB_MOVED_AWAY);
+    let guardrail = action_at(&plan, "guardrails.house");
+    assert_eq!(guardrail.kind, ActionKind::NoOp, "{guardrail:?}");
+    assert!(!guardrail.is_executable(false));
+    assert!(
+        guardrail.rationale.iter().any(|reason| matches!(
+            reason,
+            Reason::WorkspaceFixedAtCreation { observed, desired }
+                if observed.as_ref() == Some(&uuid(CLUB_ID)) && desired == &uuid(OTHER_RAIL_ID)
+        )),
+        "the refusal names the workspace the identity belongs to and the one the block asks for: \
+         {:?}",
+        guardrail.rationale
+    );
+    assert!(
+        !guardrail
+            .rationale
+            .iter()
+            .any(|reason| matches!(reason, Reason::DefaultGuardrailUnmaterialized { .. })),
+        "and it is not offered as a create: {:?}",
+        guardrail.rationale
+    );
+}
+
+#[test]
+fn a_default_guardrail_still_in_its_own_workspace_is_materialized_as_before() {
+    // The same shape, with the block left where it belongs: the exception has
+    // to go on applying, or the guardrail could never be written at all.
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.bind_guardrail("house", DEFAULT_RAIL_ID);
+    world
+        .observe_workspace(CLUB_ID, "Golf Club", "golf-club")
+        .budgets = BTreeMap::from([(BudgetInterval::Monthly, usd(50.0))]);
+
+    let plan = world.plan(CLUB_LIMITED);
+    let guardrail = action_at(&plan, "guardrails.house");
+    assert_eq!(guardrail.kind, ActionKind::Create);
+    assert!(guardrail.is_executable(false));
+    assert!(
+        guardrail
+            .rationale
+            .iter()
+            .any(|reason| matches!(reason, Reason::DefaultGuardrailUnmaterialized { .. })),
+        "{:?}",
+        guardrail.rationale
+    );
 }

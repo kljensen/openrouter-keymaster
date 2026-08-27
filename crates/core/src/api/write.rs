@@ -24,8 +24,71 @@
 use serde::Serialize;
 
 use crate::client::Patch;
-use crate::config::{Guardrail, Key, Managed, ResetInterval, Usd};
+use crate::config::{Guardrail, Key, Managed, ResetInterval, Usd, Workspace};
 use crate::ids::{KeyHash, RemoteName, Uuid};
+
+/// The body of `POST /workspaces` and `PATCH /workspaces/{id}`.
+///
+/// One type for both, as [`GuardrailBody`] is, and for the same reason: the
+/// managed fields are the same three. Budgets are not among them — each
+/// interval is its own request, in an order the server accepts (ADR-0004,
+/// item 4) — and neither is `include_byok_in_budgets`, which only a budget
+/// `PUT` can write.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkspaceBody {
+    /// Display name. Always managed, so always sent.
+    name: String,
+    /// URL-friendly slug. Required by the create, and always managed.
+    slug: String,
+    #[serde(skip_serializing_if = "Patch::is_omitted")]
+    description: Patch<String>,
+}
+
+impl WorkspaceBody {
+    /// The body that creates `desired`.
+    #[must_use]
+    pub fn create(desired: &Workspace) -> Self {
+        let update = Self::update(desired);
+        Self {
+            description: update.description.omit_clears(),
+            ..update
+        }
+    }
+
+    /// The body that brings an existing workspace to `desired`.
+    #[must_use]
+    pub fn update(desired: &Workspace) -> Self {
+        Self {
+            name: name(&desired.name),
+            slug: desired.slug.clone(),
+            description: Patch::from_managed(&desired.description, Clone::clone),
+        }
+    }
+}
+
+/// The body of `PUT /workspaces/{id}/budgets/{interval}`.
+///
+/// `include_byok_in_budgets` is workspace-wide rather than per interval, and
+/// the API documents omitting it as "leave the current setting unchanged" —
+/// which is exactly what an unmanaged field means here, so a configuration
+/// that does not set it does not send it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct BudgetBody {
+    limit_usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include_byok_in_budgets: Option<bool>,
+}
+
+impl BudgetBody {
+    /// The body that sets one interval's limit.
+    #[must_use]
+    pub fn new(limit: Usd, include_byok_in_budgets: Option<bool>) -> Self {
+        Self {
+            limit_usd: limit.dollars(),
+            include_byok_in_budgets,
+        }
+    }
+}
 
 /// The body of `POST /guardrails` and `PATCH /guardrails/{id}`.
 ///

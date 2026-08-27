@@ -1,7 +1,7 @@
 //! A project directory, a local API server, and the binary that talks to both.
 //!
 //! Every binary-level test needs the same four things: a configuration file, a
-//! state file, a server answering the three listings a snapshot reads, and a
+//! state file, a server answering the listings a snapshot reads, and a
 //! way to run `openrouter-keymaster` against them with a sentinel credential instead of a
 //! real one. This is that, so `tests/plan.rs`, `tests/import.rs`, and
 //! `tests/apply.rs` differ only in what they assert.
@@ -24,7 +24,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 use time::OffsetDateTime;
 use wiremock::Mock;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{method, path, path_regex, query_param};
 
 use super::fixtures::{empty_page, page};
 use super::http::{Scripted, TestServer, json_response};
@@ -62,12 +62,14 @@ impl Project {
         self.directory.path().join("state.json")
     }
 
-    /// Answers the three listings the snapshot needs.
+    /// Answers the key, guardrail, and assignment listings a snapshot needs, and
+    /// leaves the organization with no workspaces.
     ///
     /// The answer depends on the offset rather than on call order, because
     /// several cases run the binary more than once against one server and each
     /// run reads every listing from the beginning.
     pub fn observe(&self, keys: Vec<Value>, guardrails: Vec<Value>, assignments: Vec<Value>) {
+        self.observe_no_workspaces();
         for (route, items) in [
             ("/api/v1/keys", keys),
             ("/api/v1/guardrails", guardrails),
@@ -89,7 +91,7 @@ impl Project {
         }
     }
 
-    /// Answers the three listings differently each time they are read.
+    /// Answers those three listings differently each time they are read.
     ///
     /// The first complete read of a listing gets the first set of records, the
     /// second read the second, and so on, with the last repeating. That is how
@@ -105,6 +107,7 @@ impl Project {
         guardrails: Vec<Vec<Value>>,
         assignments: Vec<Vec<Value>>,
     ) {
+        self.observe_no_workspaces();
         for (route, reads) in [
             ("/api/v1/keys", keys),
             ("/api/v1/guardrails", guardrails),
@@ -124,6 +127,82 @@ impl Project {
                     .with_priority(2),
             );
         }
+    }
+
+    /// The fallback every snapshot needs: an organization with no workspaces,
+    /// and no budgets on any workspace a case does mount.
+    ///
+    /// Mounted at the lowest priority there is, so anything a case mounts
+    /// itself — [`Project::observe_workspaces`], or a budget listing of its own
+    /// — wins. It exists so a case that does not care about workspaces does not
+    /// have to say so.
+    fn observe_no_workspaces(&self) {
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/workspaces"))
+                .respond_with(json_response(200, &empty_page()))
+                .with_priority(9),
+        );
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/api/v1/workspaces/[^/]+/budgets$"))
+                .respond_with(json_response(200, &empty_page()))
+                .with_priority(9),
+        );
+    }
+
+    /// Answers the workspace listing with these workspaces.
+    pub fn observe_workspaces(&self, workspaces: Vec<Value>) {
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/workspaces"))
+                .and(query_param("offset", "0"))
+                .respond_with(json_response(200, &page(workspaces)))
+                .with_priority(3),
+        );
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/workspaces"))
+                .respond_with(json_response(200, &empty_page()))
+                .with_priority(4),
+        );
+    }
+
+    /// Answers the workspace listing differently each time it is read.
+    pub fn observe_workspace_sequence(&self, reads: Vec<Vec<Value>>) {
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/workspaces"))
+                .and(query_param("offset", "0"))
+                .respond_with(Scripted::json(reads.into_iter().map(page)))
+                .with_priority(3),
+        );
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/workspaces"))
+                .respond_with(json_response(200, &empty_page()))
+                .with_priority(4),
+        );
+    }
+
+    /// Answers one workspace's budget listing.
+    pub fn observe_budgets(&self, id: &str, budgets: &Value) {
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/workspaces/{id}/budgets")))
+                .respond_with(json_response(200, budgets))
+                .with_priority(3),
+        );
+    }
+
+    /// Answers one workspace's budget listing differently each time it is read.
+    pub fn observe_budget_sequence(&self, id: &str, reads: Vec<Value>) {
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/workspaces/{id}/budgets")))
+                .respond_with(Scripted::json(reads))
+                .with_priority(3),
+        );
     }
 
     /// Writes a state file through Keymaster's own writer, so the fixture is

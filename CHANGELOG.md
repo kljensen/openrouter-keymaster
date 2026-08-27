@@ -9,6 +9,54 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Added
 
+- Workspaces as a managed resource. A `[workspaces.NAME]` block carries `name`,
+  `slug`, `description`, a `budgets` table (any of `daily`, `weekly`, `monthly`,
+  `lifetime`, in USD), `include_byok_in_budgets`, and `default_guardrail`.
+  Identity is the workspace UUID: `openrouter-keymaster import workspace NAME
+  --id UUID` binds an existing one, removing the block orphans the binding, and
+  `openrouter-keymaster delete workspace --id UUID` is the only deletion — which
+  refuses while OpenRouter shows the workspace holding any key or guardrail,
+  tracked or not, since deleting a workspace deletes what is in it. Keys and
+  guardrails name their workspace with `workspace = "<address>"`, resolved
+  through the binding at plan time; the raw `workspace_id` form stays for a
+  workspace Keymaster does not manage, and writing both on one block is a
+  validation error. The planner orders workspaces before guardrails before keys
+  and holds back anything whose workspace is not bound yet. Budgets are written
+  one interval at a time, ordered deletes first, then increases from the widest
+  interval to the narrowest, then decreases from the narrowest to the widest, so
+  no intermediate state violates OpenRouter's lifetime > monthly > weekly >
+  daily rule — which is also checked offline. A budget a plan refuses is a
+  definite failure naming the interval, and while a configured budget has not
+  converged every `issuing` or `expanding` write in that workspace is held back
+  with the new reason `budget_not_converged`; routine writes proceed, and the
+  workspace's own budget writes are exempt. A workspace's default guardrail is a
+  guardrail block bound to its `default_guardrail_id`: the one exception to
+  "bound but absent means missing", reported as a `create` carrying the reason
+  `default_guardrail_unmaterialized` and performed as the first `PATCH` to that
+  identity, never `POST`ed, never imported by name, and released with the
+  workspace it belongs to; an address that already owns a different guardrail is
+  held back with `default_guardrail_conflict`, naming both identities, and one
+  whose identity another address owns with `default_guardrail_owned_elsewhere`.
+  A guardrail's workspace is fixed when it is created and a guardrail is never
+  replaced, so one OpenRouter has in another workspace is held back with
+  `workspace_fixed_at_creation` rather than patched, and `import guardrail`
+  refuses it with the new error kind `import_workspace_mismatch`; both read one
+  resolution — the workspace the block names, then the workspace whose default
+  guardrail it is, then the run's scope. A workspace binding that never learned
+  its `default_guardrail_id` — a create response that omitted it — takes the
+  identity from the workspace listing on the next apply, before the plan is
+  computed, so the guardrail it is the only handle on is not held back for
+  good. `state forget`
+  now takes `workspaces.NAME`, releasing the workspace binding and the default
+  guardrail that cannot outlive it, and a bare name bound as more than one of
+  the three kinds is refused. A
+  workspace that is bound and absent is reported as `missing` and never
+  recreated, because a new one would have a new UUID and everything the old one
+  held would be beyond reach. `status` lists workspaces with the budgets OpenRouter
+  has in force. New error kinds: `delete_workspace_untracked`,
+  `delete_workspace_inhabited`, and `delete_workspace_unconfirmed`.
+  [ADR-0004](docs/adr/0004-workspaces.md).
+
 - A `caller` receiver, for a program that embeds the core crate. A
   `[receivers.NAME] type = "caller"` block names one field, `destination` — a
   stable non-secret label for where the plaintext ends up — and the host
@@ -35,8 +83,8 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 - A workspace scope. `Context.workspace` — set from the new `--workspace UUID`
   global option — names the one OpenRouter workspace a run places resources in
-  and reports on. With a scope, a configuration whose key names a different
-  `workspace_id` is refused before any request, every key and guardrail the run
+  and reports on. With a scope, a configuration that names a different workspace
+  is refused before any request, every key and guardrail the run
   creates is placed in the scope, `plan` and `status` leave out `unmanaged`
   resources from other workspaces, and matching by name — adoption candidates,
   and the collision check before a guarded recreation — considers only

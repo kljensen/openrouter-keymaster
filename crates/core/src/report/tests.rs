@@ -993,7 +993,7 @@ fn an_import_renders_the_binding_and_the_difference_in_both_formats() {
         .keys
         .get(&address("jobfeed"))
         .expect("the configured key");
-    let changes = crate::plan::key_changes(key, Some(&observed));
+    let changes = crate::plan::key_changes(key, Some(&observed), None);
 
     let report = ImportReport::key(
         &address("jobfeed"),

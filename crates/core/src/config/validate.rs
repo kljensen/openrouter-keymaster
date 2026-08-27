@@ -18,14 +18,20 @@ use time::{OffsetDateTime, UtcOffset};
 
 use super::wire;
 use super::{
-    Config, Defaults, Guardrail, Key, Managed, Problem, Receiver, ResetInterval, SCHEMA_VERSION,
-    Usd,
+    BUDGET_INTERVALS, BudgetInterval, Config, Defaults, Guardrail, Key, Managed, Problem, Receiver,
+    ResetInterval, SCHEMA_VERSION, Usd, Workspace,
 };
 use crate::ids::{Address, RemoteName, UserId, Uuid};
 use crate::redaction::{looks_like_credential, printable};
 
 /// Guardrail fields whose remote value can be cleared.
 const GUARDRAIL_CLEARABLE: &[&str] = &["description", "limit_usd", "reset_interval"];
+
+/// Workspace fields whose remote value can be cleared.
+const WORKSPACE_CLEARABLE: &[&str] = &["description"];
+
+/// Longest accepted workspace slug, as the API documents it.
+const SLUG_LENGTH_MAX: usize = 50;
 
 /// Key fields whose remote value can be cleared. Clearing `guardrail`
 /// unassigns the key.
@@ -62,6 +68,7 @@ pub(super) fn validate(document: wire::Document) -> Result<Config, Vec<Problem>>
     let mut validator = Validator::default();
     validator.version(document.version);
 
+    let declared_workspaces: BTreeSet<String> = document.workspaces.keys().cloned().collect();
     let declared_guardrails: BTreeSet<String> = document.guardrails.keys().cloned().collect();
     let declared_receivers: BTreeSet<String> = document.receivers.keys().cloned().collect();
 
@@ -69,24 +76,30 @@ pub(super) fn validate(document: wire::Document) -> Result<Config, Vec<Problem>>
         include_byok_in_limit: document.defaults.include_byok_in_limit.unwrap_or(false),
     };
 
+    validator.duplicate_addresses("workspaces", &declared_workspaces);
     validator.duplicate_addresses("guardrails", &declared_guardrails);
     validator.duplicate_addresses("keys", document.keys.keys());
     validator.duplicate_addresses("receivers", &declared_receivers);
 
     let receivers = validator.receivers(document.receivers);
-    let guardrails = validator.guardrails(document.guardrails, defaults);
+    let workspaces = validator.workspaces(document.workspaces, &declared_guardrails);
+    let guardrails = validator.guardrails(document.guardrails, defaults, &declared_workspaces);
     let keys = validator.keys(
         document.keys,
         defaults,
         &declared_guardrails,
         &declared_receivers,
+        &declared_workspaces,
     );
 
+    validator.duplicate_names("workspaces", workspaces.iter().map(|(a, w)| (a, &w.name)));
     validator.duplicate_names("guardrails", guardrails.iter().map(|(a, g)| (a, &g.name)));
     validator.duplicate_names("keys", keys.iter().map(|(a, k)| (a, &k.name)));
+    validator.default_guardrails(&workspaces, &guardrails);
 
     validator.finish(Config {
         defaults,
+        workspaces,
         guardrails,
         keys,
         receivers,
@@ -187,15 +200,30 @@ impl Validator {
             .collect()
     }
 
+    fn workspaces(
+        &mut self,
+        wire: BTreeMap<String, wire::Workspace>,
+        guardrails: &BTreeSet<String>,
+    ) -> BTreeMap<Address, Workspace> {
+        wire.into_iter()
+            .filter_map(|(raw, block)| {
+                let address = self.address("workspaces", &raw)?;
+                let workspace = self.workspace(&raw, block, guardrails)?;
+                Some((address, workspace))
+            })
+            .collect()
+    }
+
     fn guardrails(
         &mut self,
         wire: BTreeMap<String, wire::Guardrail>,
         defaults: Defaults,
+        workspaces: &BTreeSet<String>,
     ) -> BTreeMap<Address, Guardrail> {
         wire.into_iter()
             .filter_map(|(raw, block)| {
                 let address = self.address("guardrails", &raw)?;
-                let guardrail = self.guardrail(&raw, block, defaults)?;
+                let guardrail = self.guardrail(&raw, block, defaults, workspaces)?;
                 Some((address, guardrail))
             })
             .collect()
@@ -207,14 +235,82 @@ impl Validator {
         defaults: Defaults,
         guardrails: &BTreeSet<String>,
         receivers: &BTreeSet<String>,
+        workspaces: &BTreeSet<String>,
     ) -> BTreeMap<Address, Key> {
         wire.into_iter()
             .filter_map(|(raw, block)| {
                 let address = self.address("keys", &raw)?;
-                let key = self.key(&raw, block, defaults, guardrails, receivers)?;
+                let key = self.key(&raw, block, defaults, guardrails, receivers, workspaces)?;
                 Some((address, key))
             })
             .collect()
+    }
+
+    /// The cross-block rules a `default_guardrail` reference has to obey
+    /// (ADR-0004, item 3).
+    ///
+    /// A guardrail address may be named as the default of exactly one
+    /// workspace, and that workspace is the one it belongs to: its own block
+    /// omits `workspace`, or names the same one. Both rules exist because the
+    /// binding a default creates is deterministic — the guardrail *is* that
+    /// workspace's — so two workspaces claiming it, or a block placing it
+    /// somewhere else, describe a resource that cannot exist.
+    fn default_guardrails(
+        &mut self,
+        workspaces: &BTreeMap<Address, Workspace>,
+        guardrails: &BTreeMap<Address, Guardrail>,
+    ) {
+        let mut claimed: BTreeMap<&Address, &Address> = BTreeMap::new();
+        for (workspace, block) in workspaces {
+            let Some(guardrail) = &block.default_guardrail else {
+                continue;
+            };
+            if let Some(first) = claimed.get(guardrail) {
+                self.problem(
+                    format!("workspaces.{workspace}.default_guardrail"),
+                    format!(
+                        "`{guardrail}` is already the default guardrail of `{first}`; a guardrail \
+                         block is the default of at most one workspace, because the binding it \
+                         takes is that workspace's own deterministic identity"
+                    ),
+                );
+                continue;
+            }
+            claimed.insert(guardrail, workspace);
+
+            let Some(block) = guardrails.get(guardrail) else {
+                continue;
+            };
+            if block
+                .workspace
+                .as_ref()
+                .is_some_and(|placed| placed != workspace)
+            {
+                self.problem(
+                    format!("guardrails.{guardrail}.workspace"),
+                    format!(
+                        "names a workspace other than `{workspace}`, whose default guardrail this \
+                         block is; a default guardrail belongs to its own workspace, so omit \
+                         `workspace` or name that one"
+                    ),
+                );
+            }
+            // A raw UUID cannot be checked against `{workspace}` offline — the
+            // workspace's own identity is whatever its binding says, and this
+            // pass has no state — and it cannot be right either way: being the
+            // default guardrail *is* the placement, so there is nothing for a
+            // second spelling of it to add.
+            if block.workspace_id.is_some() {
+                self.problem(
+                    format!("guardrails.{guardrail}.workspace_id"),
+                    format!(
+                        "is set on the default guardrail of `{workspace}`, whose workspace it \
+                         already belongs to; a default guardrail takes its placement from that \
+                         relationship, so remove `workspace_id`"
+                    ),
+                );
+            }
+        }
     }
 
     fn address(&mut self, kind: &str, raw: &str) -> Option<Address> {
@@ -238,11 +334,165 @@ impl Validator {
         }
     }
 
+    fn workspace(
+        &mut self,
+        raw: &str,
+        block: wire::Workspace,
+        guardrails: &BTreeSet<String>,
+    ) -> Option<Workspace> {
+        let path = format!("workspaces.{}", safe_segment(raw));
+        let before = self.count();
+        let cleared = self.clears(&path, &block.clear, WORKSPACE_CLEARABLE);
+
+        let name = self.name(&format!("{path}.name"), block.name);
+        let slug = self.slug(&format!("{path}.slug"), block.slug);
+
+        let description_path = format!("{path}.description");
+        let described = block.description.is_some();
+        let description = block
+            .description
+            .and_then(|value| self.text(&description_path, value, DESCRIPTION_MAX));
+        let description = self.managed(
+            &description_path,
+            described,
+            description,
+            &cleared,
+            "description",
+        );
+
+        let budgets = self.budgets(&path, block.budgets);
+        let include_byok_in_budgets = self.byok_in_budgets(
+            &format!("{path}.include_byok_in_budgets"),
+            block.include_byok_in_budgets,
+            budgets.as_ref(),
+        );
+        let default_guardrail = self.reference(
+            &format!("{path}.default_guardrail"),
+            block.default_guardrail,
+            guardrails,
+            "guardrail",
+        );
+
+        let workspace = Workspace {
+            name: name?,
+            slug: slug?,
+            description,
+            budgets,
+            include_byok_in_budgets,
+            default_guardrail,
+        };
+        (self.count() == before).then_some(workspace)
+    }
+
+    /// A URL-friendly slug: lowercase alphanumeric segments separated by single
+    /// hyphens, which is the exact pattern `POST /workspaces` requires.
+    fn slug(&mut self, path: &str, value: Option<String>) -> Option<String> {
+        let Some(value) = value else {
+            self.problem(path, "is required");
+            return None;
+        };
+        let shaped = !value.is_empty()
+            && value.len() <= SLUG_LENGTH_MAX
+            && value
+                .split('-')
+                .all(|segment| !segment.is_empty() && segment.bytes().all(is_slug_byte));
+        if !shaped {
+            self.problem(
+                path,
+                format!(
+                    "must be 1 to {SLUG_LENGTH_MAX} characters of lowercase letters and digits in \
+                     segments separated by single hyphens, with no leading or trailing hyphen, \
+                     for example `golf-club`"
+                ),
+            );
+            return None;
+        }
+        Some(value)
+    }
+
+    /// The workspace's pooled spending caps, checked against the server's
+    /// ordering rule before anything is sent.
+    ///
+    /// OpenRouter checks lifetime > monthly > weekly > daily on every budget
+    /// write, so a table that violates it can never be applied in any order.
+    /// Catching it offline is what keeps apply's ordering rule about
+    /// *intermediate* states rather than about the configuration.
+    fn budgets(
+        &mut self,
+        path: &str,
+        block: Option<wire::Budgets>,
+    ) -> Option<BTreeMap<BudgetInterval, Usd>> {
+        let block = block?;
+        let before = self.count();
+        let written = [
+            (BudgetInterval::Daily, block.daily),
+            (BudgetInterval::Weekly, block.weekly),
+            (BudgetInterval::Monthly, block.monthly),
+            (BudgetInterval::Lifetime, block.lifetime),
+        ];
+
+        let mut budgets = BTreeMap::new();
+        for (interval, amount) in written {
+            let field = format!("{path}.{}", interval.field());
+            let Some(amount) = self.usd(&field, amount) else {
+                continue;
+            };
+            if amount.micros() <= 0 {
+                self.problem(&field, "a workspace budget must be greater than zero");
+                continue;
+            }
+            budgets.insert(interval, amount);
+        }
+
+        // Narrowest first, so each configured budget is compared with the next
+        // wider one that is actually written.
+        let configured: Vec<(BudgetInterval, Usd)> = BUDGET_INTERVALS
+            .iter()
+            .filter_map(|interval| budgets.get(interval).map(|amount| (*interval, *amount)))
+            .collect();
+        for window in configured.windows(2) {
+            let [(narrow, narrow_amount), (wide, wide_amount)] = window else {
+                continue;
+            };
+            if narrow_amount >= wide_amount {
+                self.problem(
+                    format!("{path}.{}", wide.field()),
+                    format!(
+                        "must be greater than `{}`; OpenRouter checks lifetime > monthly > weekly \
+                         > daily on every budget write",
+                        narrow.field()
+                    ),
+                );
+            }
+        }
+        (self.count() == before).then_some(budgets)
+    }
+
+    /// The workspace-wide BYOK setting, which only a budget `PUT` can write.
+    fn byok_in_budgets(
+        &mut self,
+        path: &str,
+        value: Option<bool>,
+        budgets: Option<&BTreeMap<BudgetInterval, Usd>>,
+    ) -> Option<bool> {
+        let value = value?;
+        if budgets.is_none_or(BTreeMap::is_empty) {
+            self.problem(
+                path,
+                "needs at least one budget; OpenRouter writes this setting only as part of a \
+                 workspace budget, so there is no request that could carry it on its own",
+            );
+            return None;
+        }
+        Some(value)
+    }
+
     fn guardrail(
         &mut self,
         raw: &str,
         block: wire::Guardrail,
         defaults: Defaults,
+        workspaces: &BTreeSet<String>,
     ) -> Option<Guardrail> {
         let path = format!("guardrails.{}", safe_segment(raw));
         let before = self.count();
@@ -275,6 +525,8 @@ impl Validator {
         let denied_models = self.slugs(&path, "denied_models", block.denied_models);
         let allowed_providers = self.slugs(&path, "allowed_providers", block.allowed_providers);
         let denied_providers = self.slugs(&path, "denied_providers", block.denied_providers);
+        let (workspace, workspace_id) =
+            self.placement(&path, block.workspace, block.workspace_id, workspaces);
 
         let guardrail = Guardrail {
             name: name?,
@@ -289,8 +541,42 @@ impl Validator {
                 .include_byok_in_limit
                 .unwrap_or(defaults.include_byok_in_limit),
             require_zdr: block.require_zdr,
+            workspace,
+            workspace_id,
         };
         (self.count() == before).then_some(guardrail)
+    }
+
+    /// The workspace a block is placed in: a local address, a raw UUID, or
+    /// neither.
+    ///
+    /// Never both. `workspace` resolves through a binding this run may not have
+    /// yet and `workspace_id` names a workspace Keymaster does not manage, so a
+    /// block that wrote both would be saying two things about a field
+    /// OpenRouter fixes at creation (ADR-0004, item 2).
+    fn placement(
+        &mut self,
+        path: &str,
+        workspace: Option<String>,
+        workspace_id: Option<String>,
+        workspaces: &BTreeSet<String>,
+    ) -> (Option<Address>, Option<Uuid>) {
+        if workspace.is_some() && workspace_id.is_some() {
+            self.problem(
+                format!("{path}.workspace"),
+                "is set alongside `workspace_id`; a block names its workspace by local address \
+                 or by raw UUID, never both",
+            );
+            return (None, None);
+        }
+        let address = self.reference(
+            &format!("{path}.workspace"),
+            workspace,
+            workspaces,
+            "workspace",
+        );
+        let id = self.uuid(&format!("{path}.workspace_id"), workspace_id);
+        (address, id)
     }
 
     fn key(
@@ -300,6 +586,7 @@ impl Validator {
         defaults: Defaults,
         guardrails: &BTreeSet<String>,
         receivers: &BTreeSet<String>,
+        workspaces: &BTreeSet<String>,
     ) -> Option<Key> {
         let path = format!("keys.{}", safe_segment(raw));
         let before = self.count();
@@ -333,7 +620,8 @@ impl Validator {
         let guardrail = self.reference(&guardrail_path, block.guardrail, guardrails, "guardrail");
         let guardrail = self.managed(&guardrail_path, guarded, guardrail, &cleared, "guardrail");
 
-        let workspace_id = self.uuid(&format!("{path}.workspace_id"), block.workspace_id);
+        let (workspace, workspace_id) =
+            self.placement(&path, block.workspace, block.workspace_id, workspaces);
         let creator_user_id =
             self.user_id(&format!("{path}.creator_user_id"), block.creator_user_id);
         let receiver = self.reference(
@@ -350,6 +638,7 @@ impl Validator {
             limit_reset,
             expires_at,
             disabled: block.disabled.unwrap_or(false),
+            workspace,
             workspace_id,
             creator_user_id,
             guardrail,
@@ -712,6 +1001,11 @@ const CONTROL_REFUSAL: &str = "must not contain control characters; a receiver i
 const CREDENTIAL_REFUSAL: &str = "looks like a credential; Keymaster never accepts secret \
                                   material in configuration, and a key's plaintext is delivered \
                                   through a receiver instead";
+
+/// Whether a byte may appear inside a slug segment.
+const fn is_slug_byte(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit()
+}
 
 /// Renders a field list for an error message.
 fn joined(fields: &[&str]) -> String {
