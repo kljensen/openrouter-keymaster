@@ -980,7 +980,7 @@ impl<'a> Index<'a> {
         self.config
             .receivers
             .get(address)
-            .is_some_and(|receiver| receiver.fingerprint() != *delivered)
+            .is_some_and(|receiver| receiver.fingerprint(address) != *delivered)
     }
 }
 

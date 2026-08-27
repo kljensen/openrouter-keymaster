@@ -43,6 +43,8 @@
 //! creates a successor and delivers it. That costs a rotation even when the
 //! original delivery in fact succeeded, and that cost is the honest one.
 
+use std::cell::RefCell;
+
 use time::OffsetDateTime;
 
 use crate::api::{ObservedKey, Reader, Writer};
@@ -285,7 +287,7 @@ fn resolve_leaked(
 /// Returns [`RecoverError`] for an address or a phase this command cannot act
 /// on, and the configuration, state, and API errors of the steps it performs,
 /// including `missing_credential`.
-pub fn recover_replace(context: Context, name: &str) -> Result<Outcome<ReplaceReport>, Error> {
+pub fn recover_replace(mut context: Context, name: &str) -> Result<Outcome<ReplaceReport>, Error> {
     let address = local_address(name)?;
 
     let file = StateFile::new(&context.paths.state);
@@ -303,6 +305,10 @@ pub fn recover_replace(context: Context, name: &str) -> Result<Outcome<ReplaceRe
 
     let client = context.client()?;
     let (reader, writer) = (Reader::new(&client), Writer::new(&client));
+    // The host's delivery callback, taken out of the context so the receiver
+    // the preflight builds can call it (ADR-0005, item 2). A run that carries
+    // none gets as far as the preflight and no further.
+    let deliver = context.deliver.take().map(RefCell::new);
     let issuer = Issuer {
         config: &config,
         client: &client,
@@ -310,6 +316,7 @@ pub fn recover_replace(context: Context, name: &str) -> Result<Outcome<ReplaceRe
         writer: &writer,
         lock: &lock,
         workspace: context.scope(),
+        deliver: deliver.as_ref(),
     };
 
     // Everything the successor needs is checked before anything is closed or

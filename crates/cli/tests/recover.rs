@@ -100,11 +100,11 @@ impl Recovery {
         openrouter_keymaster_core::config::Config::parse(&source)
             .expect("a valid test configuration")
             .receivers
-            .values()
+            .iter()
             .next()
             .map_or_else(
                 || ReceiverFingerprint::from_digest([42; 32]),
-                |spec| spec.fingerprint(),
+                |(address, spec)| spec.fingerprint(address),
             )
     }
 

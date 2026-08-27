@@ -394,6 +394,7 @@ fn the_fake_receiver_records_every_outcome_without_keeping_plaintext() {
                 created.hash().clone(),
                 generation,
                 OperationId::parse("op-1").expect("a valid operation id"),
+                None,
             );
             receiver.receive(&metadata, created.plaintext())
         })

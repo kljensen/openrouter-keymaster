@@ -50,6 +50,10 @@ const PATH_MAX: usize = 4_096;
 /// Most arguments a command receiver may carry.
 const ARGS_MAX: usize = 64;
 
+/// Longest accepted `caller` receiver destination. It is a label a host routes
+/// by and Keymaster passes through, not a document.
+const DESTINATION_MAX: usize = 200;
+
 /// Longest path segment echoed back in an error message.
 const SEGMENT_MAX: usize = 64;
 
@@ -370,6 +374,16 @@ impl Validator {
                 Some(Receiver::Command {
                     program: program?,
                     args: args?,
+                })
+            }
+            wire::Receiver::Caller { destination } => {
+                let path = format!("{path}.destination");
+                let Some(destination) = destination else {
+                    self.problem(path, "is required");
+                    return None;
+                };
+                Some(Receiver::Caller {
+                    destination: self.text(&path, destination, DESTINATION_MAX)?,
                 })
             }
         }

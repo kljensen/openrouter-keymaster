@@ -68,10 +68,10 @@ impl World {
         openrouter_keymaster_core::config::Config::parse(&source)
             .expect("a valid test configuration")
             .receivers
-            .values()
+            .iter()
             .next()
+            .map(|(address, spec)| spec.fingerprint(address))
             .expect("one receiver")
-            .fingerprint()
     }
 
     /// The key binding as the state file now holds it.

@@ -279,17 +279,69 @@ args = ["add-file", "var_name"]
     );
 }
 
+#[test]
+fn a_caller_receiver_carries_only_its_destination() {
+    let config = parse(
+        r#"
+version = 1
+[receivers.host]
+type = "caller"
+destination = "  vault/jobfeed  "
+"#,
+    );
+    assert_eq!(
+        config.receivers[&address("host")],
+        Receiver::Caller {
+            destination: "vault/jobfeed".to_owned()
+        },
+        "a destination is trimmed like every other single-line human string"
+    );
+}
+
+#[test]
+fn a_caller_destination_must_be_present_bounded_and_not_a_credential() {
+    let caller = |field: &str| {
+        format!(
+            r#"
+version = 1
+[receivers.host]
+type = "caller"
+{field}
+"#
+        )
+    };
+
+    assert_eq!(paths(&caller("")), ["receivers.host.destination"]);
+    assert_eq!(
+        paths(&caller(r#"destination = "   ""#)),
+        ["receivers.host.destination"]
+    );
+    assert_eq!(
+        paths(&caller(&format!(r#"destination = "{}""#, "d".repeat(201)))),
+        ["receivers.host.destination"]
+    );
+
+    let refused = problems(&caller(&format!(
+        r#"destination = "{SECRET_SENTINEL_KEY}""#
+    )));
+    assert_eq!(refused.len(), 1);
+    assert!(refused[0].message.contains("looks like a credential"));
+    assert!(
+        !refused[0].message.contains("sk-or-"),
+        "and the value is not echoed back: {}",
+        refused[0].message
+    );
+}
+
 /// The fingerprint of the one receiver in a configuration.
 fn fingerprint_of(source: &str) -> String {
     let config = parse(source);
-    config
+    let (address, receiver) = config
         .receivers
-        .values()
+        .iter()
         .next()
-        .expect("one configured receiver")
-        .fingerprint()
-        .as_str()
-        .to_owned()
+        .expect("one configured receiver");
+    receiver.fingerprint(address).as_str().to_owned()
 }
 
 #[test]
@@ -335,6 +387,31 @@ path = "/usr/local/bin/receiver"
 "#,
     );
     assert_ne!(file, command("[]"), "the kind is part of the preimage");
+
+    // A `caller` is identified by the block a host wires code up to and the
+    // destination that block names, so both are in its preimage (ADR-0005).
+    let caller = |block: &str, destination: &str| {
+        fingerprint_of(&format!(
+            r#"
+version = 1
+[receivers.{block}]
+type = "caller"
+destination = "{destination}"
+"#
+        ))
+    };
+    assert_eq!(
+        caller("host", "vault/jobfeed"),
+        caller("host", "vault/jobfeed")
+    );
+    assert_ne!(
+        caller("host", "vault/jobfeed"),
+        caller("host", "vault/other")
+    );
+    assert_ne!(
+        caller("host", "vault/jobfeed"),
+        caller("elsewhere", "vault/jobfeed")
+    );
 }
 
 #[test]

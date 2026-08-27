@@ -39,7 +39,7 @@ fn receiver_fingerprint() -> ReceiverFingerprint {
     Receiver::File {
         path: "/var/lib/keymaster/jobfeed.key".into(),
     }
-    .fingerprint()
+    .fingerprint(&address("vault"))
 }
 
 /// A state file inside a fresh temporary directory.
@@ -219,7 +219,7 @@ fn an_interrupted_operation_survives_a_reopen_with_its_phase_intact() {
                         "jobfeed_openrouter_api_key".to_owned(),
                     ],
                 }
-                .fingerprint(),
+                .fingerprint(&address("vault")),
             },
             at(0),
         )

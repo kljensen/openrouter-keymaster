@@ -7,9 +7,11 @@ receiver the configuration names. There is no fallback. Keymaster never prints
 a key, never writes one to its state file, and never creates a key that has
 nowhere to go.
 
-Two receivers exist in v0.1: `file`, for local development, and `command`,
-which runs a program you write — the **adapter**. This document is the contract
-that program implements.
+Three receivers exist: `file`, for local development; `command`, which runs a
+program you write — the **adapter** — and is what most of this document is the
+contract for; and `caller`, which hands the plaintext to code inside a program
+that embeds the core library. The `caller` receiver has its own section at the
+end; it is not reachable from the command line.
 
 Read [ADR-0002](adr/0002-journaled-key-creation.md) first if you are writing an
 adapter. It explains why delivery is at-most-once and why almost every failure
@@ -248,6 +250,79 @@ opened once, with `O_DIRECTORY` and `O_NOFOLLOW`, and the create, rename, and
 unlink all happen relative to that descriptor, so a directory swapped for a
 symbolic link after the check cannot receive the key. It is not a secret store:
 anything that can read the file can spend the key.
+
+## The caller receiver
+
+For a host that embeds `openrouter-keymaster-core` — a web application issuing
+keys for its own users — a file and a subprocess are both the wrong shape: the
+plaintext is wanted *in memory*, once, to show it to someone or to forward it
+to a store the host already controls. `caller` is that destination
+([ADR-0005](adr/0005-caller-receiver.md)).
+
+```toml
+[receivers.host]
+type = "caller"
+destination = "vault/jobfeed"
+
+[keys.jobfeed]
+name = "golf-jobfeed"
+receiver = "host"
+```
+
+`destination` is a stable, non-secret label for where the plaintext will end up
+— a vault path, a user ID, a page. Keymaster never interprets it. It lives in
+configuration so that planning needs nothing from the host, and it is part of
+the receiver's fingerprint, so changing it plans a replacement exactly as
+moving a file does.
+
+The code is not configuration. A host supplies it per operation, as the
+callback on the operation context:
+
+```rust
+context.deliver = Some(Box::new(|metadata, plaintext| {
+    match store(metadata.destination().unwrap_or_default(), plaintext.expose()) {
+        Ok(()) => DeliveryOutcome::delivered("stored in the vault"),
+        Err(error) if error.wrote_nothing() => DeliveryOutcome::rejected(error.to_string()),
+        Err(error) => DeliveryOutcome::ambiguous(error.to_string()),
+    }
+}));
+```
+
+What the callback is handed is the same non-secret metadata the envelope
+carries — address, hash, generation, operation ID — plus the configured
+`destination`, and the plaintext behind a single `expose()` accessor. One
+operation may issue several keys, so the callback is called **once per
+delivered key**, on the thread running the operation: route on the metadata,
+never on call order.
+
+What it returns is the classification, with exactly the meanings the exit codes
+above have: `delivered` when the secret is committed, `rejected` only when the
+mechanism guarantees nothing was written, `ambiguous` for everything else. A
+panic inside the callback is caught and recorded as ambiguous, and the panic
+message is not repeated anywhere Keymaster prints.
+
+**The guarantee ends at the callback.** Everything Keymaster promises about a
+plaintext — one delivery, no copy that outlives the call, nothing printed,
+nothing serialized, the buffer cleared on drop — holds right up to the moment
+your code is handed it, and not one step past it. What the host does with it is
+the host's responsibility.
+
+Two consequences worth stating outright:
+
+- **No callback, no key.** Every operation that issues one — `apply`,
+  `rotate`, `recover replace` — refuses when a key's receiver is a `caller` and
+  the context carries no callback. The refusal comes before the journal entry
+  and before `POST /keys`, so nothing is created and there is nothing to
+  recover. `apply` checks the whole plan before its first phase rather than
+  when it reaches the key, so a guardrail it would have created earlier in the
+  same run is not created either: no remote write is made, and the run fails
+  with `apply_undeliverable`. The one local write that can come first is the
+  promotion of an already-delivered key, which an apply completes under its
+  lock before it plans anything; the report names it and the error says it
+  happened. `plan` and `status` never need a callback.
+- **The command line never supplies one.** The `openrouter-keymaster` binary
+  has no host code to deliver into, so a `caller`-backed key is always that
+  preflight failure under the CLI. Use `file` or `command` there.
 
 ## Testing an adapter
 

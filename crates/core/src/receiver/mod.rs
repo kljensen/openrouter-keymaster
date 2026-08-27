@@ -6,6 +6,10 @@
 //! and never delivered to a destination the configuration did not name. A key
 //! with no configured receiver is a key Keymaster refuses to create.
 //!
+//! There are three destinations: a file, a program, and the host's own code
+//! (ADR-0005). For the third — [`caller`] — everything below holds up to the
+//! moment the host's callback is handed the plaintext, and no further.
+//!
 //! # The interface
 //!
 //! [`SecretReceiver::receive`] takes the plaintext by reference and non-secret
@@ -36,12 +40,16 @@
 //! ADR-0002 makes delivery at-most-once: ambiguity is journaled and resolved
 //! by an operator, not by a second attempt.
 
+pub mod caller;
 pub mod command;
 pub mod file;
+
+use std::cell::RefCell;
 
 use crate::client::KeyPlaintext;
 use crate::ids::{Address, KeyHash, OperationId};
 
+pub use caller::{CallerReceiver, Deliver};
 pub use command::CommandReceiver;
 pub use file::FileReceiver;
 
@@ -58,17 +66,25 @@ pub struct DeliveryMetadata {
     hash: KeyHash,
     generation: u32,
     operation: OperationId,
+    destination: Option<String>,
 }
 
 impl DeliveryMetadata {
     /// Describes one delivery.
     #[must_use]
-    pub fn new(address: Address, hash: KeyHash, generation: u32, operation: OperationId) -> Self {
+    pub fn new(
+        address: Address,
+        hash: KeyHash,
+        generation: u32,
+        operation: OperationId,
+        destination: Option<String>,
+    ) -> Self {
         Self {
             address,
             hash,
             generation,
             operation,
+            destination,
         }
     }
 
@@ -94,6 +110,16 @@ impl DeliveryMetadata {
     #[must_use]
     pub fn operation(&self) -> &OperationId {
         &self.operation
+    }
+
+    /// The destination a `caller` receiver's configuration names, and `None`
+    /// for every other kind.
+    ///
+    /// A host's callback may be handed several keys in one operation, so this
+    /// — with the address beside it — is what it routes on (ADR-0005, item 1).
+    #[must_use]
+    pub fn destination(&self) -> Option<&str> {
+        self.destination.as_deref()
     }
 }
 
@@ -224,12 +250,24 @@ pub trait SecretReceiver {
 /// Selection is always explicit. There is no default receiver and no fallback:
 /// a key whose configuration names no receiver has nowhere for its plaintext
 /// to go, and is never created.
+///
+/// `deliver` is the host callback an operation carries, if it carries one.
+/// Only a [`crate::config::Receiver::Caller`] needs it, and that is the only
+/// thing that returns `None` here: a `caller` block with no callback behind it
+/// has nowhere to put the plaintext either. The caller reports that, because
+/// only it knows which address was being issued.
 #[must_use]
-pub fn from_config(spec: &crate::config::Receiver) -> Box<dyn SecretReceiver> {
+pub fn from_config<'a>(
+    spec: &'a crate::config::Receiver,
+    deliver: Option<&'a RefCell<Deliver>>,
+) -> Option<Box<dyn SecretReceiver + 'a>> {
     match spec {
-        crate::config::Receiver::File { path } => Box::new(FileReceiver::new(path)),
+        crate::config::Receiver::File { path } => Some(Box::new(FileReceiver::new(path))),
         crate::config::Receiver::Command { program, args } => {
-            Box::new(CommandReceiver::new(program, args.clone()))
+            Some(Box::new(CommandReceiver::new(program, args.clone())))
+        }
+        crate::config::Receiver::Caller { destination } => {
+            Some(Box::new(CallerReceiver::new(deliver?, destination.clone())))
         }
     }
 }

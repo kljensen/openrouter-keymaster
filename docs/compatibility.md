@@ -120,13 +120,19 @@ Covered:
 - **The read-only configuration and state types**: `Config` and everything
   reachable from it, and `StateFile::read` with `State` and everything reachable
   from it. Their fields, accessors, and the meanings of their values.
+- **The delivery callback** a `caller` receiver runs: `Context.deliver`'s
+  signature, the `DeliveryMetadata` it is handed and that type's accessors,
+  `KeyPlaintext::expose`, and the `DeliveryOutcome` and `Acknowledgement` it
+  answers with ([ADR-0005](adr/0005-caller-receiver.md)). What the plaintext
+  type guarantees — no `Serialize`, redacted `Debug`, cleared on drop — is part
+  of it.
 - **The error types** — `Error`, its variants, the per-layer errors it wraps,
   and `Error::kind`, whose strings are already part of the JSON contract. Every
   one of them is `#[non_exhaustive]`; see the rule for variants below.
 
 Not covered, and free to change in any release: everything behind `ops` — the
-HTTP client, the OpenRouter resource layer, the planner, the receivers, and
-redaction — the crate's internal module layout, and the `test-support` feature,
+HTTP client, the OpenRouter resource layer, the planner, the receiver
+implementations behind that callback, and redaction — the crate's internal module layout, and the `test-support` feature,
 which exists for this repository's own tests and makes no promise to anyone.
 
 Within 0.x: a new `ops` function, a new field on a report, and a new accessor

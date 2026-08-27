@@ -80,6 +80,7 @@ let context = Context {
     options: Options::default(),
     key: Some(ManagementKey::from_secret(Zeroizing::new(secret))?),
     workspace: None,
+    deliver: None,
 };
 
 let outcome = ops::plan(context)?;
@@ -97,6 +98,53 @@ whole call — context in, outcome out — to `tokio::task::spawn_blocking` or a
 equivalent; that is what `Context: Send + 'static` is for. And the state lock
 refuses a concurrent writer rather than queueing it, so a process that serves
 many requests serializes its own operations on one state file.
+
+### Receiving a key's plaintext in your own code
+
+A `caller` receiver hands a new key's plaintext to the host instead of writing
+it to a file or piping it to a program. The configuration names the
+destination, and `Context.deliver` carries the code:
+
+```toml
+[receivers.host]
+type = "caller"
+destination = "vault/jobfeed"
+```
+
+```rust
+use openrouter_keymaster_core::ops::DeliveryOutcome;
+
+let context = Context {
+    deliver: Some(Box::new(|metadata, plaintext| {
+        // `metadata` carries the address, hash, generation, operation ID, and
+        // the configured destination — all non-secret. `expose()` is the one
+        // way to read the key, and this call is the only place it appears.
+        match store(metadata.destination().unwrap_or_default(), plaintext.expose()) {
+            Ok(()) => DeliveryOutcome::delivered("stored in the vault"),
+            Err(error) if error.wrote_nothing() => DeliveryOutcome::rejected(error.to_string()),
+            Err(error) => DeliveryOutcome::ambiguous(error.to_string()),
+        }
+    })),
+    ..context
+};
+
+let outcome = ops::apply(context, None)?;
+```
+
+One operation may issue several keys, so the callback is called once per
+delivered key and routes on the metadata, never on call order. A panic inside
+it is caught and recorded as ambiguous. Keymaster's guarantees about the
+plaintext end at this call.
+
+`plan` and `status` never need a callback: the destination is configuration. An
+operation that would *issue* a key through a `caller` receiver with no callback
+refuses before any remote write or issuance — `apply` checks the whole plan
+ahead of its first phase, so not even a guardrail earlier in the same run is
+created; the one local write that can precede the refusal is the promotion of
+an already-delivered key, which the report shows. That refusal is what the CLI
+always gets, since it has no host code to deliver into.
+[`docs/receiver-protocol.md`](docs/receiver-protocol.md#the-caller-receiver) is
+the full contract.
 
 ### Scoping a run to one workspace
 
@@ -130,7 +178,7 @@ This README is the reference for what each command does and why. The pages under
 | [operations.md](docs/operations.md) | Runbooks: first run, adoption, changes, key creation, rotation, retirement, recovery, and looking after state. |
 | [configuration.md](docs/configuration.md) | Every field of the desired-state file. |
 | [threat-model.md](docs/threat-model.md) | Supplying the management credential, and what Keymaster does and does not protect. |
-| [receiver-protocol.md](docs/receiver-protocol.md) | The contract for writing a command receiver. |
+| [receiver-protocol.md](docs/receiver-protocol.md) | The contract for writing a command receiver, and the `caller` receiver a library host delivers through. |
 | [compatibility.md](docs/compatibility.md) | v0.1 non-goals, which surfaces are contracts, and how state migrations will work. |
 | [live-tests.md](docs/live-tests.md) | The opt-in acceptance suite that runs against a real organization. |
 | [release-checklist.md](docs/release-checklist.md) | The v0.1 release gate, with the command that verifies each item. |

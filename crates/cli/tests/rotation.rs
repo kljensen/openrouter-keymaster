@@ -76,10 +76,10 @@ impl World {
         openrouter_keymaster_core::config::Config::parse(&source)
             .expect("a valid test configuration")
             .receivers
-            .values()
+            .iter()
             .next()
+            .map(|(address, spec)| spec.fingerprint(address))
             .expect("one receiver")
-            .fingerprint()
     }
 
     /// Binds `OLD_HASH` as the address's current key, at generation 1.

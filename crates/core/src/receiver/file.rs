@@ -362,6 +362,7 @@ mod tests {
             KeyHash::parse("keyhash-0001").expect("a valid hash"),
             3,
             OperationId::parse("op-0001").expect("a valid operation id"),
+            None,
         )
     }
 

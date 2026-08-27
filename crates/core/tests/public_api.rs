@@ -19,7 +19,13 @@ use std::thread;
 
 use openrouter_keymaster_core::config::{Config, Receiver};
 use openrouter_keymaster_core::ids::Address;
-use openrouter_keymaster_core::ops::{self, Context, ManagementKey, Options, Paths};
+use openrouter_keymaster_core::ops::{
+    self, Acknowledgement, Context, DeliveryMetadata, DeliveryOutcome, KeyPlaintext, ManagementKey,
+    Options, Paths,
+};
+/// The host callback type, spelled out here because core does not export an alias for it.
+type Deliver = Box<dyn FnMut(&DeliveryMetadata, &KeyPlaintext) -> DeliveryOutcome + Send>;
+
 use openrouter_keymaster_core::state::{self, StateFile};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -32,6 +38,10 @@ version = 1
 [receivers.vault]
 type = "file"
 path = "/var/lib/keymaster/vault.key"
+
+[receivers.host]
+type = "caller"
+destination = "vault/jobfeed"
 
 [guardrails.cheap]
 name = "cheap-rail"
@@ -113,7 +123,32 @@ fn context(directory: &Path, base_url: String) -> Context {
                 .expect("a well-formed credential"),
         ),
         workspace: None,
+        deliver: Some(host_callback()),
     }
+}
+
+/// The callback a `caller` receiver delivers through (ADR-0005).
+///
+/// A host writes exactly this: a closure that reads the non-secret metadata,
+/// takes the plaintext through its one accessor, and answers with what its own
+/// storage proved. Every type it names has to be reachable from the curated
+/// surface, which is what this file is for.
+fn host_callback() -> Deliver {
+    Box::new(
+        |metadata: &DeliveryMetadata, plaintext: &KeyPlaintext| -> DeliveryOutcome {
+            if plaintext.expose().is_empty() {
+                return DeliveryOutcome::rejected("the host was handed nothing to store");
+            }
+            DeliveryOutcome::delivered(format!(
+                "the host stored {address} generation {generation} (operation {operation}) at \
+                 {destination}",
+                address = metadata.address(),
+                generation = metadata.generation(),
+                operation = metadata.operation(),
+                destination = metadata.destination().unwrap_or("nowhere"),
+            ))
+        },
+    )
 }
 
 #[test]
@@ -132,6 +167,21 @@ fn a_host_can_plan_and_read_configuration_and_state() {
         config.receivers.get(&vault),
         Some(Receiver::File { .. })
     ));
+    let host = Address::parse("host").expect("a valid address");
+    assert!(
+        matches!(
+            config.receivers.get(&host),
+            Some(Receiver::Caller { destination }) if destination == "vault/jobfeed"
+        ),
+        "a host reads the destination its own callback routes on"
+    );
+
+    // The classification a callback answers with: the other half of the
+    // delivery surface ADR-0005 makes public.
+    assert_eq!(
+        DeliveryOutcome::delivered("stored").acknowledgement(),
+        Acknowledgement::Delivered
+    );
 
     // State, as a host reads it: no lock, no write, nothing to promote.
     let state = StateFile::new(paths.join("state.json"))

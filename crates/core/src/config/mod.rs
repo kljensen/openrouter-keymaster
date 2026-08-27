@@ -196,6 +196,18 @@ pub enum Receiver {
         /// Arguments, passed as a vector; no shell is involved.
         args: Vec<String>,
     },
+    /// Hand the plaintext to the host's own code, in memory, once (ADR-0005).
+    ///
+    /// The code itself is not configuration: a host supplies it per operation
+    /// as `ops::Context::deliver`. What lives here is the destination the host
+    /// routes by, so planning needs nothing from the host.
+    Caller {
+        /// A stable, non-secret name for where the host will put the
+        /// plaintext — a vault path, a user ID, a page. Keymaster never
+        /// interprets it; it identifies the receiver and reaches the host in
+        /// the delivery metadata.
+        destination: String,
+    },
 }
 
 impl Receiver {
@@ -212,13 +224,19 @@ impl Receiver {
     /// program, and each argument separately — so no two different receivers
     /// can produce the same bytes. Joining the arguments with a separator
     /// would not do: `["a b"]` and `["a", "b"]` are different receivers.
+    ///
+    /// `address` is the local address of this receiver's own block, and only a
+    /// [`Receiver::Caller`] absorbs it (ADR-0005, item 2). A file or a command
+    /// is identified by a path this crate resolves; a `caller` is identified by
+    /// the block a host wires code up to and the destination that block names,
+    /// so both belong in its digest.
     #[must_use]
-    pub fn fingerprint(&self) -> ReceiverFingerprint {
-        ReceiverFingerprint::from_digest(self.digest())
+    pub fn fingerprint(&self, address: &Address) -> ReceiverFingerprint {
+        ReceiverFingerprint::from_digest(self.digest(address))
     }
 
     /// The SHA-256 of this receiver's unambiguously encoded specification.
-    fn digest(&self) -> [u8; 32] {
+    fn digest(&self, address: &Address) -> [u8; 32] {
         /// Adds one component so it cannot run into the next.
         fn absorb(hasher: &mut Sha256, component: &[u8]) {
             hasher.update(
@@ -241,6 +259,11 @@ impl Receiver {
                 for arg in args {
                     absorb(&mut hasher, arg.as_bytes());
                 }
+            }
+            Self::Caller { destination } => {
+                absorb(&mut hasher, b"caller");
+                absorb(&mut hasher, address.as_str().as_bytes());
+                absorb(&mut hasher, destination.as_bytes());
             }
         }
         hasher.finalize().into()

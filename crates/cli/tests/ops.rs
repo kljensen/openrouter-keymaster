@@ -119,6 +119,9 @@ fn context(project: &Project) -> Context {
                 .expect("a usable test credential"),
         ),
         workspace: None,
+        // The command line supplies no host callback either, and every
+        // receiver these cases configure is a file (ADR-0005, item 3).
+        deliver: None,
     }
 }
 
@@ -441,5 +444,5 @@ fn receiver_fingerprint() -> openrouter_keymaster_core::ids::ReceiverFingerprint
     openrouter_keymaster_core::config::Config::parse(CONFIG)
         .expect("a valid configuration")
         .receivers[&address("vault")]
-        .fingerprint()
+        .fingerprint(&address("vault"))
 }

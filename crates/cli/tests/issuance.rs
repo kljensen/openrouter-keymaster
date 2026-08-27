@@ -89,10 +89,10 @@ impl Creation {
         openrouter_keymaster_core::config::Config::parse(&source)
             .expect("a valid test configuration")
             .receivers
-            .values()
+            .iter()
             .next()
+            .map(|(address, spec)| spec.fingerprint(address))
             .expect("one receiver")
-            .fingerprint()
     }
 
     /// The phase of the operation the state file holds, if it holds one.

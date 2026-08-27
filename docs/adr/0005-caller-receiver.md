@@ -38,12 +38,21 @@ is the first and only one needed.
    the destination is a replacement, as any receiver change is. The plan
    fingerprint of ADR-0003 already covers the whole configuration, so a plan
    shown with one destination cannot be applied with another.
-3. **Preflight refuses before any write.** Every operation that issues a key
-   — `apply`, `rotate`, `recover replace` — runs the shared issuance preflight
-   (ADR-0002); when the key's receiver is a `caller` and `Context.deliver` is
-   `None`, that preflight fails before `create_started`. Planning is unaffected: it needs the
+3. **The refusal comes before any remote write or issuance.** Every operation
+   that issues a key — `apply`, `rotate`, `recover replace` — runs the shared
+   issuance preflight (ADR-0002); when the key's receiver is a `caller` and
+   `Context.deliver` is `None`, that preflight fails before `create_started`.
+   For `rotate` and `recover replace` the preflight is the whole of it: each
+   issues one key and writes nothing ahead of it. An apply is a sequence of
+   phases, so it makes the same refusal one level up — it scans the recomputed
+   plan before its first phase, and fails with every write held back — or a
+   guardrail create earlier in the run would land before the issuance was ever
+   reached. The one write that can precede the refusal is local and older than
+   the plan: an apply completes a delivered operation's promotion under its
+   lock before it plans anything, and the report shows that promotion rather
+   than claiming nothing happened. Planning is unaffected: it needs the
    destination, which it has, not the callback. The CLI never supplies a callback, so under the CLI
-   a `caller` receiver is always a preflight failure with a message saying
+   a `caller` receiver is always that refusal, with a message saying
    which host feature it needs.
 4. **Classification is the callback's answer.** The callback returns
    `Delivered`, `Rejected` (only under a documented no-commit contract, as for

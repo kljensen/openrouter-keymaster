@@ -134,6 +134,10 @@ fn context(cli: &Cli) -> Result<Context, Error> {
         options: endpoint?,
         key: credential(&cli.command)?,
         workspace,
+        // The command line has no host code to deliver into, so a key whose
+        // receiver is a `caller` fails its issuance preflight (ADR-0005, item
+        // 3). Only a library host supplies one.
+        deliver: None,
     })
 }
 
@@ -145,6 +149,7 @@ fn offline(paths: Paths, workspace: Option<Uuid>) -> Context {
         options: Options::default(),
         key: None,
         workspace,
+        deliver: None,
     }
 }
 

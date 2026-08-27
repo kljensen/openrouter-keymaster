@@ -19,6 +19,11 @@
 //! before any API call or state write — and fails there with
 //! `missing_credential`.
 //!
+//! [`Context::deliver`] is optional for the same kind of reason: only an
+//! operation that issues a key through a `caller` receiver needs the host's
+//! code, and the shared issuance preflight checks for it before anything is
+//! journaled or created (ADR-0005).
+//!
 //! [`Outcome`] keeps the report beside a failure: an operation that wrote
 //! something and then could not verify it still returns its full report, with
 //! the failure next to it. `Err` is reserved for the cases where there is no
@@ -50,6 +55,14 @@ use crate::state::{Phase, State, StateFile};
 // them here, where the context that carries them is defined.
 pub use crate::client::{MANAGEMENT_KEY_VAR, ManagementKey, Options, PRODUCTION_BASE_URL};
 
+// What a host's own delivery callback is handed and what it answers with
+// (ADR-0005). The receiver module behind them stays internal: a host supplies a
+// closure, never an implementation of the trait, so this is the whole of the
+// receiver surface it needs.
+pub use crate::client::KeyPlaintext;
+pub(crate) use crate::receiver::Deliver;
+pub use crate::receiver::{Acknowledgement, DeliveryMetadata, Outcome as DeliveryOutcome};
+
 pub use apply::apply;
 pub use fingerprint::PlanFingerprint;
 pub use import::{import_guardrail, import_key};
@@ -69,8 +82,9 @@ pub struct Paths {
 /// Everything an operation needs that is not one of its arguments.
 ///
 /// Owned rather than borrowed, and `Send + 'static`, so a host can move it to
-/// the thread that runs the operation.
-#[derive(Debug)]
+/// the thread that runs the operation. It is not `Clone` and its `Debug` is
+/// hand-written, because [`Context::deliver`] is a closure: a host builds one
+/// context per operation.
 pub struct Context {
     /// Where the configuration and state files are.
     pub paths: Paths,
@@ -92,6 +106,38 @@ pub struct Context {
     /// as it is without a scope. Two scopes pointed at one state file give
     /// correct but mixed plans; the scope does not isolate.
     pub workspace: Option<Uuid>,
+
+    /// The host code a `caller` receiver hands a new key's plaintext to
+    /// (ADR-0005).
+    ///
+    /// `None` — what the `openrouter-keymaster` command line always passes —
+    /// is a host with no such code, and an operation that would have to issue a
+    /// key through a `caller` receiver fails its preflight before anything is
+    /// created. Planning never needs it.
+    ///
+    /// One operation may issue several keys, so the callback is called once per
+    /// delivery, on the thread running the operation, and routes by the
+    /// [`DeliveryMetadata`] it is handed — the address and the block's
+    /// configured destination — rather than by call order. What it returns is
+    /// the delivery's classification, and a panic inside it is caught and
+    /// classified [`Acknowledgement::Ambiguous`].
+    ///
+    /// Keymaster's guarantees about the plaintext end at this call.
+    pub deliver: Option<Deliver>,
+}
+
+impl std::fmt::Debug for Context {
+    /// Written by hand because a closure has no `Debug`; it is reported as
+    /// present or absent, which is all there is to say about it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context")
+            .field("paths", &self.paths)
+            .field("options", &self.options)
+            .field("key", &self.key)
+            .field("workspace", &self.workspace)
+            .field("deliver", &self.deliver.is_some())
+            .finish()
+    }
 }
 
 impl Context {

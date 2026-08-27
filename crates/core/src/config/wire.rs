@@ -102,6 +102,9 @@ pub(super) enum Receiver {
         #[serde(default)]
         args: Vec<String>,
     },
+
+    /// Hands the plaintext to the host's own code (ADR-0005).
+    Caller { destination: Option<String> },
 }
 
 /// A TOML number, before it is interpreted as an amount of money.

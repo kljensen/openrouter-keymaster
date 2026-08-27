@@ -151,27 +151,39 @@ path = "/var/lib/keymaster/laptop-pi.key"
 type = "command"
 program = "/usr/local/bin/keymaster-vault-receiver"
 args = ["add-file", "jobfeed_openrouter_api_key"]
+
+[receivers.host]
+type = "caller"
+destination = "vault/jobfeed"
 ```
 
 | Field | Type | Required | Applies to | Notes |
 | --- | --- | --- | --- | --- |
-| `type` | `"file"` or `"command"` | yes | both | Selects the variant. Fields from the other variant are a syntax error. |
+| `type` | `"file"`, `"command"`, or `"caller"` | yes | all | Selects the variant. Fields from another variant are a syntax error. |
 | `path` | string | yes | `file` | Absolute path of the file to write. |
 | `program` | string | yes | `command` | Absolute path of the executable. Run with no shell. |
 | `args` | array of string | no (default `[]`) | `command` | At most 64. Never carries secret material. |
+| `destination` | string | yes | `caller` | A non-secret label for where the host puts the plaintext. At most 200 characters. |
 
 `path` and `program` must be absolute, at most 4096 bytes, free of control
 characters and `..` components, and not credential-shaped. Spaces and non-ASCII
-characters are fine.
+characters are fine. `destination` is trimmed, must not be empty, and carries no
+control characters and nothing credential-shaped; Keymaster never interprets it.
+
+**A `caller` receiver only works inside a library host.** It hands the plaintext
+to code the host supplies on the operation context, so the
+`openrouter-keymaster` command line — which has none — refuses to issue a key
+through one, in the preflight before anything is created. `plan` and `status`
+are unaffected.
 
 Keymaster derives a **receiver fingerprint** — a SHA-256 over the type and the
-path, or over the program and each argument — and records it in state. Changing
-any part of a receiver changes the fingerprint, and that is a reason to replace
-the key rather than to leave a live credential in a destination the
-configuration no longer names.
+path, over the program and each argument, or over the block's own address and
+its destination — and records it in state. Changing any part of a receiver
+changes the fingerprint, and that is a reason to replace the key rather than to
+leave a live credential in a destination the configuration no longer names.
 
 [`docs/receiver-protocol.md`](receiver-protocol.md) is the contract for writing
-a command receiver.
+a command receiver, and describes the `caller` receiver in full.
 
 ## Value rules
 

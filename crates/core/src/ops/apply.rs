@@ -76,16 +76,18 @@
 //! and that read is also what decides whether a privilege expansion is
 //! reported as having happened: a response is not evidence either way.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use time::OffsetDateTime;
 
 use crate::api::{GuardrailBody, Reader, UpdateKey, Writer};
 use crate::client::Client;
-use crate::config::Config;
+use crate::config::{Config, Receiver};
 use crate::error::Error;
 use crate::ids::{Address, KeyHash, Uuid};
 use crate::plan::{self, Action, ActionKind, Identity, Plan, Reason, ResourceAddress, Snapshot};
+use crate::receiver::Deliver;
 use crate::report::{ActionOutcome, ApplyReport, PlanReport};
 use crate::state::{KeyBinding, Phase as JournalPhase, State, StateFile, StateLock};
 
@@ -118,7 +120,7 @@ const ASSIGNMENT_WITHOUT_KEY: &str =
 /// operation stopped the run, when a write failed or could not be confirmed,
 /// or when the plan no longer matches the fingerprint.
 pub fn apply(
-    context: Context,
+    mut context: Context,
     expected: Option<PlanFingerprint>,
 ) -> Result<Outcome<ApplyReport>, Error> {
     // The lock comes first, and everything the plan is computed from is read
@@ -163,6 +165,25 @@ pub fn apply(
         return Ok(refusal);
     }
 
+    // Before the first remote write, not inside the transaction that would
+    // discover it: a plan is a sequence, and a guardrail create ahead of the
+    // issuance would already have landed by then (ADR-0005, item 3). The
+    // promotion above is older than the plan and is carried into the refusal's
+    // report rather than hidden by it.
+    if let Some(refusal) = refuse_undeliverable_issuance(
+        &config,
+        &plan,
+        context.deliver.is_some(),
+        promoted.as_deref(),
+    ) {
+        return Ok(refusal);
+    }
+
+    // The host's delivery callback, taken out of the context so one closure
+    // serves every key this apply issues (ADR-0005, item 2). A run that carries
+    // none applies everything that is not an issuance through a `caller`
+    // receiver exactly as before.
+    let deliver = context.deliver.take().map(RefCell::new);
     let mut apply = Apply {
         config: &config,
         client: &client,
@@ -171,6 +192,7 @@ pub fn apply(
         lock: &lock,
         snapshot: &snapshot,
         workspace: context.scope(),
+        deliver: deliver.as_ref(),
         stopped: false,
         issued: BTreeSet::new(),
     };
@@ -237,6 +259,88 @@ fn refuse_changed_plan(
         ApplyReport::new(plan, &outcomes, None),
         ApplyError::PlanChanged,
     ))
+}
+
+/// What a refused action's outcome says when the run has no host callback.
+const NO_HOST_CALLBACK: &str = "held back: this plan issues a key through a `caller` receiver and \
+                                this run carries no host callback, so nothing was written";
+
+/// Refuses, before any remote write and before any issuance, a plan that would
+/// issue a key through a `caller` receiver in a run that carries no callback to
+/// deliver it to.
+///
+/// The issuance preflight refuses this too, and for `rotate` and `recover
+/// replace` that is enough: each issues one key and writes nothing before its
+/// preflight. An apply is a sequence — guardrails, then keys, then assignments
+/// — so by the time the transaction for one key ran its preflight, a guardrail
+/// create and an unrelated key's update would already have landed. ADR-0005
+/// item 3 says the refusal comes before any remote write, so the whole plan is
+/// scanned here, ahead of every phase. The one write that can precede it is
+/// local and older than the plan: the promotion of an already-delivered key,
+/// which [`fast_forward`] completes under the lock and which the report this
+/// returns carries.
+///
+/// It reads configuration only: which receiver a planned key names, and what
+/// kind that receiver is. No request is sent and nothing is journaled, so a
+/// refusal costs the reads this run has already made and changes nothing.
+fn refuse_undeliverable_issuance(
+    config: &Config,
+    plan: &Plan,
+    has_callback: bool,
+    promoted: Option<&str>,
+) -> Option<Outcome<ApplyReport>> {
+    if has_callback {
+        return None;
+    }
+    let blocked = plan.is_blocked();
+    let address = plan
+        .actions()
+        .iter()
+        .find_map(|action| issued_through_a_caller(config, action, blocked))?;
+
+    let outcomes: Vec<ActionOutcome> = plan
+        .actions()
+        .iter()
+        .map(|action| {
+            if action.kind.writes() {
+                ActionOutcome::held_back(NO_HOST_CALLBACK)
+            } else {
+                ActionOutcome::reported()
+            }
+        })
+        .collect();
+    let mut report = ApplyReport::new(plan, &outcomes, None);
+    // The promotion this run completed before it planned anything is reported
+    // here exactly as a converging run reports it. A refusal that swallowed it
+    // would tell an operator nothing had changed when the address's current key
+    // just had.
+    report.note(promoted.map(str::to_owned));
+    Some(Outcome::failed(
+        report,
+        ApplyError::Undeliverable {
+            address: address.clone(),
+            promoted: promoted.is_some(),
+        },
+    ))
+}
+
+/// The key this action would issue, when it would issue one through a `caller`
+/// receiver.
+fn issued_through_a_caller<'a>(
+    config: &Config,
+    action: &'a Action,
+    plan_blocked: bool,
+) -> Option<&'a Address> {
+    let ResourceAddress::Key(address) = &action.address else {
+        return None;
+    };
+    if !matches!(action.kind, ActionKind::Create | ActionKind::Replace)
+        || !action.is_executable(plan_blocked)
+    {
+        return None;
+    }
+    let receiver = config.keys.get(address)?.receiver.as_ref()?;
+    matches!(config.receivers.get(receiver)?, Receiver::Caller { .. }).then_some(address)
 }
 
 /// Completes a delivered operation, before this run plans anything.
@@ -321,6 +425,9 @@ struct Apply<'a> {
     /// The workspace every create this run makes is placed in, when it is
     /// scoped to one (ADR-0004, item 5).
     workspace: Option<&'a Uuid>,
+    /// The host callback a `caller` receiver delivers through, when the context
+    /// carried one (ADR-0005). Lent to every issuance this apply runs.
+    deliver: Option<&'a RefCell<Deliver>>,
     /// Set by the first failed write. Nothing is attempted after it: a later
     /// action may depend on the one that failed, and a run that pressed on
     /// would report a second failure caused by the first.
@@ -429,6 +536,7 @@ impl Apply<'_> {
             writer: self.writer,
             lock: self.lock,
             workspace: self.workspace,
+            deliver: self.deliver,
         };
         let predecessor = state
             .key(address)
@@ -784,6 +892,23 @@ fn now() -> OffsetDateTime {
     OffsetDateTime::now_utc()
 }
 
+/// What an undeliverable refusal established about this run.
+///
+/// The refusal comes before every remote write and before any issuance, but
+/// not before the one local write that precedes the plan itself: an apply
+/// completes a delivered operation's promotion under its lock before it plans
+/// anything (ADR-0002). Claiming nothing was written would be false in exactly
+/// that case, so the message says which of the two happened.
+const fn undeliverable_consequence(promoted: bool) -> &'static str {
+    if promoted {
+        "no remote write was made and no key was issued; a previously delivered key was promoted \
+         to current, which is a local state write this run completed before it planned anything, \
+         and the result document names it"
+    } else {
+        "no remote write was made, no key was issued, and nothing was written locally either"
+    }
+}
+
 /// Why an apply did not converge the configuration.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -814,6 +939,24 @@ pub enum ApplyError {
     )]
     PlanChanged,
 
+    /// A planned issuance needs host code this run does not carry.
+    #[error(
+        "`{address}` is issued through a receiver that hands the plaintext to the host's own code, \
+         and this run carries no callback to hand it to: {consequence}. A host sets \
+         `Context.deliver` before applying a plan that creates or replaces that key; the \
+         `openrouter-keymaster` command line never does.",
+        consequence = undeliverable_consequence(*promoted)
+    )]
+    Undeliverable {
+        /// The key the plan would have issued.
+        address: Address,
+        /// Whether this run completed a delivered operation's promotion before
+        /// it refused. That promotion is local, it happens before the plan
+        /// exists, and the report names it — so the message has to say it
+        /// happened rather than claim the run wrote nothing at all.
+        promoted: bool,
+    },
+
     /// A delivered key could not be promoted to current.
     #[error(
         "`{address}` has a delivered key that could not be promoted to current: {message}. \
@@ -836,6 +979,7 @@ impl ApplyError {
             Self::Blocked => "apply_blocked",
             Self::Unresolved { .. } => "apply_unresolved",
             Self::PlanChanged => "plan_changed",
+            Self::Undeliverable { .. } => "apply_undeliverable",
             Self::Promotion { .. } => "apply_promotion",
         }
     }

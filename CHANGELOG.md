@@ -9,6 +9,30 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Added
 
+- A `caller` receiver, for a program that embeds the core crate. A
+  `[receivers.NAME] type = "caller"` block names one field, `destination` — a
+  stable non-secret label for where the plaintext ends up — and the host
+  supplies the code as `Context.deliver`, a callback handed the delivery
+  metadata (address, hash, generation, operation ID, and that destination) and
+  the plaintext. One operation may issue several keys, so the callback is
+  called once per delivered key and routes on the metadata rather than on call
+  order; what it returns is the delivery's classification, and a panic inside
+  it is caught and recorded as ambiguous. `DeliveryMetadata`, `Acknowledgement`,
+  the delivery outcome (as `ops::DeliveryOutcome`), and `KeyPlaintext` with its
+  single `expose()` accessor are now public; the plaintext keeps its guarantees
+  and Keymaster's end at the callback. Every operation that issues a key —
+  `apply`, `rotate`, `recover replace` — refuses when a `caller`-backed key has
+  no callback, before the journal entry and before `POST /keys`; `apply` scans
+  the whole plan before its first phase and fails with the new error kind
+  `apply_undeliverable` having made no remote write, so a guardrail it would
+  have created earlier in the same run is not created either. The one local
+  write that can precede that refusal is the promotion of an already-delivered
+  key, which the report carries and the error names. `plan` and `status` never
+  need a callback. The `openrouter-keymaster`
+  command line supplies no callback, so a `caller` receiver is always that
+  preflight failure under the CLI.
+  [ADR-0005](docs/adr/0005-caller-receiver.md).
+
 - A workspace scope. `Context.workspace` — set from the new `--workspace UUID`
   global option — names the one OpenRouter workspace a run places resources in
   and reports on. With a scope, a configuration whose key names a different
@@ -82,6 +106,12 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
   and `decommission_delete_unconfirmed`.
 
 ### Changed
+
+- `Context` gained a `deliver` field, so a struct literal that built one now
+  needs it; `None` is the previous behavior. `config::Receiver::fingerprint`
+  now takes the receiver's own local address, which only a `caller` receiver's
+  digest absorbs — a `file` or `command` fingerprint is unchanged, so no state
+  file is invalidated.
 
 - The repository is a Cargo workspace of two crates.
   `openrouter-keymaster-core` (`crates/core`) holds the client, the API reads

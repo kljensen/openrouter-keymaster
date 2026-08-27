@@ -35,6 +35,8 @@
 //! configuration still says 1 produces generation 4 rather than a collision. A
 //! generation names one remote key at one address and only ever moves upward.
 
+use std::cell::RefCell;
+
 use time::OffsetDateTime;
 
 use crate::api::{Reader, Writer};
@@ -54,7 +56,7 @@ use super::{Context, Outcome, Resolution};
 /// progress, the successor cannot be staged, or the transaction did not finish,
 /// and the configuration, state, and API errors of the steps it performs,
 /// including `missing_credential`.
-pub fn rotate(context: Context, name: &str) -> Result<Outcome<RotateReport>, Error> {
+pub fn rotate(mut context: Context, name: &str) -> Result<Outcome<RotateReport>, Error> {
     let address = Address::parse(name).map_err(|error| argument("NAME", &error))?;
 
     // As everywhere that writes: the lock, then the two files the decision is
@@ -75,6 +77,10 @@ pub fn rotate(context: Context, name: &str) -> Result<Outcome<RotateReport>, Err
 
     let client = context.client()?;
     let (reader, writer) = (Reader::new(&client), Writer::new(&client));
+    // The host's delivery callback, taken out of the context so the receiver
+    // the preflight builds can call it (ADR-0005, item 2). A run that carries
+    // none gets as far as the preflight and no further.
+    let deliver = context.deliver.take().map(RefCell::new);
     let issuer = Issuer {
         config: &config,
         client: &client,
@@ -82,6 +88,7 @@ pub fn rotate(context: Context, name: &str) -> Result<Outcome<RotateReport>, Err
         writer: &writer,
         lock: &lock,
         workspace: context.scope(),
+        deliver: deliver.as_ref(),
     };
 
     // Nothing has been sent or written yet, and nothing will be until this

@@ -34,6 +34,7 @@ fn metadata(hash: &openrouter_keymaster_core::ids::KeyHash) -> DeliveryMetadata 
         hash.clone(),
         3,
         OperationId::parse("op-0001").expect("a valid operation id"),
+        None,
     )
 }
 
@@ -470,7 +471,8 @@ fn a_configured_command_block_builds_the_command_receiver() {
     };
     let created = created_sentinel_key();
 
-    let outcome = openrouter_keymaster_core::receiver::from_config(&configured)
+    let outcome = openrouter_keymaster_core::receiver::from_config(&configured, None)
+        .expect("a command receiver needs no host callback")
         .receive(&metadata(created.hash()), created.plaintext());
 
     assert!(outcome.is_delivered(), "{outcome}");

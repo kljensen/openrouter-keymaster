@@ -221,7 +221,7 @@ fn vault_fingerprint() -> ReceiverFingerprint {
         .receivers
         .get(&address("vault"))
         .expect("the configured receiver")
-        .fingerprint()
+        .fingerprint(&address("vault"))
 }
 
 /// A key and a guardrail that are bound, present, and already correct.

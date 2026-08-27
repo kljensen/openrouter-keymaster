@@ -57,6 +57,8 @@
 //! destroys it on the way out; the delivered path drops it explicitly the
 //! moment the receiver is done, before promotion and the final read.
 
+use std::cell::RefCell;
+
 use time::OffsetDateTime;
 
 use crate::api::{Reader, UpdateKey, Writer};
@@ -64,7 +66,7 @@ use crate::client::{ApiError, Client, CreateKeyRequest, CreatedKey};
 use crate::config::{Config, Key, Managed, Usd};
 use crate::ids::{Address, KeyHash, OperationId, ReceiverFingerprint, Uuid};
 use crate::plan;
-use crate::receiver::{Acknowledgement, DeliveryMetadata, SecretReceiver};
+use crate::receiver::{Acknowledgement, Deliver, DeliveryMetadata, SecretReceiver};
 use crate::state::{BeginCreate, KeyBinding, State, StateLock, Transition, TransitionError};
 
 /// Everything one transaction writes through, gathered so the steps below read
@@ -83,6 +85,12 @@ pub(super) struct Issuer<'a> {
     /// The workspace this run places new keys in, when it is scoped to one
     /// (ADR-0004, item 5).
     pub(super) workspace: Option<&'a Uuid>,
+    /// The host callback a `caller` receiver delivers through, when the
+    /// context carried one (ADR-0005). Taken out of the context by the
+    /// operation and lent here, so one callback serves every key this run
+    /// issues; the [`RefCell`] is what lets a `&self` receiver call an `FnMut`,
+    /// and an operation is single-threaded with no nested delivery.
+    pub(super) deliver: Option<&'a RefCell<Deliver>>,
 }
 
 /// What one completed transaction produced.
@@ -209,11 +217,24 @@ impl Issuer<'_> {
         let spec = self.config.receivers.get(receiver_address).ok_or_else(|| {
             format!("the configuration does not describe the receiver `{receiver_address}`")
         })?;
+        // The one thing a receiver can lack that configuration cannot supply:
+        // a `caller` block names host code, and this run may be one that has
+        // none — every run the command line makes, for a start. Refused here,
+        // before `create_started` and before `POST /keys` (ADR-0005, item 3).
+        let receiver = crate::receiver::from_config(spec, self.deliver).ok_or_else(|| {
+            format!(
+                "the receiver `{receiver_address}` hands the plaintext to the host's own code, \
+                 and this run carries none: a host sets `Context.deliver` before issuing a key \
+                 through a `caller` receiver, and the `openrouter-keymaster` command line never \
+                 does"
+            )
+        })?;
 
         Ok(Prepared {
             desired,
-            fingerprint: spec.fingerprint(),
-            receiver: crate::receiver::from_config(spec),
+            fingerprint: spec.fingerprint(receiver_address),
+            destination: destination_of(spec),
+            receiver,
             guardrail: self.converged_guardrail(desired, state)?,
             generation: next_generation(address, state, desired)?,
             workspace: desired
@@ -493,6 +514,7 @@ impl Issuer<'_> {
             hash.clone(),
             prepared.generation,
             operation.clone(),
+            prepared.destination.clone(),
         );
         let outcome = prepared.receiver.receive(&metadata, created.plaintext());
         // The plaintext has been where it was going, or it never will. Either
@@ -824,14 +846,29 @@ fn next_generation(address: &Address, state: &State, desired: &Key) -> Result<u3
     Ok(desired.generation.max(next))
 }
 
+/// The destination a `caller` receiver names, and nothing for the kinds that
+/// deliver somewhere Keymaster resolves itself.
+fn destination_of(spec: &crate::config::Receiver) -> Option<String> {
+    match spec {
+        crate::config::Receiver::Caller { destination } => Some(destination.clone()),
+        crate::config::Receiver::File { .. } | crate::config::Receiver::Command { .. } => None,
+    }
+}
+
 /// Everything the transaction needs, checked before anything is journaled.
 pub(super) struct Prepared<'a> {
     /// The desired key, as the configuration describes it.
     desired: &'a Key,
     /// Where the plaintext goes. Selected explicitly; there is no fallback.
-    receiver: Box<dyn SecretReceiver>,
+    ///
+    /// Borrowed rather than `'static` because a `caller` receiver holds the
+    /// operation's callback, which the operation owns.
+    receiver: Box<dyn SecretReceiver + 'a>,
     /// The non-secret digest of that destination, for the journal.
     fingerprint: ReceiverFingerprint,
+    /// The destination a `caller` receiver's block names, for the delivery
+    /// metadata the host routes on. `None` for every other kind.
+    destination: Option<String>,
     /// The guardrail the new key is attached to, when one is configured.
     guardrail: Option<Uuid>,
     /// The generation this attempt would become.
