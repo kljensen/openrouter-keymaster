@@ -382,6 +382,110 @@ impl fmt::Display for DeleteWorkspaceReport {
     }
 }
 
+/// What `delete log-destination` established, and what it released.
+///
+/// The shape of [`DeleteWorkspaceReport`], because the command is the same
+/// shape: one `DELETE`, a read that proves it, and a binding released only when
+/// the read did. What it does not carry is an inhabitant list — a log
+/// destination holds nothing — and what its summary says instead is that log
+/// forwarding for the workspace has stopped (ADR-0006, item 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeleteDestinationReport {
+    command: &'static str,
+    /// The local address that tracked the destination.
+    address: String,
+    /// The UUID that was named.
+    id: String,
+    /// What the attempt established.
+    outcome: DeleteOutcome,
+    /// Whether Keymaster still tracks the destination after this run.
+    tracked: bool,
+    /// The bindings this run released.
+    released: Vec<String>,
+    /// How the outcome was established. Carries an HTTP status and an
+    /// OpenRouter error code at most, never a response body.
+    detail: String,
+    /// What this run established.
+    summary: String,
+    /// Diagnostics an operator should see.
+    warnings: Vec<String>,
+}
+
+impl DeleteDestinationReport {
+    /// Describes one log destination deletion attempt.
+    #[must_use]
+    pub(crate) fn new(
+        address: &Address,
+        id: &Uuid,
+        outcome: DeleteOutcome,
+        detail: String,
+        released: Vec<String>,
+    ) -> Self {
+        let gone = outcome.is_gone();
+        Self {
+            command: "delete log-destination",
+            address: format!("log_destinations.{address}"),
+            id: id.as_str().to_owned(),
+            outcome,
+            tracked: !gone,
+            released,
+            detail,
+            summary: if gone {
+                format!(
+                    "OpenRouter has no log destination {id}, and `{address}` no longer tracks it. \
+                     Nothing is being forwarded through it any more. If the configuration still \
+                     describes the block, the next `openrouter-keymaster apply` creates a new \
+                     destination for it."
+                )
+            } else {
+                format!(
+                    "log destination {id} is not confirmed gone, so `{address}` still tracks it. \
+                     The request was sent exactly once and is never resent automatically."
+                )
+            },
+            warnings: if gone {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "log destination {id} may or may not still exist; the binding stays tracked so \
+                     this can be retried"
+                )]
+            },
+        }
+    }
+
+    /// Whether the run reached a state OpenRouter confirmed.
+    #[must_use]
+    pub const fn settled(&self) -> bool {
+        self.outcome.is_gone()
+    }
+
+    /// The diagnostics that belong on stderr in a human run.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}
+
+impl fmt::Display for DeleteDestinationReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut lines = vec![
+            format!(
+                "delete log-destination: {address}  {id}  {outcome}",
+                address = self.address,
+                id = self.id,
+                outcome = self.outcome.as_str()
+            ),
+            format!("  {}", self.detail),
+        ];
+        for released in &self.released {
+            lines.push(format!("  released: {released}"));
+        }
+        lines.push(format!("  {}", self.summary));
+        f.write_str(&lines.join("\n"))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteOutcome {
@@ -774,6 +878,12 @@ impl Released {
     /// The guardrail the address owned.
     #[must_use]
     pub(crate) fn guardrail(id: &Uuid, origin: Origin) -> Self {
+        Self::by_identity(id, origin)
+    }
+
+    /// The log destination the address owned.
+    #[must_use]
+    pub(crate) fn log_destination(id: &Uuid, origin: Origin) -> Self {
         Self::by_identity(id, origin)
     }
 

@@ -17,10 +17,14 @@ spells them differently.
 nothing means naming it in the block's `clear` array. Each block type has a
 fixed list of what may be cleared; anything else is an error.
 
-**Nothing here may be secret.** The management credential comes from the
-environment and a new key's plaintext goes to a receiver. Any value containing
-`sk-or-` — an inference key or a management key, in any letter case — is
-refused, as is any field this schema does not define.
+**Nothing here may be an OpenRouter secret.** The management credential comes
+from the environment and a new key's plaintext goes to a receiver. Any value
+containing `sk-or-` — an inference key or a management key, in any letter case —
+is refused, as is any field this schema does not define. One value is different,
+and it is the exception that proves the rule: a log destination's `config` may
+hold a *third-party* credential, because there is no other channel through which
+OpenRouter can be told what to send logs to. **A file with a
+`[log_destinations.*]` block should be treated as a secret** — see that section.
 
 ## Errors
 
@@ -54,8 +58,8 @@ Optional.
 
 ## Local addresses
 
-The table key in `[workspaces.NAME]`, `[guardrails.NAME]`, `[keys.NAME]`, and
-`[receivers.NAME]` is a
+The table key in `[workspaces.NAME]`, `[guardrails.NAME]`, `[keys.NAME]`,
+`[receivers.NAME]`, and `[log_destinations.NAME]` is a
 **local address**. It is Keymaster's name for the resource, it is never sent to
 OpenRouter, and it is what `state forget`, `rotate`, `retire`, and `import` take
 as an argument. Changing one is not a rename — it is a new address bound to
@@ -238,6 +242,102 @@ creates what goes inside.
 **A key with no `receiver` can be managed and imported but never created.**
 There is no fallback destination for a plaintext key and Keymaster will not
 print one.
+
+## `[log_destinations.ADDRESS]`
+
+A log destination is where OpenRouter forwards a workspace's request logs.
+Identity is the destination UUID: removing the block orphans the binding,
+`openrouter-keymaster import log-destination NAME --id UUID` binds an existing
+one, and `openrouter-keymaster delete log-destination --id UUID` is the only
+deletion.
+
+```toml
+[log_destinations.club_audit]
+type = "datadog"
+name = "Golf Club audit log"
+workspace = "golf_club"
+enabled = true
+privacy_mode = false
+sampling_rate = 1
+config = { site = "datadoghq.com", apiKey = "REPLACE-ME" }
+```
+
+| Field | Type | Required | Clearable | Notes |
+| --- | --- | --- | --- | --- |
+| `type` | string | yes | no | One of the types below. Fixed when the destination is created. |
+| `name` | string | yes | no | Remote display name. Mutable remotely and never an identifier. |
+| `config` | table | yes | no | Provider-specific, validated server-side. **May hold a credential.** |
+| `enabled` | bool | no (default `true`) | no | Whether the destination forwards anything. |
+| `privacy_mode` | bool | no (default `false`) | no | When true, request and response bodies are withheld and only metadata is forwarded. |
+| `sampling_rate` | number | no | no | The fraction of requests forwarded, between 0.0001 and 1. Omitted leaves the remote value alone. |
+| `workspace` | local address | no | no | Names a `[workspaces.*]` block. Fixed at creation. |
+| `workspace_id` | UUID | no | no | A workspace Keymaster does not manage. Never alongside `workspace`. |
+
+The accepted `type` values are `arize`, `braintrust`, `clickhouse`, `datadog`,
+`grafana`, `langfuse`, `langsmith`, `newrelic`, `opik`, `otel-collector`,
+`posthog`, `ramp`, `s3`, `sentry`, `snowflake`, `weave`, and `webhook`. Anything
+else is rejected here, naming the field, rather than sent and refused remotely.
+
+**`config` is write-only, and this file is a secret because of it.** The shape
+of `config` depends on `type` and OpenRouter validates it server-side, so
+Keymaster passes the table through as JSON and checks nothing about it beyond
+its being a non-empty table. Every type that ships logs to a hosted service —
+`arize`, `braintrust`, `datadog`, `grafana`, `langfuse`, `langsmith`,
+`newrelic`, `opik`, `posthog`, `ramp`, `sentry`, `snowflake`, `weave` — needs
+that service's API key or token in `config`; `clickhouse` and `s3` need
+connection credentials; `otel-collector` and `webhook` need one whenever the
+endpoint you name requires an authorization header. **Assume `config` holds a
+secret: keep a file with a `[log_destinations.*]` block out of version control,
+or encrypt it the way you would any other secret.** Keymaster protects the value
+inside its own process — it is never printed, never written to state, never put
+in an error, and cleared from the buffers it passes through — but what the file
+itself holds is outside its reach.
+
+Because reads mask `config`, there is nothing to compare a desired value
+against. State records a **SHA-256 digest of the canonical JSON** of what
+Keymaster last wrote, and the planner compares digests: an equal digest is
+converged, and a changed one is an `update` whose diff says `config` and nothing
+else — never what changed, and never either value. A destination you imported
+has no stored digest, so its first apply writes `config` once and records the
+digest from then on. Apply does not read `config` back: it verifies every other
+field as usual and treats the `2xx` on the write as the configuration having
+landed, which is the only evidence the API offers. Two consequences follow, and
+both are real: a write that returned `2xx` but did not take effect is not
+detected, and an out-of-band edit to `config` in the dashboard is invisible
+until the configured value changes.
+
+`config` accepts strings, whole numbers, booleans, arrays, and nested tables,
+and nothing else — a fractional number and a TOML datetime are both refused,
+naming neither. Every accepted scalar has one exact JSON spelling, while a
+digest of a rendered float would be a comparison that depends on formatting, and
+a datetime has no JSON form at all. Write a timestamp as a string if a provider
+wants one.
+
+**`type` and the workspace are fixed when the destination is created.**
+OpenRouter's `PATCH` accepts neither, and Keymaster never replaces a destination
+on its own — doing so would stop and restart log forwarding without being asked.
+A change to either is planned as held-back drift naming the field, and the plan
+names the command that clears it: `openrouter-keymaster delete log-destination
+--id UUID`, after which the next apply creates the destination the configuration
+now describes.
+
+**The key allowlist is managed as always empty.** OpenRouter lets a destination
+carry a list of API key hashes whose traffic it forwards; Keymaster does not
+model it, and manages it as the empty list, so a destination forwards every key
+in its workspace. An allowlist OpenRouter holds — on a destination you imported,
+or after an out-of-band edit — is drift the next apply clears by sending `null`.
+
+`filter_rules` and the three `broadcast_*` flags are not modelled at all. They
+are never sent and never diffed, so whatever you set in the dashboard is
+preserved.
+
+**A destination that is bound and absent is reported, never recreated**, for the
+reason a workspace is: a new destination has a new UUID, and recreating one
+silently would restart log forwarding under an identity nothing recorded.
+
+Destinations are ordered after workspaces, and one naming a `workspace` block
+nothing is bound to yet is held back until the binding exists — the same rule
+keys and guardrails follow.
 
 ## `[receivers.ADDRESS]`
 

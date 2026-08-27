@@ -83,6 +83,8 @@ name is mutable and not unique — a plan reports a name match as
    ```sh
    openrouter-keymaster import guardrail cheap --id 6c7f5f5a-4f1b-4e2d-9a3c-1b2d3e4f5a6b
    openrouter-keymaster import key jobfeed --hash <HASH>
+   openrouter-keymaster import workspace golf_club --id <UUID>
+   openrouter-keymaster import log-destination club_audit --id <UUID>
    ```
 
 4. **Read the difference it reports.** Import makes no remote write; it tells
@@ -276,6 +278,8 @@ automatically:
 ```sh
 openrouter-keymaster state forget keys.jobfeed
 openrouter-keymaster state forget guardrails.cheap
+openrouter-keymaster state forget workspaces.golf_club
+openrouter-keymaster state forget log_destinations.club_audit
 ```
 
 Zero HTTP requests, zero receiver invocations, no configuration and no
@@ -289,6 +293,33 @@ The result document lists each one before it stops being yours.
 
 Removing a `[keys.*]` block from the configuration does none of this. That
 becomes an `orphaned_binding`: reported, tracked, and otherwise left alone.
+
+## Changing a log destination's type or workspace
+
+Both are fixed when the destination is created — OpenRouter's `PATCH` accepts
+neither — and Keymaster never replaces a destination on its own, because that
+would stop and restart log forwarding without being asked. So a plan that finds
+either changed holds the drift back, names the field, and names this procedure.
+
+1. **Read the plan.** The action is a `no_op` carrying the reason
+   `destination_fixed_at_creation`, with the field and the destination's UUID.
+
+2. **Delete the destination:**
+
+   ```sh
+   openrouter-keymaster delete log-destination --id <UUID>
+   ```
+
+   One `DELETE`, sent once, confirmed by a 404 on the read that follows. Only
+   then does the binding stop being yours. Nothing is forwarded through that
+   destination from this point on.
+
+3. **Apply.** The next `openrouter-keymaster apply` creates the destination the
+   configuration now describes, writes its `config`, and records the digest.
+
+Everything else about a destination is an ordinary patch, `config` included —
+though `config` travels only when its digest changed, because OpenRouter masks
+it on read and there is nothing to compare against.
 
 ## Recovering an interrupted operation
 

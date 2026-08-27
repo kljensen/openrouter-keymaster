@@ -401,9 +401,11 @@ fn recovery_of(action: &Action) -> Option<RecoveryReport> {
         ResourceAddress::Key(address) | ResourceAddress::Assignment(address) => Some(address),
         ResourceAddress::Workspace(_)
         | ResourceAddress::Guardrail(_)
+        | ResourceAddress::LogDestination(_)
         | ResourceAddress::RemoteKey(_)
         | ResourceAddress::RemoteGuardrail(_)
-        | ResourceAddress::RemoteWorkspace(_) => None,
+        | ResourceAddress::RemoteWorkspace(_)
+        | ResourceAddress::RemoteLogDestination(_) => None,
     };
     let hash = match &action.identity {
         Some(Identity::Key(hash)) => Some(hash),
@@ -485,6 +487,11 @@ pub(super) struct ChangeReport {
 }
 
 impl ChangeReport {
+    /// The configuration's name for the field this change is about.
+    pub(super) const fn field(&self) -> &'static str {
+        self.field
+    }
+
     pub(super) fn new(change: &FieldChange) -> Self {
         // `from` is whatever OpenRouter has — a display name, a description, a
         // provider slug, a reset schedule this build does not recognize — and
@@ -581,6 +588,10 @@ pub(super) enum ReasonReport {
     BudgetNotConverged {
         workspace: String,
     },
+    DestinationFixedAtCreation {
+        field: &'static str,
+        id: String,
+    },
 }
 
 impl ReasonReport {
@@ -658,6 +669,10 @@ impl ReasonReport {
             Reason::BudgetNotConverged { workspace } => Self::BudgetNotConverged {
                 workspace: workspace.to_string(),
             },
+            Reason::DestinationFixedAtCreation { field, id } => Self::DestinationFixedAtCreation {
+                field,
+                id: id.as_str().to_owned(),
+            },
         }
     }
 
@@ -674,15 +689,8 @@ impl ReasonReport {
                 "no remote resource carries the configured name, so recreating one cannot collide"
                     .to_owned()
             }
-            Self::NameCollision { holders } => format!(
-                "a remote resource already carries the configured name: {}",
-                holders.join(", ")
-            ),
-            Self::NameMatches { candidates } => format!(
-                "unbound, and a remote resource carries the configured name; bind one with \
-                 `openrouter-keymaster import`: {}",
-                candidates.join(", ")
-            ),
+            Self::NameCollision { holders } => collided(holders),
+            Self::NameMatches { candidates } => matched(candidates),
             Self::GenerationRaised { from, to } => {
                 format!("the configuration raises the generation from {from} to {to}")
             }
@@ -707,11 +715,9 @@ impl ReasonReport {
             Self::AssignmentUndesired => {
                 "the key is assigned to a guardrail the configuration does not ask for".to_owned()
             }
-            Self::RemovedFromConfiguration => {
-                "the configuration no longer describes this address; nothing is deleted or \
-                 forgotten"
-                    .to_owned()
-            }
+            Self::RemovedFromConfiguration => "the configuration no longer describes this \
+                 address; nothing is deleted or forgotten"
+                .to_owned(),
             Self::NotConfigured => "no local address owns this remote resource".to_owned(),
             Self::PromotionPending {
                 operation,
@@ -724,10 +730,7 @@ impl ReasonReport {
                 operation,
                 phase,
                 phase_at,
-            } => format!(
-                "operation {operation} stopped in phase `{phase}` at {phase_at}, and what \
-                 happened to it is an operator's to establish"
-            ),
+            } => unfinished(operation, phase, phase_at),
             Self::DeliveryRefused { at } => {
                 format!("the receiver definitely refused the plaintext at {at}")
             }
@@ -742,8 +745,45 @@ impl ReasonReport {
             Self::DefaultGuardrailOwnedElsewhere { id, owner } => owned_elsewhere(id, owner),
             Self::WorkspaceFixedAtCreation { observed, desired } => misplaced(observed, desired),
             Self::BudgetNotConverged { workspace } => unbudgeted(workspace),
+            Self::DestinationFixedAtCreation { field, id } => fixed_at_creation(field, id),
         }
     }
+}
+
+/// Why a log destination's `type` or workspace cannot be converged (ADR-0006,
+/// item 2).
+fn fixed_at_creation(field: &str, id: &str) -> String {
+    format!(
+        "`{field}` is fixed when a log destination is created and OpenRouter's `PATCH` accepts \
+         neither `type` nor `workspace_id`, so no write can converge this. Nothing does it for \
+         you: delete the destination explicitly with `openrouter-keymaster delete log-destination \
+         --id {id}`, and the next apply creates it as the configuration describes it"
+    )
+}
+
+/// The remote resources that already carry a configured name.
+fn collided(holders: &[String]) -> String {
+    format!(
+        "a remote resource already carries the configured name: {}",
+        holders.join(", ")
+    )
+}
+
+/// The remote resources an unbound address could be pointed at.
+fn matched(candidates: &[String]) -> String {
+    format!(
+        "unbound, and a remote resource carries the configured name; bind one with \
+         `openrouter-keymaster import`: {}",
+        candidates.join(", ")
+    )
+}
+
+/// An operation an earlier run left in a phase only an operator can settle.
+fn unfinished(operation: &str, phase: &str, phase_at: &str) -> String {
+    format!(
+        "operation {operation} stopped in phase `{phase}` at {phase_at}, and what happened to it \
+         is an operator's to establish"
+    )
 }
 
 /// Why a guardrail nothing has listed is planned as a create (ADR-0004, item 3).

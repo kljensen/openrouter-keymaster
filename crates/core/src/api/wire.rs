@@ -205,6 +205,64 @@ pub(super) struct Budget {
     pub reset_interval: Option<String>,
 }
 
+/// A log destination as `GET /observability/destinations` and
+/// `GET /observability/destinations/{id}` return it.
+///
+/// `config` is deliberately absent. Reads mask its secret fields, so the value
+/// that comes back compares equal to nothing in particular; the planner
+/// compares digests instead (ADR-0006, item 3). Leaving the field out of this
+/// type is what makes that structural rather than a rule to remember.
+///
+/// `filter_rules` and the three `broadcast_*` flags are absent for a different
+/// reason: Keymaster does not model them, so it neither sends nor diffs them,
+/// and an unmodelled field is preserved by being ignored.
+#[derive(Debug, Deserialize)]
+pub(super) struct LogDestination {
+    pub id: String,
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub name: String,
+    /// OpenRouter's own default is `true`, so an omitted field must not read as
+    /// a disabled destination — that would be drift this run then "fixed".
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub privacy_mode: bool,
+    #[serde(default)]
+    pub sampling_rate: Option<f64>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// The key allowlist Keymaster manages as always empty.
+    #[serde(default)]
+    pub api_key_hashes: Option<Vec<String>>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+const fn enabled_by_default() -> bool {
+    true
+}
+
+/// A log destination as a write returns it. See [`GuardrailEnvelope`].
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(super) enum LogDestinationEnvelope {
+    Wrapped(One<LogDestination>),
+    Bare(LogDestination),
+}
+
+impl LogDestinationEnvelope {
+    pub(super) fn into_destination(self) -> LogDestination {
+        match self {
+            Self::Wrapped(one) => one.data,
+            Self::Bare(destination) => destination,
+        }
+    }
+}
+
 /// One key-to-guardrail assignment.
 #[derive(Debug, Deserialize)]
 pub(super) struct Assignment {

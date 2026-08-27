@@ -1,11 +1,20 @@
 //! Making untrusted text safe to show an operator.
 //!
 //! Keymaster never accepts credential plaintext as input and never repeats it
-//! in a diagnostic. Three defences live here: a predicate that rejects a value
+//! in a diagnostic. Four defences live here: a predicate that rejects a value
 //! at the boundary where it is parsed, an escaper for text that reaches a
-//! terminal or a log, and a redactor for the one class of message Keymaster
-//! does not write itself — a deserializer's error, which may quote the
-//! offending input.
+//! terminal or a log, a redactor for the one class of message Keymaster does
+//! not write itself — a deserializer's error, which may quote the offending
+//! input — and a run-scoped registry of exact values to scrub.
+//!
+//! The registry exists for one thing: a log destination's `config`, which is
+//! the only configuration value that may hold a third-party credential
+//! (ADR-0006, item 4). Such a value carries no marker this module could
+//! recognize, so the values themselves are registered when the configuration
+//! is loaded and scrubbed by exact match from everything [`redact`] touches.
+
+use std::collections::BTreeSet;
+use std::sync::{PoisonError, RwLock};
 
 /// The marker every OpenRouter credential carries.
 ///
@@ -17,6 +26,55 @@ const CREDENTIAL_MARKER: &str = "sk-or-";
 
 /// What a redacted token is replaced with.
 const REPLACEMENT: &str = "[redacted]";
+
+/// The shortest value [`register`] will accept.
+///
+/// A heuristic, and stated as one (ADR-0006, item 4): credentials are long,
+/// while a short value such as a region, a hostname fragment, or a flag would
+/// otherwise be scrubbed out of every sentence that happens to contain it.
+pub const MIN_REGISTERED_LENGTH: usize = 16;
+
+/// Values registered for the rest of this run, longest first.
+///
+/// Process-lifetime by design: a value registered while the configuration is
+/// read has to be scrubbed from a message written at any later point in the
+/// run, and there is no scope narrower than the process that every one of
+/// those messages sits inside. The copy this holds is of a value that is
+/// already sitting in the configuration file on disk.
+static REGISTERED: RwLock<BTreeSet<String>> = RwLock::new(BTreeSet::new());
+
+/// Registers one value to be scrubbed by exact match for the rest of the run.
+///
+/// Values shorter than [`MIN_REGISTERED_LENGTH`] characters are ignored, which
+/// is what keeps the registry from turning ordinary words into `[redacted]`.
+pub fn register(value: &str) {
+    if value.chars().count() < MIN_REGISTERED_LENGTH {
+        return;
+    }
+    let mut registered = REGISTERED.write().unwrap_or_else(PoisonError::into_inner);
+    registered.insert(value.to_owned());
+}
+
+/// Replaces every registered value in `message`.
+///
+/// Longest first, so a registered value that contains another is replaced
+/// whole rather than leaving the tail of it behind.
+fn scrub_registered(message: &str) -> String {
+    let registered = REGISTERED.read().unwrap_or_else(PoisonError::into_inner);
+    if registered.is_empty() {
+        return message.to_owned();
+    }
+    let mut ordered: Vec<&String> = registered.iter().collect();
+    ordered.sort_by_key(|value| std::cmp::Reverse(value.len()));
+
+    let mut scrubbed = message.to_owned();
+    for value in ordered {
+        if scrubbed.contains(value.as_str()) {
+            scrubbed = scrubbed.replace(value.as_str(), REPLACEMENT);
+        }
+    }
+    scrubbed
+}
 
 /// Whether `value` contains something shaped like an OpenRouter credential.
 ///
@@ -64,14 +122,17 @@ pub fn printable(value: &str) -> String {
     rendered
 }
 
-/// Replaces every whitespace-delimited token that looks like a credential, and
-/// escapes what is left with [`printable`].
+/// Replaces every registered value and every whitespace-delimited token that
+/// looks like a credential, and escapes what is left with [`printable`].
+///
+/// Registered values are scrubbed first, and by exact match rather than by
+/// token, because such a value may contain whitespace.
 ///
 /// Whitespace is normalized to single spaces, which is acceptable for the
 /// error messages this is used on and keeps the implementation obvious.
 #[must_use]
 pub fn redact(message: &str) -> String {
-    message
+    scrub_registered(message)
         .split_whitespace()
         .map(|token| {
             if looks_like_credential(token) {
@@ -152,6 +213,28 @@ mod tests {
         assert_eq!(printable("one\ntwo"), "one\\ntwo");
         assert_eq!(printable("\u{202e}gnp.exe"), "\\u{202e}gnp.exe");
         assert!(!printable("\u{7}bell").contains('\u{7}'));
+    }
+
+    /// The registry is process-wide, so this value is unique to this test and
+    /// appears nowhere else in the crate.
+    const REGISTERED_SENTINEL: &str = "dd-api-key-REDACTION-UNIT-TEST-VALUE";
+
+    #[test]
+    fn a_registered_value_is_scrubbed_by_exact_match_wherever_it_appears() {
+        register(REGISTERED_SENTINEL);
+        let redacted = redact(&format!("cannot reach https://x/{REGISTERED_SENTINEL}?a=1"));
+        assert!(!redacted.contains("REDACTION-UNIT-TEST"), "{redacted}");
+        assert!(redacted.contains("[redacted]"), "{redacted}");
+    }
+
+    #[test]
+    fn a_short_value_is_never_registered() {
+        register("us-east-1");
+        assert_eq!(
+            redact("the bucket is in us-east-1"),
+            "the bucket is in us-east-1",
+            "a short value would otherwise be scrubbed out of every sentence containing it"
+        );
     }
 
     #[test]

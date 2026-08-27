@@ -53,10 +53,10 @@ use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, RETRY_AFTER};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
-use zeroize::Zeroize as _;
+use zeroize::Zeroizing;
 
 pub use create::{CreateKeyRequest, CreatedKey, KeyPlaintext};
-pub use error::ApiError;
+pub use error::{ApiError, Detail};
 pub use patch::Patch;
 pub use retry::RetryPolicy;
 pub use secret::{MANAGEMENT_KEY_VAR, ManagementKey};
@@ -220,11 +220,13 @@ impl Client {
     /// except a definite 4xx is ambiguous: the key may exist. Resolve it by
     /// refreshing remote state, never by calling this again (ADR-0002).
     pub fn create_key_once(&self, request: &CreateKeyRequest) -> Result<CreatedKey, ApiError> {
-        let mut body = self.post_once(&["keys"], request)?;
+        // The plaintext is in these bytes. Every response body Keymaster reads
+        // is held in a buffer that clears itself when it drops, so this copy
+        // goes whether the plaintext was moved into a `CreatedKey` or lost to a
+        // parse failure — and it goes on the failure paths too, which a
+        // `zeroize()` call at the end of this function could never reach.
+        let body = self.post_once(&["keys"], request)?;
         let created = create::parse_response(&body);
-        // The plaintext is in these bytes. It has either been moved into a
-        // `CreatedKey` or lost to a parse failure; either way this copy goes.
-        body.zeroize();
         created?.into_created_key()
     }
 
@@ -314,6 +316,42 @@ impl Client {
             .map(|_| ())
     }
 
+    /// Sends one `POST` whose body this crate serialized itself, and parses
+    /// the response.
+    ///
+    /// For the one request body that may hold a third-party credential: a log
+    /// destination's `config` is rendered into a buffer this crate clears
+    /// rather than into one `serde_json` allocates from a `Serialize`
+    /// implementation that would then have to exist (ADR-0006, item 4). What
+    /// `reqwest` copies on its way to the socket is beyond reach, exactly as it
+    /// is for a created key's plaintext on the way back.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::post_json_once`].
+    pub(crate) fn post_json_text_once<T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        body: &str,
+    ) -> Result<T, ApiError> {
+        parse_json(&self.write_text_once(reqwest::Method::POST, segments, body)?)
+    }
+
+    /// Sends one `PATCH` whose body this crate serialized itself, and reads the
+    /// response without interpreting it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::post_json_text_once`].
+    pub(crate) fn patch_text_once_discarding_body(
+        &self,
+        segments: &[&str],
+        body: &str,
+    ) -> Result<(), ApiError> {
+        self.write_text_once(reqwest::Method::PATCH, segments, body)
+            .map(|_| ())
+    }
+
     /// Sends one write and never repeats it.
     ///
     /// There is no retry loop here and no parameter that would enable one. A
@@ -321,8 +359,26 @@ impl Client {
     /// parse — is reported as it happened, and the caller resolves the
     /// ambiguity by refreshing remote state, never by sending the request
     /// again (ADR-0002).
-    fn post_once<B: Serialize>(&self, segments: &[&str], body: &B) -> Result<Vec<u8>, ApiError> {
+    fn post_once<B: Serialize>(
+        &self,
+        segments: &[&str],
+        body: &B,
+    ) -> Result<Zeroizing<Vec<u8>>, ApiError> {
         self.write_once(reqwest::Method::POST, segments, body)
+    }
+
+    /// One write request carrying a body already rendered as JSON text.
+    fn write_text_once(
+        &self,
+        method: reqwest::Method,
+        segments: &[&str],
+        body: &str,
+    ) -> Result<Zeroizing<Vec<u8>>, ApiError> {
+        self.send_once(method, segments, |request| {
+            request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.to_owned())
+        })
     }
 
     /// One write request carrying a JSON body, sent exactly once.
@@ -331,7 +387,7 @@ impl Client {
         method: reqwest::Method,
         segments: &[&str],
         body: &B,
-    ) -> Result<Vec<u8>, ApiError> {
+    ) -> Result<Zeroizing<Vec<u8>>, ApiError> {
         self.send_once(method, segments, |request| request.json(body))
     }
 
@@ -344,7 +400,7 @@ impl Client {
         method: reqwest::Method,
         segments: &[&str],
         shape: impl FnOnce(reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestBuilder,
-    ) -> Result<Vec<u8>, ApiError> {
+    ) -> Result<Zeroizing<Vec<u8>>, ApiError> {
         let url = url::build(&self.base_url, segments, &[]);
         let sent = shape(self.http.request(method, &url))
             .send()
@@ -353,7 +409,7 @@ impl Client {
     }
 
     /// Sends a read until it succeeds or the retry policy is spent.
-    fn read_with_retry(&self, url: &str) -> Result<Vec<u8>, ApiError> {
+    fn read_with_retry(&self, url: &str) -> Result<Zeroizing<Vec<u8>>, ApiError> {
         let mut attempt: u32 = 1;
         loop {
             let attempted = self.attempt_read(url);
@@ -444,9 +500,26 @@ impl Client {
     ///
     /// One byte past the cap is read deliberately: it is how an oversized body
     /// is told from one that exactly fills the budget.
-    fn read_body(&self, response: reqwest::blocking::Response) -> Result<Vec<u8>, ApiError> {
+    ///
+    /// The buffer clears itself when it drops, and it is wrapped before the
+    /// first byte arrives rather than on the way out, so every path clears it:
+    /// the success, the oversized refusal, the read that failed partway, and —
+    /// the one that matters most — the failing status whose body
+    /// [`Client::consume`] hands to [`ApiError::from_status`] and then drops.
+    /// Two response bodies can hold a secret. A created key's plaintext comes
+    /// back in one, and a log destination's validation error can quote the
+    /// `config` it was given, which may be a third-party credential (ADR-0006,
+    /// item 4). Neither is a rule a call site has to remember.
+    ///
+    /// What is below this is not reachable from here: `reqwest` and `rustls`
+    /// buffer the response on its way in, and `serde_json` allocates a scratch
+    /// buffer to unescape a string. Keymaster clears what it owns.
+    fn read_body(
+        &self,
+        response: reqwest::blocking::Response,
+    ) -> Result<Zeroizing<Vec<u8>>, ApiError> {
         let limit = self.options.max_response_bytes;
-        let mut body = Vec::new();
+        let mut body = Zeroizing::new(Vec::new());
         let read = response
             .take(limit as u64 + 1)
             .read_to_end(&mut body)
@@ -473,7 +546,7 @@ impl Client {
             };
         }
         ApiError::Transport {
-            message: crate::redaction::redact(&error.to_string()),
+            message: crate::redaction::redact(&error.to_string()).into(),
         }
     }
 }
@@ -528,7 +601,8 @@ fn definitive_without_body(status: u16) -> Option<ApiError> {
 struct Attempt {
     retryable: bool,
     retry_after: Option<String>,
-    result: Result<Vec<u8>, ApiError>,
+    /// The body, in a buffer that clears itself. See [`Client::read_body`].
+    result: Result<Zeroizing<Vec<u8>>, ApiError>,
 }
 
 /// The one approved HTTP client constructor.
@@ -580,4 +654,38 @@ fn build_http(
 /// Parses a response body, reporting a failure in Keymaster's own terms.
 fn parse_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, ApiError> {
     serde_json::from_slice(body).map_err(|error| ApiError::invalid_response(&error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every response body is read into a buffer that clears itself, and the
+    /// writes that may carry a secret in either direction return one too.
+    ///
+    /// A type assertion rather than a behavioural test, because the property is
+    /// a type: there is no way to observe freed memory from a test, and the
+    /// thing that would break this is somebody changing a signature back to a
+    /// bare `Vec<u8>`. That stops compiling here.
+    ///
+    /// Two response bodies can hold a secret — a created key's plaintext, and a
+    /// log destination's validation error quoting the `config` it refused — and
+    /// both arrive through these.
+    /// The signature every response read has to keep.
+    type ReadBody =
+        fn(&Client, reqwest::blocking::Response) -> Result<Zeroizing<Vec<u8>>, ApiError>;
+
+    /// The signature the two destination writes have to keep.
+    type WriteText = for<'a> fn(
+        &Client,
+        reqwest::Method,
+        &[&'a str],
+        &str,
+    ) -> Result<Zeroizing<Vec<u8>>, ApiError>;
+
+    #[test]
+    fn every_response_body_is_read_into_a_buffer_that_clears_itself() {
+        let _read: ReadBody = Client::read_body;
+        let _write: WriteText = Client::write_text_once;
+    }
 }

@@ -477,8 +477,9 @@ fn record_default_identities(
 ///
 /// Dependencies before dependents: a guardrail exists before the key it
 /// secures, and both exist before the assignment that joins them.
-const PHASES: [Phase; 4] = [
+const PHASES: [Phase; 5] = [
     Phase::Workspaces,
+    Phase::LogDestinations,
     Phase::Guardrails,
     Phase::Keys,
     Phase::Assignments,
@@ -488,6 +489,7 @@ const PHASES: [Phase; 4] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Workspaces,
+    LogDestinations,
     Guardrails,
     Keys,
     Assignments,
@@ -497,12 +499,14 @@ enum Phase {
 const fn phase_of(address: &ResourceAddress) -> Option<Phase> {
     match address {
         ResourceAddress::Workspace(_) => Some(Phase::Workspaces),
+        ResourceAddress::LogDestination(_) => Some(Phase::LogDestinations),
         ResourceAddress::Guardrail(_) => Some(Phase::Guardrails),
         ResourceAddress::Key(_) => Some(Phase::Keys),
         ResourceAddress::Assignment(_) => Some(Phase::Assignments),
         ResourceAddress::RemoteKey(_)
         | ResourceAddress::RemoteGuardrail(_)
-        | ResourceAddress::RemoteWorkspace(_) => None,
+        | ResourceAddress::RemoteWorkspace(_)
+        | ResourceAddress::RemoteLogDestination(_) => None,
     }
 }
 
@@ -594,6 +598,12 @@ impl Apply<'_> {
             }
             (ResourceAddress::Workspace(address), ActionKind::Update) => {
                 self.update_workspace(address, action)
+            }
+            (ResourceAddress::LogDestination(address), ActionKind::Create) => {
+                self.create_log_destination(address, state)
+            }
+            (ResourceAddress::LogDestination(address), ActionKind::Update) => {
+                self.update_log_destination(address, action, state)
             }
             (ResourceAddress::Guardrail(address), ActionKind::Create) => {
                 self.create_guardrail(address, state)
@@ -896,6 +906,131 @@ impl Apply<'_> {
             }
         }
         written
+    }
+
+    /// Creates a log destination and records its identity and configuration
+    /// digest before anything else runs.
+    ///
+    /// The digest is recorded with the identity rather than afterwards, for the
+    /// reason the identity itself is recorded first: a destination that exists
+    /// with a configuration nothing recorded would have its `config` rewritten
+    /// on every later run, and `config` is the one field no read can check
+    /// (ADR-0006, item 3).
+    ///
+    /// The failure names the HTTP status and OpenRouter's error code and
+    /// nothing else. A validation error on this endpoint can quote the value it
+    /// refused, and that value may be a credential (ADR-0006, item 4).
+    fn create_log_destination(
+        &self,
+        address: &Address,
+        state: &mut State,
+    ) -> Result<ActionOutcome, String> {
+        let desired = self
+            .config
+            .log_destinations
+            .get(address)
+            .ok_or_else(|| unconfigured("log destination", address))?;
+        let workspace = plan::destination_placement(state, desired)
+            .identity()
+            .cloned()
+            .or_else(|| self.workspace.cloned());
+
+        let body = crate::api::create_destination_body(desired, workspace.as_ref());
+        let created = self.writer.create_log_destination(&body).map_err(|error| {
+            format!(
+                "the log destination could not be created: {status}. It may exist all the \
+                     same — the request was sent once and is never repeated — and the next plan \
+                     reports a name collision if it does.",
+                status = error.status_and_code()
+            )
+        })?;
+
+        let id = created.id.clone();
+        state
+            .bind_log_destination(
+                address,
+                id.clone(),
+                Some(desired.config.digest()),
+                Origin::Created,
+                now(),
+            )
+            .map_err(|error| untracked_destination(&id, &error.to_string()))?;
+        self.lock
+            .write(state)
+            .map_err(|error| untracked_destination(&id, &error.to_string()))?;
+
+        Ok(ActionOutcome::applied(format!(
+            "created log destination {id}, and recorded its identity and the digest of the \
+             configuration it was created with before anything else ran"
+        )))
+    }
+
+    /// Brings an existing log destination's managed fields to the configured
+    /// values.
+    ///
+    /// `config` travels only when the plan says its digest changed, and the new
+    /// digest is recorded after the write: a `2xx` is the only evidence the API
+    /// offers that a write-only field landed, and apply does not read it back
+    /// (ADR-0006, item 3).
+    fn update_log_destination(
+        &self,
+        address: &Address,
+        action: &Action,
+        state: &mut State,
+    ) -> Result<ActionOutcome, String> {
+        let desired = self
+            .config
+            .log_destinations
+            .get(address)
+            .ok_or_else(|| unconfigured("log destination", address))?;
+        let Some(Identity::LogDestination(id)) = &action.identity else {
+            return Err(
+                "the log destination's identity is not known, so it cannot be patched".to_owned(),
+            );
+        };
+        let writes_config = action.changes.iter().any(|change| change.field == "config");
+
+        let body = crate::api::update_destination_body(desired, writes_config);
+        self.writer
+            .update_log_destination(id, &body)
+            .map_err(|error| {
+                format!(
+                    "the log destination write failed: {status}. It was sent once and is never \
+                     repeated; the read that follows reports whether it took effect.",
+                    status = error.status_and_code()
+                )
+            })?;
+
+        if writes_config {
+            // Re-binding the identity the address already holds is how a
+            // binding takes a new digest; it changes nothing else, and the
+            // origin it is handed is the one the binding already records.
+            let origin = state
+                .log_destination(address)
+                .map_or(Origin::Imported, |binding| binding.origin);
+            state
+                .bind_log_destination(
+                    address,
+                    id.clone(),
+                    Some(desired.config.digest()),
+                    origin,
+                    now(),
+                )
+                .map_err(|error| untracked_destination(id, &error.to_string()))?;
+            self.lock
+                .write(state)
+                .map_err(|error| untracked_destination(id, &error.to_string()))?;
+        }
+
+        Ok(ActionOutcome::applied(if writes_config {
+            format!(
+                "patched log destination {id}, wrote its configuration, and recorded the digest. \
+                 OpenRouter masks a destination's configuration on read, so the `2xx` is the only \
+                 evidence the API offers that it landed."
+            )
+        } else {
+            format!("patched log destination {id}")
+        }))
     }
 
     /// Creates a guardrail and records its identity before anything else runs.
@@ -1350,6 +1485,15 @@ fn untracked_workspace(id: &Uuid, why: &str) -> String {
         "workspace {id} was created but its identity could not be recorded: {why}. Bind it with \
          `openrouter-keymaster import workspace <address> --id {id}` before applying again, or a \
          second workspace will be created under the same name."
+    )
+}
+
+/// A log destination that exists remotely and could not be recorded locally.
+fn untracked_destination(id: &Uuid, why: &str) -> String {
+    format!(
+        "log destination {id} was written but the state this run should have recorded could not \
+         be: {why}. Bind it with `openrouter-keymaster import log-destination <address> --id {id}` \
+         before applying again, or a second destination will be created under the same name."
     )
 }
 

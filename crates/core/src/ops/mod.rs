@@ -65,8 +65,10 @@ pub use crate::receiver::{Acknowledgement, DeliveryMetadata, Outcome as Delivery
 
 pub use apply::apply;
 pub use fingerprint::PlanFingerprint;
-pub use import::{import_guardrail, import_key, import_workspace};
-pub use lifecycle::{decommission, delete_key, delete_workspace, forget, retire};
+pub use import::{import_guardrail, import_key, import_log_destination, import_workspace};
+pub use lifecycle::{
+    decommission, delete_key, delete_log_destination, delete_workspace, forget, retire,
+};
 pub use recover::{Finding, recover_inspect, recover_replace, recover_resolve};
 pub use rotate::rotate;
 
@@ -190,7 +192,8 @@ impl Context {
 /// A block that names no workspace is not a problem — the scope is where it
 /// gets placed. Naming a different one is, because a scoped run creates
 /// nothing outside its scope and reports nothing from outside it either, so
-/// such a block could never converge.
+/// such a block could never converge. Log destinations are covered on the same
+/// terms as everything else placed in a workspace (ADR-0006, item 1).
 fn refuse_other_workspaces(config: &Config, scope: &Uuid) -> Result<(), ConfigError> {
     let problems: Vec<Problem> = config
         .keys
@@ -210,6 +213,21 @@ fn refuse_other_workspaces(config: &Config, scope: &Uuid) -> Result<(), ConfigEr
                     message: misplaced(scope),
                 }),
         )
+        .chain(
+            config
+                .log_destinations
+                .iter()
+                .filter(|(_, destination)| {
+                    destination
+                        .workspace_id
+                        .as_ref()
+                        .is_some_and(|id| id != scope)
+                })
+                .map(|(address, _)| Problem {
+                    path: format!("log_destinations.{address}.workspace_id"),
+                    message: misplaced(scope),
+                }),
+        )
         .collect();
     if problems.is_empty() {
         return Ok(());
@@ -219,9 +237,9 @@ fn refuse_other_workspaces(config: &Config, scope: &Uuid) -> Result<(), ConfigEr
 
 /// Refuses the blocks a scoped run could never place or own (ADR-0004, item 5).
 ///
-/// Three rules, all the same rule seen from different sides. A key or guardrail
-/// whose `workspace` address is bound elsewhere would be created outside the
-/// scope. A workspace block bound elsewhere is another club's. And a workspace
+/// Three rules, all the same rule seen from different sides. A key, guardrail,
+/// or log destination whose `workspace` address is bound elsewhere would be
+/// created outside the scope. A workspace block bound elsewhere is another club's. And a workspace
 /// block bound to nothing at all cannot be created here either: a scoped run
 /// places what it creates in the scope, and the UUID `POST /workspaces` returns
 /// could never be the one it was scoped to. The operator applies unscoped once,
@@ -249,6 +267,16 @@ fn refuse_out_of_scope(config: &Config, state: &State, scope: &Uuid) -> Result<(
                 .filter(|(_, rail)| rail.workspace.as_ref().is_some_and(elsewhere))
                 .map(|(address, _)| Problem {
                     path: format!("guardrails.{address}.workspace"),
+                    message: misplaced(scope),
+                }),
+        )
+        .chain(
+            config
+                .log_destinations
+                .iter()
+                .filter(|(_, destination)| destination.workspace.as_ref().is_some_and(elsewhere))
+                .map(|(address, _)| Problem {
+                    path: format!("log_destinations.{address}.workspace"),
                     message: misplaced(scope),
                 }),
         )
@@ -457,12 +485,22 @@ fn observe(context: &Context) -> Result<Observation, Error> {
 ///
 /// Shared with apply, which reads one under its lock before planning and a
 /// second one afterwards to verify what it wrote.
+/// The destination listing is the one read that needs an earlier answer:
+/// `GET /observability/destinations` reports one workspace at a time, so the
+/// workspaces are read first and their identities are what make the destination
+/// picture complete (ADR-0006, item 1).
 fn snapshot(reader: &Reader<'_>) -> Result<Snapshot, ApiError> {
+    let workspaces = reader.list_workspaces()?;
+    let workspace_ids: Vec<Uuid> = workspaces
+        .iter()
+        .map(|workspace| workspace.id.clone())
+        .collect();
     Ok(Snapshot {
         keys: reader.list_keys(None)?,
         guardrails: reader.list_guardrails(None)?,
         assignments: reader.list_assignments()?,
-        workspaces: reader.list_workspaces()?,
+        log_destinations: reader.list_log_destinations(&workspace_ids)?,
+        workspaces,
     })
 }
 

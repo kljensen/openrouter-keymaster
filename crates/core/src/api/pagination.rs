@@ -135,7 +135,8 @@ fn stalled(resource: &str, offset: usize, returned: usize, page_number: usize) -
             "listing {resource} made no progress: page {page_number}, at offset {offset}, \
              returned {returned} record(s) and every one of them had an identity already seen. \
              The server appears to be ignoring the offset, so the snapshot would be incomplete."
-        ),
+        )
+        .into(),
     }
 }
 
@@ -148,7 +149,8 @@ fn too_many(resource: &str, collected: usize, cap: usize, total: Option<u64>) ->
         message: format!(
             "listing {resource} returned {collected} distinct record(s) {claimed}, past the \
              {cap} this listing allows; the snapshot was abandoned rather than truncated"
-        ),
+        )
+        .into(),
     }
 }
 
@@ -157,7 +159,8 @@ fn too_many_pages(resource: &str, max_pages: usize) -> ApiError {
         message: format!(
             "listing {resource} read {max_pages} pages without reaching the end; the snapshot was \
              abandoned rather than truncated"
-        ),
+        )
+        .into(),
     }
 }
 

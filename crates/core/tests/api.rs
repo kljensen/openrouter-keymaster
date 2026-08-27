@@ -16,8 +16,9 @@ use openrouter_keymaster_core::config::{ResetInterval, Usd};
 use openrouter_keymaster_core::ids::{KeyHash, Uuid};
 use serde_json::{Value, json};
 use support::fixtures::{
-    FAKE_GUARDRAIL_ID, FAKE_WORKSPACE_ID, OTHER_FAKE_GUARDRAIL_ID, api_error, api_key, assignment,
-    counted_page, empty_page, guardrail, key_pages, page,
+    FAKE_DESTINATION_ID, FAKE_GUARDRAIL_ID, FAKE_WORKSPACE_ID, OTHER_FAKE_DESTINATION_ID,
+    OTHER_FAKE_GUARDRAIL_ID, api_error, api_key, assignment, counted_page, empty_page, guardrail,
+    key_pages, log_destination, page,
 };
 use support::http::{Scripted, TestServer, json_response};
 use support::sentinel::SECRET_SENTINEL_KEY;
@@ -561,4 +562,124 @@ fn a_delete_that_is_refused_reports_the_status_and_is_never_repeated() {
         "the caller decides what a 404 means for a delete: {error}"
     );
     server.assert_request_count(1);
+}
+
+// --- log destinations (ADR-0006) --------------------------------------------
+
+/// `GET /observability/destinations` answers for one workspace at a time — the
+/// credential's default workspace unless `workspace_id` names another — so a
+/// complete picture is that listing once with no workspace and once per
+/// workspace the snapshot found.
+#[test]
+fn every_workspace_is_listed_and_a_destination_seen_twice_is_reported_once() {
+    let server = TestServer::start();
+    let other_workspace = "00000000-0000-4000-8000-00000000000e";
+    // The default workspace's listing and `FAKE_WORKSPACE_ID`'s return the same
+    // destination, which is what makes the deduplication observable.
+    for query in ["", FAKE_WORKSPACE_ID] {
+        server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/observability/destinations"))
+                .and(wiremock::matchers::query_param("offset", "0"))
+                .and(match_workspace(query))
+                .respond_with(json_response(
+                    200,
+                    &page(vec![log_destination(
+                        FAKE_DESTINATION_ID,
+                        "datadog",
+                        "audit",
+                    )]),
+                ))
+                .with_priority(1),
+        );
+    }
+    server.mount(
+        Mock::given(method("GET"))
+            .and(path("/api/v1/observability/destinations"))
+            .and(wiremock::matchers::query_param("offset", "0"))
+            .and(match_workspace(other_workspace))
+            .respond_with(json_response(
+                200,
+                &page(vec![log_destination(
+                    OTHER_FAKE_DESTINATION_ID,
+                    "webhook",
+                    "other",
+                )]),
+            ))
+            .with_priority(1),
+    );
+    // Anything else — every second page — ends its listing.
+    server.mount(
+        Mock::given(method("GET"))
+            .and(path("/api/v1/observability/destinations"))
+            .respond_with(json_response(200, &empty_page()))
+            .with_priority(9),
+    );
+
+    let client = client(&server);
+    let workspaces = [
+        Uuid::parse(FAKE_WORKSPACE_ID).expect("a valid UUID"),
+        Uuid::parse(other_workspace).expect("a valid UUID"),
+    ];
+    let destinations = Reader::new(&client)
+        .list_log_destinations(&workspaces)
+        .expect("the destinations");
+
+    let identities: Vec<&str> = destinations
+        .iter()
+        .map(|destination| destination.id.as_str())
+        .collect();
+    assert_eq!(
+        identities,
+        vec![FAKE_DESTINATION_ID, OTHER_FAKE_DESTINATION_ID],
+        "one entry per identity, in identity order"
+    );
+    assert_eq!(destinations[0].kind, "datadog");
+    assert!(
+        destinations[0].api_key_hashes.is_empty(),
+        "a `null` allowlist is the empty one Keymaster manages"
+    );
+}
+
+/// Matches the `workspace_id` query parameter, or its absence for `""`.
+fn match_workspace(workspace: &str) -> impl wiremock::Match + use<> {
+    let expected = workspace.to_owned();
+    move |request: &wiremock::Request| {
+        let found = request
+            .url
+            .query_pairs()
+            .find(|(name, _)| name == "workspace_id")
+            .map(|(_, value)| value.into_owned());
+        found.unwrap_or_default() == expected
+    }
+}
+
+#[test]
+fn a_destination_whose_identity_or_sampling_rate_cannot_be_read_fails_the_snapshot() {
+    for (description, mut record) in [
+        (
+            "an unusable id",
+            log_destination("not-a-uuid", "datadog", "audit"),
+        ),
+        (
+            "a sampling rate outside the documented range",
+            log_destination(FAKE_DESTINATION_ID, "datadog", "audit"),
+        ),
+    ] {
+        if description.starts_with("a sampling") {
+            record["sampling_rate"] = json!(7.5);
+        }
+        let server = TestServer::start();
+        server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/observability/destinations"))
+                .respond_with(json_response(200, &page(vec![record]))),
+        );
+
+        let client = client(&server);
+        let error = Reader::new(&client)
+            .list_log_destinations(&[])
+            .expect_err(description);
+        assert_eq!(error.kind(), "invalid_response", "{description}");
+    }
 }

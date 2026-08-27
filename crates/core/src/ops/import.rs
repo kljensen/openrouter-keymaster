@@ -210,6 +210,99 @@ pub fn import_workspace(
     )))
 }
 
+/// Binds one log destination to a local address, by its immutable UUID.
+///
+/// No `config` digest is recorded, and that is the whole of what makes an
+/// imported destination different from a created one: Keymaster did not write
+/// the configuration OpenRouter holds, reads mask it, so there is no digest it
+/// could honestly record. The first apply after this writes the configuration
+/// once and records the digest then (ADR-0006, item 3), which the report says.
+///
+/// # Errors
+///
+/// As [`import_key`].
+pub fn import_log_destination(
+    context: Context,
+    name: &str,
+    id: &str,
+) -> Result<Outcome<ImportReport>, Error> {
+    let address = local_address(name)?;
+    let id = Uuid::parse(id).map_err(|error| identifier("--id", &error))?;
+
+    let file = StateFile::new(&context.paths.state);
+    let lock = file.lock()?;
+    let config = context.config()?;
+    let desired = config
+        .log_destinations
+        .get(&address)
+        .ok_or_else(|| ImportError::not_configured("log destination", &address))?;
+    let mut state = lock.read()?;
+    context.check_scope(&config, &state)?;
+
+    let client = context.client()?;
+    let observed = Reader::new(&client)
+        .get_log_destination(&id)
+        .map_err(|error| absent_or(error, &format!("log destination {id}")))?;
+    check_destination_bindings(&state, &address, &id)?;
+
+    let placed = plan::destination_placement(&state, desired)
+        .identity()
+        .cloned()
+        .or_else(|| context.workspace.clone());
+    // The digest the binding already records, not `None`. A first import has
+    // none, so `config` shows as a difference the first apply will write; a
+    // repeated import must not claim the same difference again, because the
+    // configuration has not changed and nothing would be written.
+    let stored = state
+        .log_destination(&address)
+        .and_then(|binding| binding.config_digest.clone());
+    let changes =
+        plan::log_destination_changes(desired, Some(&observed), placed.as_ref(), stored.as_deref());
+    let bound = record(&lock, &mut state, |state| {
+        state.bind_log_destination(&address, id.clone(), None, Origin::Imported, now())
+    })?;
+
+    Ok(Outcome::ok(ImportReport::log_destination(
+        &address,
+        &id,
+        origin_of(
+            state
+                .log_destination(&address)
+                .map(|binding| binding.origin),
+        ),
+        &observed.name,
+        &changes,
+        bound,
+    )))
+}
+
+/// Refuses a log destination binding that would break the one-to-one rule.
+fn check_destination_bindings(
+    state: &State,
+    address: &Address,
+    id: &Uuid,
+) -> Result<(), ImportError> {
+    if let Some(owner) = state.address_owning_log_destination(id)
+        && owner != address
+    {
+        return Err(ImportError::OwnedElsewhere {
+            identity: format!("log destination {id}"),
+            address: address.clone(),
+            owner: owner.clone(),
+        });
+    }
+    if let Some(binding) = state.log_destination(address)
+        && binding.id != *id
+    {
+        return Err(ImportError::AddressBound {
+            address: address.clone(),
+            bound: format!("log destination {id}", id = binding.id),
+            offered: format!("log destination {id}"),
+        });
+    }
+    Ok(())
+}
+
 /// Binds the guardrail block a workspace names as its default to the
 /// deterministic identity the workspace object carries.
 ///

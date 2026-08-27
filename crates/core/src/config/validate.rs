@@ -18,8 +18,9 @@ use time::{OffsetDateTime, UtcOffset};
 
 use super::wire;
 use super::{
-    BUDGET_INTERVALS, BudgetInterval, Config, Defaults, Guardrail, Key, Managed, Problem, Receiver,
-    ResetInterval, SCHEMA_VERSION, Usd, Workspace,
+    BUDGET_INTERVALS, BudgetInterval, Config, DESTINATION_TYPES, Defaults, DestinationConfig,
+    DestinationType, Guardrail, Key, LogDestination, Managed, Problem, Receiver, ResetInterval,
+    SCHEMA_VERSION, SamplingRate, Usd, Workspace,
 };
 use crate::ids::{Address, RemoteName, UserId, Uuid};
 use crate::redaction::{looks_like_credential, printable};
@@ -80,6 +81,7 @@ pub(super) fn validate(document: wire::Document) -> Result<Config, Vec<Problem>>
     validator.duplicate_addresses("guardrails", &declared_guardrails);
     validator.duplicate_addresses("keys", document.keys.keys());
     validator.duplicate_addresses("receivers", &declared_receivers);
+    validator.duplicate_addresses("log_destinations", document.log_destinations.keys());
 
     let receivers = validator.receivers(document.receivers);
     let workspaces = validator.workspaces(document.workspaces, &declared_guardrails);
@@ -91,10 +93,16 @@ pub(super) fn validate(document: wire::Document) -> Result<Config, Vec<Problem>>
         &declared_receivers,
         &declared_workspaces,
     );
+    let log_destinations =
+        validator.log_destinations(document.log_destinations, &declared_workspaces);
 
     validator.duplicate_names("workspaces", workspaces.iter().map(|(a, w)| (a, &w.name)));
     validator.duplicate_names("guardrails", guardrails.iter().map(|(a, g)| (a, &g.name)));
     validator.duplicate_names("keys", keys.iter().map(|(a, k)| (a, &k.name)));
+    validator.duplicate_names(
+        "log_destinations",
+        log_destinations.iter().map(|(a, d)| (a, &d.name)),
+    );
     validator.default_guardrails(&workspaces, &guardrails);
 
     validator.finish(Config {
@@ -103,6 +111,7 @@ pub(super) fn validate(document: wire::Document) -> Result<Config, Vec<Problem>>
         guardrails,
         keys,
         receivers,
+        log_destinations,
     })
 }
 
@@ -244,6 +253,117 @@ impl Validator {
                 Some((address, key))
             })
             .collect()
+    }
+
+    fn log_destinations(
+        &mut self,
+        wire: BTreeMap<String, wire::LogDestination>,
+        workspaces: &BTreeSet<String>,
+    ) -> BTreeMap<Address, LogDestination> {
+        wire.into_iter()
+            .filter_map(|(raw, block)| {
+                let address = self.address("log_destinations", &raw)?;
+                let destination = self.log_destination(&raw, block, workspaces)?;
+                Some((address, destination))
+            })
+            .collect()
+    }
+
+    fn log_destination(
+        &mut self,
+        raw: &str,
+        block: wire::LogDestination,
+        workspaces: &BTreeSet<String>,
+    ) -> Option<LogDestination> {
+        let path = format!("log_destinations.{}", safe_segment(raw));
+        let before = self.count();
+
+        let kind = self.destination_type(&format!("{path}.type"), block.r#type);
+        let name = self.name(&format!("{path}.name"), block.name);
+        let config = self.destination_config(&format!("{path}.config"), block.config);
+        let sampling_rate =
+            self.sampling_rate(&format!("{path}.sampling_rate"), block.sampling_rate);
+        let (workspace, workspace_id) =
+            self.placement(&path, block.workspace, block.workspace_id, workspaces);
+
+        let destination = LogDestination {
+            kind: kind?,
+            name: name?,
+            config: config?,
+            // OpenRouter's own defaults, so a block that says nothing describes
+            // the destination a bare `POST` would create.
+            enabled: block.enabled.unwrap_or(true),
+            privacy_mode: block.privacy_mode.unwrap_or(false),
+            sampling_rate,
+            workspace,
+            workspace_id,
+        };
+        (self.count() == before).then_some(destination)
+    }
+
+    /// One of the destination types OpenRouter documents.
+    ///
+    /// The list is hardcoded rather than pattern-matched, so a `type` this
+    /// build does not know is reported here — naming the field, never the value
+    /// — instead of being sent and refused remotely.
+    fn destination_type(&mut self, path: &str, value: Option<String>) -> Option<DestinationType> {
+        let Some(value) = value else {
+            self.problem(path, "is required");
+            return None;
+        };
+        match DestinationType::parse(&value) {
+            Some(kind) => Some(kind),
+            None => {
+                self.problem(
+                    path,
+                    format!(
+                        "is not a destination type OpenRouter accepts; the types are {}",
+                        joined(&DESTINATION_TYPES.map(DestinationType::as_str))
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    /// The provider-specific configuration, which must be present and must say
+    /// something.
+    ///
+    /// Nothing else is checked. Its shape depends on `type` and OpenRouter
+    /// validates it server-side, and no rule here could look at a value without
+    /// risking putting it in a message (ADR-0006, item 4).
+    fn destination_config(
+        &mut self,
+        path: &str,
+        value: Option<DestinationConfig>,
+    ) -> Option<DestinationConfig> {
+        let Some(config) = value else {
+            self.problem(path, "is required");
+            return None;
+        };
+        if config.is_empty() {
+            self.problem(
+                path,
+                "must not be empty; a destination's configuration is what tells OpenRouter where \
+                 to send logs, and its fields depend on `type`",
+            );
+            return None;
+        }
+        Some(config)
+    }
+
+    fn sampling_rate(&mut self, path: &str, value: Option<wire::Number>) -> Option<SamplingRate> {
+        let rate = match value? {
+            wire::Number::Integer(whole) => whole as f64,
+            wire::Number::Float(fractional) => fractional,
+        };
+        match SamplingRate::from_rate(rate) {
+            Ok(rate) => Some(rate),
+            Err(problem) => {
+                self.problem(path, problem.message());
+                None
+            }
+        }
     }
 
     /// The cross-block rules a `default_guardrail` reference has to obey

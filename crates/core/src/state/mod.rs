@@ -554,6 +554,29 @@ pub struct WorkspaceBinding {
     pub default_guardrail_id: Option<Uuid>,
 }
 
+/// What one local log destination address owns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DestinationBinding {
+    /// The destination's immutable identity.
+    pub id: Uuid,
+    /// Whether it was imported or created by Keymaster.
+    pub origin: Origin,
+    /// When the binding was recorded.
+    #[serde(with = "time::serde::rfc3339")]
+    pub bound_at: OffsetDateTime,
+    /// The lowercase hexadecimal SHA-256 of the canonical JSON of the `config`
+    /// this address last wrote.
+    ///
+    /// A digest rather than the value, because the value may be a third-party
+    /// credential and reads mask it, so there is nothing to compare against
+    /// remotely (ADR-0006, item 3). Absent on an imported destination, and on
+    /// one whose configuration has never been written: the planner reads that
+    /// absence as "write it once".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_digest: Option<String>,
+}
+
 /// The whole local state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -566,6 +589,8 @@ pub struct State {
     guardrails: BTreeMap<Address, GuardrailBinding>,
     #[serde(default, deserialize_with = "distinct_addresses")]
     workspaces: BTreeMap<Address, WorkspaceBinding>,
+    #[serde(default, deserialize_with = "distinct_addresses")]
+    log_destinations: BTreeMap<Address, DestinationBinding>,
 }
 
 impl Default for State {
@@ -584,6 +609,7 @@ impl State {
             keys: BTreeMap::new(),
             guardrails: BTreeMap::new(),
             workspaces: BTreeMap::new(),
+            log_destinations: BTreeMap::new(),
         }
     }
 
@@ -639,6 +665,27 @@ impl State {
     #[must_use]
     pub fn address_owning_workspace(&self, id: &Uuid) -> Option<&Address> {
         self.workspaces
+            .iter()
+            .find(|(_, binding)| binding.id == *id)
+            .map(|(address, _)| address)
+    }
+
+    /// Every log destination binding, by local address.
+    #[must_use]
+    pub const fn log_destinations(&self) -> &BTreeMap<Address, DestinationBinding> {
+        &self.log_destinations
+    }
+
+    /// One log destination binding.
+    #[must_use]
+    pub fn log_destination(&self, address: &Address) -> Option<&DestinationBinding> {
+        self.log_destinations.get(address)
+    }
+
+    /// Which address owns a log destination UUID, if any.
+    #[must_use]
+    pub fn address_owning_log_destination(&self, id: &Uuid) -> Option<&Address> {
+        self.log_destinations
             .iter()
             .find(|(_, binding)| binding.id == *id)
             .map(|(address, _)| address)
@@ -922,6 +969,76 @@ impl State {
         /// refuse.
         fn forget_workspace(&mut self, address: &Address) -> Option<WorkspaceBinding> {
             self.workspaces.remove(address)
+        }
+    }
+
+    mutation! {
+        /// Binds a log destination UUID to an address, and records the digest of
+        /// the `config` this run wrote.
+        ///
+        /// One mutation covers the three moments a digest is recorded, because
+        /// they differ only in what they have to record. A create knows the
+        /// digest it just wrote. An import knows none — its first apply writes
+        /// the configuration once (ADR-0006, item 3) — and passes `None`. An
+        /// update that carried a new `config` re-binds the identity it already
+        /// holds and passes the new digest.
+        ///
+        /// `digest` of `None` therefore leaves whatever digest the binding has;
+        /// only a write knows a better answer than the last one.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`BindError`] when the address or the UUID already belongs to
+        /// something else.
+        fn bind_log_destination(
+            &mut self,
+            address: &Address,
+            id: Uuid,
+            digest: Option<String>,
+            origin: Origin,
+            at: OffsetDateTime,
+        ) -> Result<(), BindError> {
+            if let Some(owner) = self.address_owning_log_destination(&id)
+                && owner != address
+            {
+                return Err(BindError::DestinationOwnedElsewhere {
+                    id,
+                    owner: owner.clone(),
+                });
+            }
+            if let Some(existing) = self.log_destinations.get_mut(address) {
+                if existing.id != id {
+                    return Err(BindError::DestinationBound {
+                        address: address.clone(),
+                        id: existing.id.clone(),
+                    });
+                }
+                if digest.is_some() {
+                    existing.config_digest = digest;
+                }
+                return Ok(());
+            }
+
+            self.log_destinations.insert(
+                address.clone(),
+                DestinationBinding {
+                    id,
+                    origin,
+                    bound_at: at,
+                    config_digest: digest,
+                },
+            );
+            Ok(())
+        }
+    }
+
+    mutation! {
+        /// Relinquishes the log destination this address owns.
+        ///
+        /// As [`State::forget_workspace`]: purely local, and with nothing to
+        /// refuse.
+        fn forget_log_destination(&mut self, address: &Address) -> Option<DestinationBinding> {
+            self.log_destinations.remove(address)
         }
     }
 
@@ -1627,6 +1744,16 @@ impl State {
                 ));
             }
         }
+
+        let mut destinations: BTreeSet<&Uuid> = BTreeSet::new();
+        for (address, binding) in &self.log_destinations {
+            if !destinations.insert(&binding.id) {
+                return Err(format!(
+                    "the log destination bound at `{address}` is bound more than once; one remote \
+                     log destination belongs to exactly one local address"
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -1975,6 +2102,27 @@ pub enum BindError {
         "workspace {id} is already bound to `{owner}`; one remote workspace belongs to one address"
     )]
     WorkspaceOwnedElsewhere {
+        /// The UUID that is already owned.
+        id: Uuid,
+        /// The address that owns it.
+        owner: Address,
+    },
+
+    /// The address already owns a different log destination.
+    #[error("`{address}` is already bound to log destination {id}")]
+    DestinationBound {
+        /// The local address.
+        address: Address,
+        /// The UUID it is already bound to.
+        id: Uuid,
+    },
+
+    /// Another address already owns this log destination.
+    #[error(
+        "log destination {id} is already bound to `{owner}`; one remote log destination belongs \
+         to one address"
+    )]
+    DestinationOwnedElsewhere {
         /// The UUID that is already owned.
         id: Uuid,
         /// The address that owns it.

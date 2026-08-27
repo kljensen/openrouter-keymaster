@@ -68,6 +68,7 @@ fn the_example_configuration_is_valid() {
     assert_eq!(config.guardrails.len(), 1);
     assert_eq!(config.keys.len(), 1);
     assert_eq!(config.receivers.len(), 2);
+    assert_eq!(config.log_destinations.len(), 1);
 
     let receivers: Vec<&Receiver> = config.receivers.values().collect();
     assert!(matches!(receivers[0], Receiver::Command { .. }));
@@ -1247,4 +1248,116 @@ fn a_default_guardrail_takes_its_placement_from_the_relationship_and_not_a_uuid(
     let ordinary = "version = 1\n\n[guardrails.house]\nname = \"house-rail\"\n\
                     workspace_id = \"00000000-0000-4000-8000-000000000001\"\n";
     assert!(Config::parse(ordinary).is_ok());
+}
+
+// --- log destinations (ADR-0006) --------------------------------------------
+
+/// A block with the two required fields and whatever else a case adds.
+fn destination_source(extra: &str) -> String {
+    format!(
+        "version = 1\n\n[log_destinations.audit]\ntype = \"datadog\"\nname = \"Club audit\"\n\
+         config = {{ site = \"datadoghq.com\", apiKey = \"dd-XXXXXXXXXXXXXXXXXXXX\" }}\n{extra}"
+    )
+}
+
+fn destination<'a>(config: &'a Config, name: &str) -> &'a LogDestination {
+    config
+        .log_destinations
+        .get(&address(name))
+        .expect("the configured log destination")
+}
+
+#[test]
+fn a_destination_takes_openrouters_own_defaults_for_what_it_does_not_say() {
+    let parsed = parse(&destination_source(""));
+    let audit = destination(&parsed, "audit");
+    assert_eq!(audit.kind, DestinationType::Datadog);
+    assert_eq!(audit.name.as_str(), "Club audit");
+    assert!(audit.enabled, "OpenRouter creates a destination enabled");
+    assert!(!audit.privacy_mode);
+    assert_eq!(audit.sampling_rate, None, "unmanaged unless it is written");
+    assert_eq!(audit.workspace, None);
+    assert_eq!(audit.workspace_id, None);
+}
+
+#[test]
+fn a_type_or_a_configuration_the_schema_refuses_names_its_field() {
+    let unknown = "version = 1\n\n[log_destinations.audit]\ntype = \"splunk\"\n\
+                   name = \"Club audit\"\nconfig = { apiKey = \"x-XXXXXXXXXXXXXXXX\" }\n";
+    assert_eq!(paths(unknown), vec!["log_destinations.audit.type"]);
+
+    let missing = "version = 1\n\n[log_destinations.audit]\ntype = \"datadog\"\n\
+                   name = \"Club audit\"\n";
+    assert_eq!(paths(missing), vec!["log_destinations.audit.config"]);
+
+    let empty = "version = 1\n\n[log_destinations.audit]\ntype = \"datadog\"\n\
+                 name = \"Club audit\"\nconfig = {}\n";
+    assert_eq!(paths(empty), vec!["log_destinations.audit.config"]);
+}
+
+#[test]
+fn a_sampling_rate_outside_the_range_openrouter_accepts_is_refused() {
+    for rate in ["0", "1.5", "0.00001"] {
+        assert_eq!(
+            paths(&destination_source(&format!("sampling_rate = {rate}\n"))),
+            vec!["log_destinations.audit.sampling_rate"],
+            "{rate}"
+        );
+    }
+    let managed = parse(&destination_source("sampling_rate = 0.25\n"));
+    assert_eq!(
+        destination(&managed, "audit").sampling_rate,
+        SamplingRate::from_rate(0.25).ok()
+    );
+}
+
+#[test]
+fn a_destination_names_its_workspace_by_address_or_by_uuid_and_never_both() {
+    let both = destination_source(
+        "workspace = \"club\"\nworkspace_id = \"00000000-0000-4000-8000-000000000001\"\n\n\
+         [workspaces.club]\nname = \"Club\"\nslug = \"club\"\n",
+    );
+    assert_eq!(paths(&both), vec!["log_destinations.audit.workspace"]);
+
+    let dangling = destination_source("workspace = \"club\"\n");
+    assert_eq!(paths(&dangling), vec!["log_destinations.audit.workspace"]);
+}
+
+#[test]
+fn two_destinations_may_not_share_a_remote_name() {
+    let source = "version = 1\n\n[log_destinations.one]\ntype = \"datadog\"\nname = \"Audit\"\n\
+                  config = { apiKey = \"a-XXXXXXXXXXXXXXXX\" }\n\n\
+                  [log_destinations.two]\ntype = \"webhook\"\nname = \"Audit\"\n\
+                  config = { url = \"https://example.invalid/hook\" }\n";
+    assert_eq!(paths(source), vec!["log_destinations.two.name"]);
+}
+
+#[test]
+fn loading_a_configuration_registers_its_destination_secrets_with_the_redactor() {
+    // `Config::parse` is pure and registers nothing; `Config::load` is the one
+    // that takes charge of the file, and the one an operation calls
+    // (ADR-0006, item 4).
+    const PROVIDER_TOKEN: &str = "dd-CONFIG-UNIT-TEST-TOKEN-NEVER-DISCLOSE";
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("keymaster.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "version = 1\n\n[log_destinations.audit]\ntype = \"datadog\"\nname = \"Club audit\"\n\
+             config = {{ region = \"eu\", apiKey = \"{PROVIDER_TOKEN}\" }}\n"
+        ),
+    )
+    .expect("writing the configuration");
+
+    Config::load(&path).expect("a valid configuration");
+
+    assert_eq!(
+        crate::redaction::redact(&format!("refused {PROVIDER_TOKEN} outright")),
+        "refused [redacted] outright"
+    );
+    assert_eq!(
+        crate::redaction::redact("the region is eu"),
+        "the region is eu",
+        "a short value is not registered, so it is not scrubbed out of every sentence"
+    );
 }

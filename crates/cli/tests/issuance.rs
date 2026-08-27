@@ -543,8 +543,9 @@ fn a_rejection_whose_body_stopped_short_is_ambiguous_rather_than_definite() {
     let world = Creation::new("record");
     let empty = || whole_body(r#"{"data":[]}"#);
     let server = RawServer::scripted(vec![
-        // The snapshot apply plans from: keys, guardrails, assignments, and
-        // workspaces (whose empty listing needs no budget read).
+        // The snapshot apply plans from: workspaces (whose empty listing needs
+        // no budget read), keys, guardrails, assignments, and log destinations.
+        empty(),
         empty(),
         empty(),
         empty(),
@@ -568,10 +569,10 @@ fn a_rejection_whose_body_stopped_short_is_ambiguous_rather_than_definite() {
         "an incomplete answer settles nothing, so the attempt stays unresolved"
     );
     assert_eq!(world.deliveries(), 0);
-    // Four listings, one create, four listings to verify. A second create would
-    // make it ten; the scripted server has no way to report methods, so the
+    // Five listings, one create, five listings to verify. A second create would
+    // make it twelve; the scripted server has no way to report methods, so the
     // count is what proves the request was sent exactly once.
-    server.assert_request_count(9);
+    server.assert_request_count(11);
 
     let document: Value = serde_json::from_str(&streams.out).expect("one JSON document");
     let created = action(&document, "keys.jobfeed");

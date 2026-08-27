@@ -21,10 +21,15 @@
 //! one is a replacement, not a patch, and [`UpdateKey`] has nowhere to put
 //! them.
 
+use std::fmt::Write as _;
+
 use serde::Serialize;
+use zeroize::Zeroizing;
 
 use crate::client::Patch;
-use crate::config::{Guardrail, Key, Managed, ResetInterval, Usd, Workspace};
+use crate::config::{
+    Guardrail, Key, LogDestination, Managed, ResetInterval, Usd, Workspace, write_json_string,
+};
 use crate::ids::{KeyHash, RemoteName, Uuid};
 
 /// The body of `POST /workspaces` and `PATCH /workspaces/{id}`.
@@ -245,6 +250,83 @@ impl AssignKeys {
         Self {
             key_hashes: vec![key.as_str().to_owned()],
         }
+    }
+}
+
+/// The body of `POST /observability/destinations`, rendered into a buffer that
+/// clears itself.
+///
+/// Not a `Serialize` type, and that is the point: the body carries a
+/// destination's `config`, which may be a third-party credential, and the only
+/// serialization that value has is the crate-private canonical rendering it is
+/// digested from (ADR-0006, item 4). `serde_json` would allocate a second copy
+/// nothing could clear.
+///
+/// `workspace_id` is sent only on a create, because OpenRouter fixes it there
+/// and `PATCH` has no field for it. `api_key_hashes` is left out for the reason
+/// a create omits everything an update would clear: a filter that has never
+/// existed cannot be unset, and the API's own default is the empty allowlist
+/// Keymaster manages it as.
+#[must_use]
+pub fn create_destination_body(
+    desired: &LogDestination,
+    workspace: Option<&Uuid>,
+) -> Zeroizing<String> {
+    let mut body = Zeroizing::new(String::new());
+    body.push('{');
+    write_json_string(&mut body, "type");
+    body.push(':');
+    write_json_string(&mut body, desired.kind.as_str());
+    body.push(',');
+    write_common_destination_fields(&mut body, desired);
+    body.push_str(",\"config\":");
+    body.push_str(&desired.config.canonical_json());
+    if let Some(workspace) = workspace {
+        body.push_str(",\"workspace_id\":");
+        write_json_string(&mut body, workspace.as_str());
+    }
+    body.push('}');
+    body
+}
+
+/// The body of `PATCH /observability/destinations/{id}`, rendered into a buffer
+/// that clears itself.
+///
+/// `config` travels only when `write_config` says the desired digest is not the
+/// one state records — a write-only field is not resent for a change to
+/// something else (ADR-0006, item 3). `api_key_hashes` is always sent as
+/// `null`, which is how the allowlist Keymaster manages as always empty is kept
+/// empty: `null` means every key in the workspace.
+///
+/// Neither `type` nor `workspace_id` appears. OpenRouter fixes both at
+/// creation, and a difference in one is planned as held-back drift rather than
+/// as a patch (ADR-0006, item 2).
+#[must_use]
+pub fn update_destination_body(desired: &LogDestination, write_config: bool) -> Zeroizing<String> {
+    let mut body = Zeroizing::new(String::new());
+    body.push('{');
+    write_common_destination_fields(&mut body, desired);
+    body.push_str(",\"api_key_hashes\":null");
+    if write_config {
+        body.push_str(",\"config\":");
+        body.push_str(&desired.config.canonical_json());
+    }
+    body.push('}');
+    body
+}
+
+/// The fields a create and an update send alike, with no leading or trailing
+/// separator.
+fn write_common_destination_fields(body: &mut String, desired: &LogDestination) {
+    write_json_string(body, "name");
+    body.push(':');
+    write_json_string(body, desired.name.as_str());
+    let _ = write!(body, ",\"enabled\":{}", desired.enabled);
+    let _ = write!(body, ",\"privacy_mode\":{}", desired.privacy_mode);
+    if let Some(rate) = desired.sampling_rate {
+        // Six decimal places is exactly the resolution `SamplingRate` holds, so
+        // the number sent is the number compared.
+        let _ = write!(body, ",\"sampling_rate\":{:.6}", rate.rate());
     }
 }
 

@@ -21,8 +21,13 @@ use std::collections::BTreeSet;
 use time::OffsetDateTime;
 
 use super::{Expansion, FieldChange, FieldValue};
-use crate::api::{ObservedGuardrail, ObservedKey, ObservedWorkspace, ResetPolicy};
-use crate::config::{BUDGET_INTERVALS, Guardrail, Key, Managed, ResetInterval, Usd, Workspace};
+use crate::api::{
+    ObservedDestination, ObservedGuardrail, ObservedKey, ObservedWorkspace, ResetPolicy,
+};
+use crate::config::{
+    BUDGET_INTERVALS, Guardrail, Key, LogDestination, Managed, ResetInterval, SamplingRate, Usd,
+    Workspace,
+};
 use crate::ids::{RemoteName, UserId, Uuid};
 
 /// Key fields OpenRouter fixes when the key is created.
@@ -31,6 +36,21 @@ use crate::ids::{RemoteName, UserId, Uuid};
 /// replace the key rather than to update it.
 pub(super) const IMMUTABLE_KEY_FIELDS: [&str; 3] =
     ["expires_at", "workspace_id", "creator_user_id"];
+
+/// Log destination fields OpenRouter fixes when the destination is created.
+///
+/// `PATCH /observability/destinations/{id}` accepts neither, and unlike a key a
+/// destination is never replaced automatically — replacing one would silently
+/// stop and restart log forwarding — so a difference in one is drift nothing
+/// can converge (ADR-0006, item 2).
+pub(super) const IMMUTABLE_DESTINATION_FIELDS: [&str; 2] = ["type", "workspace_id"];
+
+/// What a destination's write-only `config` shows on either side of a change.
+///
+/// A digest comparison has no values to print, and printing one is exactly what
+/// the field exists to prevent, so both sides are fixed text (ADR-0006, item 3).
+const CONFIG_UNREADABLE: &str = "(write-only)";
+const CONFIG_CHANGED: &str = "changed";
 
 /// Every managed difference between a desired key and the observed one.
 ///
@@ -195,6 +215,69 @@ pub fn workspace_changes(
     diff.changes
 }
 
+/// Every managed difference between a desired log destination and the observed
+/// one.
+///
+/// `workspace` is the workspace the destination belongs to once the block's
+/// `workspace` address has been resolved, exactly as for a key.
+///
+/// `stored_digest` is the digest of the `config` this address last wrote, which
+/// state records. It is the whole of the `config` comparison: the value
+/// OpenRouter returns is masked, so it is never read, and a digest that differs
+/// — or is absent, which is what an imported destination has — is the one thing
+/// that puts `config` in the body of a write (ADR-0006, item 3).
+pub fn log_destination_changes(
+    desired: &LogDestination,
+    observed: Option<&ObservedDestination>,
+    workspace: Option<&Uuid>,
+    stored_digest: Option<&str>,
+) -> Vec<FieldChange> {
+    let mut diff = Diff::new(observed.is_some());
+    diff.plain(
+        "type",
+        observed.map(|destination| destination.kind.as_str()),
+        desired.kind.as_str(),
+    );
+    diff.name(
+        "name",
+        observed.map(|destination| destination.name.as_str()),
+        &desired.name,
+    );
+    // Neither flag is an [`Expansion`]: that vocabulary is about what a
+    // credential may spend or reach, and a destination spends nothing and
+    // reaches nothing. Turning `privacy_mode` off widens what leaves
+    // OpenRouter, which the diff shows plainly and the safety class does not
+    // pretend to grade.
+    diff.simple_flag(
+        "enabled",
+        observed.map(|destination| destination.enabled),
+        desired.enabled,
+    );
+    diff.simple_flag(
+        "privacy_mode",
+        observed.map(|destination| destination.privacy_mode),
+        desired.privacy_mode,
+    );
+    diff.sampling_rate(
+        "sampling_rate",
+        observed.and_then(|destination| destination.sampling_rate),
+        desired.sampling_rate,
+    );
+    diff.uuid(
+        "workspace_id",
+        observed.and_then(|destination| destination.workspace_id.as_ref()),
+        workspace,
+    );
+    // The allowlist is managed as always empty, so anything OpenRouter has in
+    // it is drift an apply clears by sending `null` (ADR-0006, item 1).
+    diff.allowlist(
+        "api_key_hashes",
+        observed.map(|destination| &destination.api_key_hashes),
+    );
+    diff.config(desired, observed.is_some(), stored_digest);
+    diff.changes
+}
+
 /// Accumulates the differences of one resource, in field order.
 struct Diff {
     changes: Vec<FieldChange>,
@@ -313,6 +396,69 @@ impl Diff {
     ) {
         let Some(to) = to else { return };
         self.flag(field, from, to, relaxed);
+    }
+
+    /// A flag that is always managed and whose direction widens nothing a
+    /// credential may do.
+    fn simple_flag(&mut self, field: &'static str, from: Option<bool>, to: bool) {
+        self.push(
+            field,
+            from.map_or(FieldValue::Absent, FieldValue::Flag),
+            FieldValue::Flag(to),
+            None,
+        );
+    }
+
+    /// A sampling rate, compared only when the configuration manages one.
+    fn sampling_rate(
+        &mut self,
+        field: &'static str,
+        from: Option<SamplingRate>,
+        to: Option<SamplingRate>,
+    ) {
+        let Some(to) = to else { return };
+        self.push(
+            field,
+            from.map_or(FieldValue::Absent, |rate| {
+                FieldValue::text(&rate.to_string())
+            }),
+            FieldValue::text(&to.to_string()),
+            None,
+        );
+    }
+
+    /// A list Keymaster manages as always empty: whatever is in it is drift.
+    fn allowlist(&mut self, field: &'static str, from: Option<&BTreeSet<String>>) {
+        let from = from.cloned().unwrap_or_default();
+        self.push(
+            field,
+            FieldValue::Slugs(from),
+            FieldValue::Slugs(BTreeSet::new()),
+            None,
+        );
+    }
+
+    /// A write-only configuration, compared by digest and never by value.
+    ///
+    /// Three cases, and they collapse to one question — does the digest state
+    /// records match the digest of what the configuration now says? A create
+    /// has no remote resource and writes the configuration as part of itself. An
+    /// imported destination has no stored digest, so its first apply writes the
+    /// configuration once. Anything else compares.
+    fn config(&mut self, desired: &LogDestination, exists: bool, stored: Option<&str>) {
+        if exists && stored == Some(desired.config.digest().as_str()) {
+            return;
+        }
+        self.push(
+            "config",
+            if exists {
+                FieldValue::text(CONFIG_UNREADABLE)
+            } else {
+                FieldValue::Absent
+            },
+            FieldValue::text(CONFIG_CHANGED),
+            None,
+        );
     }
 
     fn timestamp(

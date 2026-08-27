@@ -333,9 +333,9 @@ letting go of. Afterwards `openrouter-keymaster plan` reports whichever of them 
 OpenRouter still has as unmanaged, and no Keymaster command will touch them \
 again.
 
-ADDRESS is `keys.NAME`, `guardrails.NAME`, or `workspaces.NAME`. A bare NAME is \
-accepted when only one of the three is bound, and refused when more than one \
-is. Forgetting a workspace releases the default guardrail bound to it as well: \
+ADDRESS is `keys.NAME`, `guardrails.NAME`, `workspaces.NAME`, or \
+`log_destinations.NAME`. A bare NAME is accepted when only one of the four is \
+bound, and refused when more than one is. Forgetting a workspace releases the default guardrail bound to it as well: \
 that guardrail cannot outlive its workspace, and nothing else can reach it.
 
 Forgetting an address with an operation in progress is refused: the journal is \
@@ -391,6 +391,27 @@ only handle on it, and it can never be imported by name.")]
         name: String,
 
         /// UUID of the remote workspace.
+        #[arg(long, value_name = "UUID")]
+        id: String,
+    },
+
+    /// Bind an existing observability log destination by its UUID.
+    #[command(long_about = "\
+Bind an existing observability log destination by its UUID.
+
+Like every import, this makes no remote write: it reads that one destination \
+and records a binding.
+
+It records no digest for the destination's `config`. OpenRouter masks a \
+destination's configuration on read, so there is nothing Keymaster could \
+honestly claim to have written; the next `openrouter-keymaster apply` writes \
+the configured value once and records its digest from then on. Until it does, \
+whatever configuration the destination already has is what is in force.")]
+    LogDestination {
+        /// Local log destination address, as written in the configuration.
+        name: String,
+
+        /// UUID of the remote log destination.
         #[arg(long, value_name = "UUID")]
         id: String,
     },
@@ -470,6 +491,34 @@ means that is not established, or that the workspace still holds something.")]
         #[arg(long, value_name = "UUID")]
         id: String,
     },
+
+    /// Permanently delete a tracked log destination, identified by its UUID.
+    #[command(long_about = "\
+Permanently delete a tracked log destination, identified by its UUID.
+
+This is the only thing that ever changes a destination's `type` or its \
+workspace. OpenRouter fixes both when the destination is created and its \
+`PATCH` accepts neither, and Keymaster never replaces a destination on its own \
+— doing so would stop and restart log forwarding without being asked. So a plan \
+that finds either field changed holds the drift back and names this command; \
+run it, and the next apply creates the destination the configuration describes.
+
+The UUID must be one a local address already tracks: a destination Keymaster \
+does not own belongs to whoever made it. Unlike a workspace, a destination \
+holds nothing, so there is nothing for this to refuse over.
+
+The request is sent exactly once, and only a 404 on the read that follows \
+proves the destination is gone; anything else leaves the binding tracked. \
+Failures name an HTTP status and an OpenRouter error code and never a response \
+body, because a destination endpoint can quote the configuration it was given.
+
+Exit code 0 means OpenRouter is known not to have the destination. Exit code 1 \
+means that is not established.")]
+    LogDestination {
+        /// UUID of the tracked log destination to delete.
+        #[arg(long, value_name = "UUID")]
+        id: String,
+    },
 }
 
 /// A `state` action.
@@ -477,8 +526,8 @@ means that is not established, or that the workspace still holds something.")]
 pub enum StateAction {
     /// Relinquish local ownership of an address. Makes no remote call.
     Forget {
-        /// Local address: `keys.NAME`, `guardrails.NAME`, or an unambiguous
-        /// bare NAME.
+        /// Local address: `keys.NAME`, `guardrails.NAME`, `workspaces.NAME`,
+        /// `log_destinations.NAME`, or an unambiguous bare NAME.
         address: String,
     },
 }

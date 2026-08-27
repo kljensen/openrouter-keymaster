@@ -24,11 +24,14 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::client::{ApiError, Client};
-use crate::config::{BudgetInterval, ResetInterval, Usd};
+use crate::config::{BudgetInterval, ResetInterval, SamplingRate, Usd};
 use crate::ids::{KeyHash, UserId, Uuid};
 use pagination::{Page, PageLimits};
 
-pub use write::{AssignKeys, BudgetBody, DisableKey, GuardrailBody, UpdateKey, WorkspaceBody};
+pub use write::{
+    AssignKeys, BudgetBody, DisableKey, GuardrailBody, UpdateKey, WorkspaceBody,
+    create_destination_body, update_destination_body,
+};
 
 /// How a USD budget resets, as OpenRouter reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +152,33 @@ pub struct ObservedWorkspace {
     pub include_byok_in_budgets: bool,
     /// The pooled spending caps, by interval.
     pub budgets: BTreeMap<BudgetInterval, Usd>,
+    pub timestamps: RemoteTimestamps,
+}
+
+/// A log destination as OpenRouter currently has it.
+///
+/// `config` is missing on purpose: reads mask it, so there is nothing here to
+/// compare a desired value against, and the planner compares digests instead
+/// (ADR-0006, item 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedDestination {
+    /// Immutable identity.
+    pub id: Uuid,
+    /// The destination type, as OpenRouter spells it.
+    ///
+    /// A plain string rather than a [`crate::config::DestinationType`]: the API
+    /// documents its enum as open, and a type this build does not know is a
+    /// destination to report as unmanaged rather than a reason to fail a whole
+    /// snapshot. A configured type is compared against it as text.
+    pub kind: String,
+    pub name: String,
+    pub enabled: bool,
+    pub privacy_mode: bool,
+    pub sampling_rate: Option<SamplingRate>,
+    pub workspace_id: Option<Uuid>,
+    /// The key allowlist, which Keymaster manages as always empty: a non-empty
+    /// one is drift an apply clears (ADR-0006, item 1).
+    pub api_key_hashes: BTreeSet<String>,
     pub timestamps: RemoteTimestamps,
 }
 
@@ -356,6 +386,81 @@ impl<'client> Reader<'client> {
         Ok(workspace)
     }
 
+    /// Every log destination in the organization Keymaster can reach.
+    ///
+    /// `GET /observability/destinations` answers for one workspace at a time —
+    /// the credential's default workspace unless `workspace_id` names another —
+    /// so a complete picture is that listing once with no workspace and once
+    /// per workspace the snapshot found. Records are deduplicated by identity,
+    /// because the default workspace is also one of the listed ones.
+    ///
+    /// One request per workspace, like the budgets a workspace listing fills
+    /// in, which is a handful.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reader::list_keys`].
+    pub fn list_log_destinations(
+        &self,
+        workspaces: &[Uuid],
+    ) -> Result<Vec<ObservedDestination>, ApiError> {
+        let mut found: BTreeMap<Uuid, ObservedDestination> = BTreeMap::new();
+        for destination in self.list_log_destinations_in(None)? {
+            found.insert(destination.id.clone(), destination);
+        }
+        for workspace in workspaces {
+            for destination in self.list_log_destinations_in(Some(workspace))? {
+                found.insert(destination.id.clone(), destination);
+            }
+        }
+        Ok(found.into_values().collect())
+    }
+
+    /// Every log destination in one workspace, or in the credential's default
+    /// workspace when none is named.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reader::list_keys`].
+    pub fn list_log_destinations_in(
+        &self,
+        workspace: Option<&Uuid>,
+    ) -> Result<Vec<ObservedDestination>, ApiError> {
+        pagination::collect(
+            self.limits,
+            "log destinations",
+            |destination: &ObservedDestination| destination.id.clone(),
+            |offset, page_size| {
+                let mut query = vec![
+                    ("offset", offset.to_string()),
+                    ("limit", page_size.to_string()),
+                ];
+                if let Some(workspace) = workspace {
+                    query.push(("workspace_id", workspace.to_string()));
+                }
+                let page: wire::List<wire::LogDestination> = self
+                    .client
+                    .get_json(&["observability", "destinations"], &query)?;
+                Ok(Page {
+                    items: convert(page.data, ObservedDestination::from_wire)?,
+                    total: page.total_count,
+                })
+            },
+        )
+    }
+
+    /// One log destination, by its immutable UUID.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reader::get_key`].
+    pub fn get_log_destination(&self, id: &Uuid) -> Result<ObservedDestination, ApiError> {
+        let one: wire::One<wire::LogDestination> = self
+            .client
+            .get_json(&["observability", "destinations", id.as_str()], &[])?;
+        ObservedDestination::from_wire(one.data)
+    }
+
     /// Every key-to-guardrail assignment in the organization.
     ///
     /// # Errors
@@ -534,6 +639,49 @@ impl<'client> Writer<'client> {
             "budgets",
             interval.as_str(),
         ])
+    }
+
+    /// Creates one log destination and returns it, as OpenRouter recorded it.
+    ///
+    /// `body` is JSON text this crate rendered itself, because it carries the
+    /// destination's `config` (ADR-0006, item 4). The identity in the response
+    /// is what matters and matters immediately: a destination whose UUID is not
+    /// persisted is one only its mutable name could find again.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_guardrail`]. The caller reports the failure through
+    /// [`crate::client::ApiError::status_and_code`], never through its
+    /// `Display`: a validation error may quote the value it refused.
+    pub fn create_log_destination(&self, body: &str) -> Result<ObservedDestination, ApiError> {
+        let created: wire::LogDestinationEnvelope = self
+            .client
+            .post_json_text_once(&["observability", "destinations"], body)?;
+        ObservedDestination::from_wire(created.into_destination())
+    }
+
+    /// Brings one log destination's managed fields to the configured values.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_log_destination`].
+    pub fn update_log_destination(&self, id: &Uuid, body: &str) -> Result<(), ApiError> {
+        self.client
+            .patch_text_once_discarding_body(&["observability", "destinations", id.as_str()], body)
+    }
+
+    /// Permanently deletes one log destination.
+    ///
+    /// Like [`Writer::delete_workspace`], never sent on Keymaster's own
+    /// initiative: nothing plans a delete, and only
+    /// `openrouter-keymaster delete log-destination` reaches this.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::delete_key`].
+    pub fn delete_log_destination(&self, id: &Uuid) -> Result<(), ApiError> {
+        self.client
+            .delete_once_discarding_body(&["observability", "destinations", id.as_str()])
     }
 
     /// Brings one existing key's managed fields to the configured values.
@@ -723,6 +871,42 @@ impl ObservedWorkspace {
     }
 }
 
+impl ObservedDestination {
+    fn from_wire(destination: wire::LogDestination) -> Result<Self, ApiError> {
+        let id = Uuid::parse(&destination.id)
+            .map_err(|error| unusable("a log destination", "id", &error.to_string()))?;
+        let identity = format!("the log destination {id}");
+
+        Ok(Self {
+            kind: destination.kind,
+            name: destination.name,
+            enabled: destination.enabled,
+            privacy_mode: destination.privacy_mode,
+            // Strict, like a budget: a rate that cannot be read would otherwise
+            // look like one Keymaster does not manage, and a configuration that
+            // sets it would report drift forever.
+            sampling_rate: destination
+                .sampling_rate
+                .map(|rate| {
+                    SamplingRate::from_rate(rate)
+                        .map_err(|problem| unusable(&identity, "sampling_rate", problem.message()))
+                })
+                .transpose()?,
+            workspace_id: workspace(destination.workspace_id.as_deref(), &identity)?,
+            api_key_hashes: destination
+                .api_key_hashes
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            timestamps: timestamps(
+                destination.created_at.as_deref(),
+                destination.updated_at.as_deref(),
+            ),
+            id,
+        })
+    }
+}
+
 impl ObservedAssignment {
     fn from_wire(assignment: wire::Assignment) -> Result<Self, ApiError> {
         let id = Uuid::parse(&assignment.id)
@@ -744,7 +928,7 @@ impl ObservedAssignment {
 /// A record whose identity or managed field cannot be read.
 fn unusable(resource: &str, field: &str, why: &str) -> ApiError {
     ApiError::InvalidResponse {
-        message: format!("{resource} has an unusable `{field}`: {why}"),
+        message: format!("{resource} has an unusable `{field}`: {why}").into(),
     }
 }
 

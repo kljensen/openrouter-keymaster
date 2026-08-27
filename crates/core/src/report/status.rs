@@ -6,7 +6,9 @@ use std::fmt;
 use serde::Serialize;
 
 use super::{RecoveryReport, money, plural, scrubbed, timestamp};
-use crate::api::{KeyUsage, ObservedGuardrail, ObservedKey, ObservedWorkspace};
+use crate::api::{
+    KeyUsage, ObservedDestination, ObservedGuardrail, ObservedKey, ObservedWorkspace,
+};
 use crate::config::Config;
 use crate::ids::{Address, KeyHash, Uuid};
 use crate::plan::Snapshot;
@@ -32,6 +34,8 @@ pub struct StatusReport {
     keys: Vec<KeyStatus>,
     /// Every guardrail address the configuration or state names.
     guardrails: Vec<GuardrailStatus>,
+    /// Every log destination address the configuration or state names.
+    log_destinations: Vec<DestinationStatus>,
     /// Remote resources no local address owns.
     unmanaged: Vec<UnmanagedStatus>,
     /// The one operation an earlier run left unfinished, if it left one.
@@ -59,6 +63,7 @@ impl StatusReport {
             workspaces: workspace_statuses(config, state, &index),
             keys: key_statuses(config, state, &index),
             guardrails: guardrail_statuses(config, state, &index),
+            log_destinations: destination_statuses(config, state, &index),
             unmanaged: unmanaged_statuses(state, &index, workspace),
             operation: state
                 .pending_operation()
@@ -135,6 +140,17 @@ impl StatusReport {
         }
         for guardrail in &self.guardrails {
             lines.extend(guardrail.lines());
+        }
+
+        if !self.log_destinations.is_empty() {
+            lines.push(String::new());
+            lines.push(format!(
+                "log destinations ({count}):",
+                count = self.log_destinations.len()
+            ));
+            for destination in &self.log_destinations {
+                lines.extend(destination.lines());
+            }
         }
 
         if !self.unmanaged.is_empty() {
@@ -458,6 +474,87 @@ impl GuardrailStatus {
     }
 }
 
+/// One local log destination address.
+///
+/// `config` appears nowhere, and cannot: OpenRouter masks it on read and
+/// Keymaster holds only a digest of what it wrote (ADR-0006, item 3). What an
+/// operator can check here is everything else — that the destination is there,
+/// that it is enabled, and that its allowlist is the empty one Keymaster
+/// manages it as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DestinationStatus {
+    address: String,
+    configured: bool,
+    bound: bool,
+    orphaned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<&'static str>,
+    /// Whether Keymaster has ever written this destination's configuration.
+    /// False on an imported one until the first apply.
+    config_digest_recorded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    present_remotely: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    privacy_mode: Option<bool>,
+    /// How many key hashes OpenRouter has in the allowlist Keymaster manages as
+    /// always empty. Anything but zero is drift the next apply clears.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key_hashes: Option<usize>,
+}
+
+impl DestinationStatus {
+    fn lines(&self) -> Vec<String> {
+        let mut headline = format!("  {address}", address = self.address);
+        match (&self.id, self.origin) {
+            (Some(id), Some(origin)) => headline.push_str(&format!("  {id}  {origin}")),
+            _ => headline.push_str("  not bound"),
+        }
+        if self.orphaned {
+            headline.push_str("  (orphaned: no longer in the configuration)");
+        }
+        let mut lines = vec![headline];
+        match self.present_remotely {
+            Some(true) => {
+                lines.push(format!(
+                    "      remote: present, {state}, type \"{kind}\", named \"{name}\"",
+                    state = if self.enabled == Some(true) {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    kind = self.kind.as_deref().unwrap_or(""),
+                    name = self.remote_name.as_deref().unwrap_or(""),
+                ));
+                lines.push(format!(
+                    "      privacy mode: {privacy}; key allowlist: {allowlist}",
+                    privacy = self.privacy_mode.unwrap_or(false),
+                    allowlist = match self.api_key_hashes.unwrap_or(0) {
+                        0 => "empty, as Keymaster manages it".to_owned(),
+                        count => format!("{count} hashes, which the next apply clears"),
+                    }
+                ));
+            }
+            Some(false) => lines.push("      remote: absent from the snapshot".to_owned()),
+            None => {}
+        }
+        if self.bound {
+            lines.push(format!(
+                "      configuration written by Keymaster: {}",
+                self.config_digest_recorded
+            ));
+        }
+        lines
+    }
+}
+
 /// One local workspace address, with the budgets OpenRouter has in force.
 ///
 /// The budgets are observed rather than desired, like a key's usage: they are
@@ -596,6 +693,7 @@ struct Observed<'a> {
     keys: BTreeMap<&'a KeyHash, &'a ObservedKey>,
     guardrails: BTreeMap<&'a Uuid, &'a ObservedGuardrail>,
     workspaces: BTreeMap<&'a Uuid, &'a ObservedWorkspace>,
+    destinations: BTreeMap<&'a Uuid, &'a ObservedDestination>,
     assignments: BTreeMap<&'a KeyHash, BTreeSet<&'a Uuid>>,
 }
 
@@ -619,6 +717,11 @@ impl<'a> Observed<'a> {
                 .workspaces
                 .iter()
                 .map(|workspace| (&workspace.id, workspace))
+                .collect(),
+            destinations: observed
+                .log_destinations
+                .iter()
+                .map(|destination| (&destination.id, destination))
                 .collect(),
             assignments,
         }
@@ -701,6 +804,38 @@ fn workspace_statuses(
         .collect()
 }
 
+/// Every log destination address either input names, in address order.
+fn destination_statuses(
+    config: &Config,
+    state: &State,
+    index: &Observed<'_>,
+) -> Vec<DestinationStatus> {
+    addresses(
+        config.log_destinations.keys(),
+        state.log_destinations().keys(),
+    )
+    .map(|address| {
+        let binding = state.log_destination(address);
+        let observed = binding.and_then(|binding| index.destinations.get(&binding.id).copied());
+        DestinationStatus {
+            address: format!("log_destinations.{address}"),
+            configured: config.log_destinations.contains_key(address),
+            bound: binding.is_some(),
+            orphaned: !config.log_destinations.contains_key(address),
+            id: binding.map(|binding| binding.id.as_str().to_owned()),
+            origin: binding.map(|binding| binding.origin.as_str()),
+            config_digest_recorded: binding.is_some_and(|binding| binding.config_digest.is_some()),
+            present_remotely: binding.map(|_| observed.is_some()),
+            remote_name: observed.map(|destination| scrubbed(&destination.name)),
+            kind: observed.map(|destination| scrubbed(&destination.kind)),
+            enabled: observed.map(|destination| destination.enabled),
+            privacy_mode: observed.map(|destination| destination.privacy_mode),
+            api_key_hashes: observed.map(|destination| destination.api_key_hashes.len()),
+        }
+    })
+    .collect()
+}
+
 /// Remote resources no local address owns, by immutable identity.
 ///
 /// A scoped run leaves out everything outside its workspace: those resources
@@ -750,6 +885,22 @@ fn unmanaged_statuses(
                     resource: "workspace",
                     identity: workspace.id.as_str().to_owned(),
                     name: scrubbed(&workspace.name),
+                }),
+        )
+        .chain(
+            index
+                .destinations
+                .values()
+                .filter(|destination| in_scope(destination.workspace_id.as_ref()))
+                .filter(|destination| {
+                    state
+                        .address_owning_log_destination(&destination.id)
+                        .is_none()
+                })
+                .map(|destination| UnmanagedStatus {
+                    resource: "log destination",
+                    identity: destination.id.as_str().to_owned(),
+                    name: scrubbed(&destination.name),
                 }),
         )
         .collect()

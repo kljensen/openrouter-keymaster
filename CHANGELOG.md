@@ -9,6 +9,46 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Added
 
+- Observability log destinations as a managed resource. A
+  `[log_destinations.NAME]` block carries `type` (one of the seventeen types
+  OpenRouter documents), `name`, `config`, `enabled`, `privacy_mode`,
+  `sampling_rate`, and a workspace by local address or raw `workspace_id`.
+  Identity is the destination UUID: `openrouter-keymaster import log-destination
+  NAME --id UUID` binds an existing one, removing the block orphans the binding,
+  and `openrouter-keymaster delete log-destination --id UUID` is the only
+  deletion. The planner orders destinations after workspaces and holds one back
+  until its workspace is bound, and `delete workspace` now also refuses while
+  OpenRouter shows the workspace holding a log destination. `state forget` takes
+  `log_destinations.NAME`. `status` lists destinations, and `plan` reports a
+  destination no local address owns as `unmanaged`.
+
+  `config` may hold a third-party credential — the sink's own API key — which
+  makes a configuration file carrying one a secret, and the documentation says
+  so. It is write-only: OpenRouter masks it on read, so state records a SHA-256
+  digest of the canonical JSON of what was written and the planner compares
+  digests. A changed digest is an `update` whose diff says `config` and nothing
+  else; an imported destination has no digest, so its first apply writes `config`
+  once; and apply does not read it back, verifying every other field as usual.
+  The value is a `DestinationConfig`, which deserializes through its own visitors
+  so no rejected value reaches a deserializer message, prints `[redacted]`, has
+  no public `Serialize`, and clears its strings on drop; `Config::load` reads the
+  file into a buffer it clears and registers every `config` string of sixteen
+  characters or more with the redactor for the rest of the run, which scrubs them
+  by exact match from every error, warning, and report. A destination write's
+  failure carries an HTTP status and OpenRouter's error code and never a response
+  body.
+
+  `type` and the workspace are fixed at creation — `PATCH` accepts neither — so a
+  change to either is held-back drift carrying the new reason
+  `destination_fixed_at_creation`, which names the field and the explicit delete
+  that clears it. The `api_key_hashes` allowlist is managed as always empty, so a
+  destination forwards every key in its workspace and a non-empty allowlist is
+  drift an apply clears by sending `null`; `filter_rules` and the `broadcast_*`
+  flags are not modelled, so they are never sent and never diffed. New error
+  kinds: `delete_log_destination_untracked` and
+  `delete_log_destination_unconfirmed`.
+  [ADR-0006](docs/adr/0006-log-destinations.md).
+
 - Workspaces as a managed resource. A `[workspaces.NAME]` block carries `name`,
   `slug`, `description`, a `budgets` table (any of `daily`, `weekly`, `monthly`,
   `lifetime`, in USD), `include_byok_in_budgets`, and `default_guardrail`.

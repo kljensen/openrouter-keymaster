@@ -167,7 +167,7 @@ fn a_converged_project_writes_nothing_at_all() {
     project.assert_read_only();
     assert_eq!(
         project.server.requests().len(),
-        7,
+        8,
         "one snapshot and no verification read: there is nothing to verify"
     );
     assert_eq!(

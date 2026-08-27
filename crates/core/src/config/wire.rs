@@ -18,6 +18,8 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
+use super::DestinationConfig;
+
 /// The whole configuration file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,6 +42,29 @@ pub(super) struct Document {
 
     #[serde(default)]
     pub(super) receivers: BTreeMap<String, Receiver>,
+
+    #[serde(default)]
+    pub(super) log_destinations: BTreeMap<String, LogDestination>,
+}
+
+/// One `[log_destinations.<address>]` table.
+///
+/// `config` is the one field here that is not deserialized as loosely as the
+/// syntax allows: it is a [`DestinationConfig`], whose own visitors refuse a
+/// value without ever quoting it (ADR-0006, item 4). Everything else follows
+/// the module's rule and arrives as a string or a number for
+/// [`super::validate`] to interpret.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct LogDestination {
+    pub(super) r#type: Option<String>,
+    pub(super) name: Option<String>,
+    pub(super) config: Option<DestinationConfig>,
+    pub(super) enabled: Option<bool>,
+    pub(super) privacy_mode: Option<bool>,
+    pub(super) sampling_rate: Option<Number>,
+    pub(super) workspace: Option<String>,
+    pub(super) workspace_id: Option<String>,
 }
 
 /// One `[workspaces.<address>]` table.

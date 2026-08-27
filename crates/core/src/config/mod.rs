@@ -14,11 +14,19 @@
 //! Second, a field that is absent is not the same as a field that is empty:
 //! see [`Managed`].
 //!
-//! Nothing here accepts credential plaintext. Unknown fields are rejected
-//! outright, every string is checked against
+//! Nothing here accepts OpenRouter credential plaintext. Unknown fields are
+//! rejected outright, every string is checked against
 //! `crate::redaction::looks_like_credential`, and no error message repeats a
 //! value read from the file.
+//!
+//! One value is different, and it is the exception that proves the rule: a log
+//! destination's [`DestinationConfig`] may hold a *third-party* credential,
+//! because there is no other channel through which OpenRouter can be told what
+//! to send logs to (ADR-0006, item 4). It is a type built to leak nothing, and
+//! [`Config::load`] registers its strings with the redactor for the rest of the
+//! run.
 
+mod destination;
 mod validate;
 mod wire;
 
@@ -29,8 +37,12 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
+use zeroize::Zeroizing;
 
 use crate::ids::{Address, ReceiverFingerprint, RemoteName, UserId, Uuid};
+
+pub(crate) use destination::{DESTINATION_TYPES, write_json_string};
+pub use destination::{DestinationConfig, DestinationType, SamplingRate};
 
 /// The only schema version this build understands.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -53,6 +65,8 @@ pub struct Config {
     pub keys: BTreeMap<Address, Key>,
     /// Secret receivers by local address.
     pub receivers: BTreeMap<Address, Receiver>,
+    /// Observability log destinations by local address.
+    pub log_destinations: BTreeMap<Address, LogDestination>,
 }
 
 impl Config {
@@ -74,12 +88,38 @@ impl Config {
     ///
     /// Returns [`ConfigError::Read`] when the file cannot be read, or the
     /// errors of [`Config::parse`].
+    ///
+    /// The file may hold a third-party credential in a log destination's
+    /// `config`, so it is read into a buffer that is cleared when it is
+    /// dropped, and every string value long enough to be a credential is
+    /// registered with the redactor for the rest of the run (ADR-0006, item 4).
+    /// [`Config::parse`] does neither: it is pure, and a caller that hands it a
+    /// string it already holds has not asked Keymaster to take charge of that
+    /// string's lifetime.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let source = std::fs::read_to_string(path).map_err(|error| ConfigError::Read {
-            path: path.to_path_buf(),
-            message: error.to_string(),
-        })?;
-        Self::parse(&source)
+        let source =
+            Zeroizing::new(
+                std::fs::read_to_string(path).map_err(|error| ConfigError::Read {
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                })?,
+            );
+        let config = Self::parse(&source)?;
+        config.register_secrets();
+        Ok(config)
+    }
+
+    /// Registers every destination `config` string with the redactor.
+    ///
+    /// Long values only — the bound is [`crate::redaction::
+    /// MIN_REGISTERED_LENGTH`] and is a documented heuristic — so a region or a
+    /// flag is not scrubbed out of every sentence that mentions it.
+    fn register_secrets(&self) {
+        for destination in self.log_destinations.values() {
+            for value in destination.config.string_values() {
+                crate::redaction::register(value);
+            }
+        }
     }
 }
 
@@ -215,6 +255,49 @@ impl fmt::Display for BudgetInterval {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// An observability log destination: where OpenRouter forwards a workspace's
+/// request logs (ADR-0006).
+///
+/// Two fields are unlike anything else in this module. `kind` and the workspace
+/// are fixed when the destination is created — `PATCH` accepts neither — so a
+/// change to one is drift nothing can converge, and the destination has to be
+/// deleted and recreated explicitly. And `config` is write-only: reads mask it,
+/// so state records a digest and the planner compares digests.
+///
+/// Three fields OpenRouter has are deliberately not modelled, and are therefore
+/// never sent and never diffed: `filter_rules`, the three `broadcast_*` flags,
+/// and — as a modelled field — `api_key_hashes`, which is managed as always
+/// empty so a destination forwards every key in its workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LogDestination {
+    /// Which kind of sink this is. Fixed at creation.
+    #[serde(rename = "type")]
+    pub kind: DestinationType,
+    /// Remote display name. Mutable remotely, never an identifier.
+    pub name: RemoteName,
+    /// The provider-specific configuration, which may hold a credential.
+    ///
+    /// Serialized as its digest, never as its value: [`Config`] is serialized
+    /// whole to build a plan fingerprint.
+    #[serde(serialize_with = "destination::serialize_digest")]
+    pub config: DestinationConfig,
+    /// Whether the destination forwards anything. Always managed; defaults to
+    /// enabled, which is OpenRouter's own default.
+    pub enabled: bool,
+    /// Whether request and response bodies are withheld, leaving only metadata.
+    /// Always managed; defaults to off, which is OpenRouter's own default.
+    pub privacy_mode: bool,
+    /// The fraction of requests forwarded. Absent means Keymaster does not
+    /// manage it.
+    pub sampling_rate: Option<SamplingRate>,
+    /// The workspace block this destination belongs to, by local address.
+    /// Resolved through the binding at plan time (ADR-0004, item 2).
+    pub workspace: Option<Address>,
+    /// The workspace this destination belongs to, by raw UUID, for a workspace
+    /// Keymaster does not manage. Fixed at creation.
+    pub workspace_id: Option<Uuid>,
 }
 
 /// A guardrail: the model, provider, and budget policy assigned to keys.

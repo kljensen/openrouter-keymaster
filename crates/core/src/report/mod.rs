@@ -38,8 +38,8 @@ use crate::state::Phase;
 pub use apply::{ActionOutcome, ApplyReport};
 pub use import::ImportReport;
 pub use lifecycle::{
-    DecommissionReport, DeleteAttempt, DeleteOutcome, DeleteReport, DeleteWorkspaceReport, Ending,
-    ForgetReport, Predecessor, Released, RetireReport, RotateReport,
+    DecommissionReport, DeleteAttempt, DeleteDestinationReport, DeleteOutcome, DeleteReport,
+    DeleteWorkspaceReport, Ending, ForgetReport, Predecessor, Released, RetireReport, RotateReport,
 };
 pub use plan::PlanReport;
 pub(crate) use recover::created_near;

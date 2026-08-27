@@ -69,7 +69,7 @@ impl Project {
     /// several cases run the binary more than once against one server and each
     /// run reads every listing from the beginning.
     pub fn observe(&self, keys: Vec<Value>, guardrails: Vec<Value>, assignments: Vec<Value>) {
-        self.observe_no_workspaces();
+        self.observe_defaults();
         for (route, items) in [
             ("/api/v1/keys", keys),
             ("/api/v1/guardrails", guardrails),
@@ -107,7 +107,7 @@ impl Project {
         guardrails: Vec<Vec<Value>>,
         assignments: Vec<Vec<Value>>,
     ) {
-        self.observe_no_workspaces();
+        self.observe_defaults();
         for (route, reads) in [
             ("/api/v1/keys", keys),
             ("/api/v1/guardrails", guardrails),
@@ -130,13 +130,13 @@ impl Project {
     }
 
     /// The fallback every snapshot needs: an organization with no workspaces,
-    /// and no budgets on any workspace a case does mount.
+    /// no budgets on any workspace a case does mount, and no log destinations.
     ///
     /// Mounted at the lowest priority there is, so anything a case mounts
-    /// itself — [`Project::observe_workspaces`], or a budget listing of its own
-    /// — wins. It exists so a case that does not care about workspaces does not
-    /// have to say so.
-    fn observe_no_workspaces(&self) {
+    /// itself — [`Project::observe_workspaces`], a budget listing of its own,
+    /// or [`Project::observe_log_destinations`] — wins. It exists so a case that
+    /// does not care about workspaces or log forwarding does not have to say so.
+    fn observe_defaults(&self) {
         self.server.mount(
             Mock::given(method("GET"))
                 .and(path("/api/v1/workspaces"))
@@ -148,6 +148,56 @@ impl Project {
                 .and(path_regex(r"^/api/v1/workspaces/[^/]+/budgets$"))
                 .respond_with(json_response(200, &empty_page()))
                 .with_priority(9),
+        );
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/observability/destinations"))
+                .respond_with(json_response(200, &empty_page()))
+                .with_priority(9),
+        );
+    }
+
+    /// Answers the log destination listing with these destinations.
+    ///
+    /// One mount for every read: `GET /observability/destinations` answers for
+    /// one workspace at a time, so a snapshot reads it once with no
+    /// `workspace_id` and once per workspace it found, and every one of those
+    /// reads should see the same organization. Deduplication by identity is the
+    /// reader's job, and answering identically is how a case exercises it.
+    pub fn observe_log_destinations(&self, destinations: Vec<Value>) {
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/observability/destinations"))
+                .and(query_param("offset", "0"))
+                .respond_with(json_response(200, &page(destinations)))
+                .with_priority(3),
+        );
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/observability/destinations"))
+                .respond_with(json_response(200, &empty_page()))
+                .with_priority(4),
+        );
+    }
+
+    /// Answers the log destination listing differently each time it is read.
+    ///
+    /// One entry per *read*, and a snapshot reads the listing once per
+    /// workspace plus once for the default workspace — so a case that mounts
+    /// workspaces has to script that many entries per run.
+    pub fn observe_destination_sequence(&self, reads: Vec<Vec<Value>>) {
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/observability/destinations"))
+                .and(query_param("offset", "0"))
+                .respond_with(Scripted::json(reads.into_iter().map(page)))
+                .with_priority(3),
+        );
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path("/api/v1/observability/destinations"))
+                .respond_with(json_response(200, &empty_page()))
+                .with_priority(4),
         );
     }
 

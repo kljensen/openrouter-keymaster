@@ -12,7 +12,7 @@ use crate::state::StateError;
 ///
 /// Defined beside the internal HTTP client and re-exported here because it is
 /// one of the errors a host handles (ADR-0003, item 7).
-pub use crate::client::ApiError;
+pub use crate::client::{ApiError, Detail};
 
 /// An application error. Every variant is safe to display: no variant may
 /// carry credential plaintext or a credential-shaped string.

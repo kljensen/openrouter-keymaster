@@ -49,8 +49,8 @@ use crate::client::ApiError;
 use crate::error::Error;
 use crate::ids::{Address, IdError, KeyHash, Uuid};
 use crate::report::{
-    DecommissionReport, DeleteAttempt, DeleteOutcome, DeleteReport, DeleteWorkspaceReport, Ending,
-    ForgetReport, Released, RetireReport,
+    DecommissionReport, DeleteAttempt, DeleteDestinationReport, DeleteOutcome, DeleteReport,
+    DeleteWorkspaceReport, Ending, ForgetReport, Released, RetireReport,
 };
 use crate::state::{
     KeyBinding, Phase, RetainedKey, RetainedStatus, State, StateFile, StateLock, TransitionError,
@@ -447,7 +447,9 @@ fn delete_tracked_workspace(context: &Context, id: &str) -> Result<WorkspaceDele
 ///
 /// Read rather than taken from state: a key another operator made in this
 /// workspace is exactly the thing this refusal exists for, and state does not
-/// know about it. Log destinations (ADR-0006) join this list when they exist.
+/// know about it. Log destinations are counted for the same reason and on the
+/// same terms (ADR-0006, item 1): deleting the workspace would take one with
+/// it, and a destination another operator made is not Keymaster's to destroy.
 fn observed_children(
     reader: &Reader<'_>,
     id: &Uuid,
@@ -464,6 +466,12 @@ fn observed_children(
             .into_iter()
             .filter(|guardrail| Some(&guardrail.id) != default_guardrail)
             .map(|guardrail| format!("guardrail {id}", id = guardrail.id)),
+    );
+    children.extend(
+        reader
+            .list_log_destinations_in(Some(id))?
+            .into_iter()
+            .map(|destination| format!("log destination {id}", id = destination.id)),
     );
     Ok(children)
 }
@@ -514,6 +522,134 @@ fn attempt_workspace_delete(
             format!(
                 "OpenRouter accepted the delete and the read that would confirm it failed: \
                  {error}. The binding stays tracked."
+            ),
+        ),
+    }
+}
+
+// --- delete log-destination --------------------------------------------------
+
+/// Deletes one tracked log destination permanently.
+///
+/// The only way a destination's `type` or workspace ever changes: both are
+/// fixed at creation, the planner holds such drift back naming the field, and
+/// this is the explicit step that clears it (ADR-0006, item 2). Nothing plans
+/// it, and no apply performs one.
+///
+/// Unlike a workspace, a destination holds nothing, so there is nothing to
+/// refuse it for. The UUID must be one a local address tracks, for the reason
+/// `delete key` requires it: a destination Keymaster does not own belongs to
+/// whoever made it.
+///
+/// # Errors
+///
+/// Returns [`LifecycleError`] for a value this command cannot use or a UUID no
+/// local address tracks, and the state and API errors of the steps it performs,
+/// including `missing_credential`. A deletion that could not be confirmed is
+/// reported beside the result document rather than in place of it.
+pub fn delete_log_destination(
+    context: Context,
+    id: &str,
+) -> Result<Outcome<DeleteDestinationReport>, Error> {
+    let attempt = delete_tracked_destination(&context, id)?;
+    if attempt.report.settled() {
+        return Ok(Outcome::ok(attempt.report));
+    }
+    Ok(Outcome::failed(
+        attempt.report,
+        LifecycleError::DestinationDeleteUnconfirmed { id: attempt.id },
+    ))
+}
+
+/// One destination deletion's result document and the identity it acted on.
+struct DestinationDeletion {
+    report: DeleteDestinationReport,
+    id: Uuid,
+}
+
+fn delete_tracked_destination(context: &Context, id: &str) -> Result<DestinationDeletion, Error> {
+    let id = Uuid::parse(id).map_err(|error| argument("--id", &error))?;
+
+    let file = StateFile::new(&context.paths.state);
+    let lock = file.lock()?;
+    let mut state = lock.read()?;
+
+    let address = state
+        .address_owning_log_destination(&id)
+        .cloned()
+        .ok_or_else(|| LifecycleError::DestinationUntracked { id: id.clone() })?;
+
+    let client = context.client()?;
+    let (reader, writer) = (Reader::new(&client), Writer::new(&client));
+    let (outcome, detail) = attempt_destination_delete(&reader, &writer, &id);
+
+    let mut released = Vec::new();
+    if outcome.is_gone()
+        && let Some(binding) = state.forget_log_destination(&address)
+    {
+        released.push(format!(
+            "log_destinations.{address} ({id})",
+            id = binding.id
+        ));
+        lock.write(&mut state)?;
+    }
+
+    Ok(DestinationDeletion {
+        report: DeleteDestinationReport::new(&address, &id, outcome, detail, released),
+        id,
+    })
+}
+
+/// Sends the one `DELETE` and establishes what it achieved by reading back.
+///
+/// The same rule as [`attempt_delete`]: a 2xx is checked against a fresh read,
+/// and only a 404 proves absence. The failures are reported by status and error
+/// code alone, because a destination endpoint's body can quote the `config` it
+/// was given (ADR-0006, item 4).
+fn attempt_destination_delete(
+    reader: &Reader<'_>,
+    writer: &Writer<'_>,
+    id: &Uuid,
+) -> (DeleteOutcome, String) {
+    if let Err(error) = writer.delete_log_destination(id) {
+        if error.status() == Some(404) {
+            return (
+                DeleteOutcome::AlreadyAbsent,
+                "OpenRouter has no such log destination, so there was nothing to delete; the \
+                 binding is no longer tracked."
+                    .to_owned(),
+            );
+        }
+        return (
+            DeleteOutcome::Failed,
+            format!(
+                "the delete failed and was sent exactly once: {status}. Whether it took effect is \
+                 unknown, so the binding stays tracked.",
+                status = error.status_and_code()
+            ),
+        );
+    }
+
+    match reader.get_log_destination(id) {
+        Err(error) if error.status() == Some(404) => (
+            DeleteOutcome::Deleted,
+            "OpenRouter returned 404 for the log destination after the delete, which is what \
+             proves it is gone; the binding is no longer tracked."
+                .to_owned(),
+        ),
+        Ok(_) => (
+            DeleteOutcome::Unconfirmed,
+            "OpenRouter accepted the delete and still returns the log destination, so it is not \
+             confirmed gone; the binding stays tracked and the delete is never resent \
+             automatically."
+                .to_owned(),
+        ),
+        Err(error) => (
+            DeleteOutcome::Unconfirmed,
+            format!(
+                "OpenRouter accepted the delete and the read that would confirm it failed: \
+                 {status}. The binding stays tracked.",
+                status = error.status_and_code()
             ),
         ),
     }
@@ -790,7 +926,9 @@ enum Target {
     Guardrail(Address),
     /// `workspaces.NAME`.
     Workspace(Address),
-    /// A bare `NAME`, which is whichever of the three is bound.
+    /// `log_destinations.NAME`.
+    LogDestination(Address),
+    /// A bare `NAME`, which is whichever of the four is bound.
     Either(Address),
 }
 
@@ -832,6 +970,7 @@ enum Resource {
     Key,
     Guardrail,
     Workspace,
+    LogDestination,
 }
 
 impl Resource {
@@ -841,6 +980,7 @@ impl Resource {
             Self::Key => "key",
             Self::Guardrail => "guardrail",
             Self::Workspace => "workspace",
+            Self::LogDestination => "log destination",
         }
     }
 }
@@ -862,6 +1002,9 @@ fn parse_target(value: &str) -> Result<Target, LifecycleError> {
     if let Some(name) = value.strip_prefix("workspaces.") {
         return Ok(Target::Workspace(local_address(name)?));
     }
+    if let Some(name) = value.strip_prefix("log_destinations.") {
+        return Ok(Target::LogDestination(local_address(name)?));
+    }
     Ok(Target::Either(local_address(value)?))
 }
 
@@ -880,11 +1023,20 @@ fn resolve<'a>(
             state.workspace(address).map(|_| Resource::Workspace),
             address,
         )),
+        Target::LogDestination(address) => Ok((
+            state
+                .log_destination(address)
+                .map(|_| Resource::LogDestination),
+            address,
+        )),
         Target::Either(address) => {
             let bound: Vec<Resource> = [
                 state.key(address).map(|_| Resource::Key),
                 state.guardrail(address).map(|_| Resource::Guardrail),
                 state.workspace(address).map(|_| Resource::Workspace),
+                state
+                    .log_destination(address)
+                    .map(|_| Resource::LogDestination),
             ]
             .into_iter()
             .flatten()
@@ -911,6 +1063,10 @@ fn release(
         Resource::Guardrail => Ok(state
             .forget_guardrail(address)
             .map(|binding| vec![Released::guardrail(&binding.id, binding.origin)])
+            .unwrap_or_default()),
+        Resource::LogDestination => Ok(state
+            .forget_log_destination(address)
+            .map(|binding| vec![Released::log_destination(&binding.id, binding.origin)])
             .unwrap_or_default()),
         Resource::Workspace => {
             let Some(binding) = state.forget_workspace(address) else {
@@ -1170,7 +1326,8 @@ pub enum LifecycleError {
     /// A bare address is bound as more than one kind of resource.
     #[error(
         "`{address}` is bound as more than one kind of resource ({kinds}), so it is not clear \
-         which to forget; say `keys.{address}`, `guardrails.{address}`, or `workspaces.{address}`",
+         which to forget; say `keys.{address}`, `guardrails.{address}`, `workspaces.{address}`, \
+         or `log_destinations.{address}`",
         kinds = kinds.join(", ")
     )]
     ForgetAmbiguous {
@@ -1225,6 +1382,29 @@ pub enum LifecycleError {
         children: Vec<String>,
     },
 
+    /// No local address owns the log destination named.
+    #[error(
+        "no local address tracks log destination {id}, so Keymaster will not delete it. A log \
+         destination it does not own belongs to whoever made it; `openrouter-keymaster import \
+         log-destination NAME --id {id}` is how one becomes Keymaster's."
+    )]
+    DestinationUntracked {
+        /// The UUID that was named.
+        id: Uuid,
+    },
+
+    /// The destination delete did not take, or could not be proved to have
+    /// taken.
+    #[error(
+        "log destination {id} is not confirmed deleted, so it stays tracked; the request was sent \
+         exactly once and is never resent automatically. The result document says what the \
+         attempt established."
+    )]
+    DestinationDeleteUnconfirmed {
+        /// The UUID that was named.
+        id: Uuid,
+    },
+
     /// The workspace delete did not take, or could not be proved to have taken.
     #[error(
         "workspace {id} is not confirmed deleted, so it stays tracked; the request was sent \
@@ -1263,6 +1443,8 @@ impl LifecycleError {
             Self::WorkspaceUntracked { .. } => "delete_workspace_untracked",
             Self::WorkspaceInhabited { .. } => "delete_workspace_inhabited",
             Self::WorkspaceDeleteUnconfirmed { .. } => "delete_workspace_unconfirmed",
+            Self::DestinationUntracked { .. } => "delete_log_destination_untracked",
+            Self::DestinationDeleteUnconfirmed { .. } => "delete_log_destination_unconfirmed",
             Self::ForgetAmbiguous { .. } => "forget_ambiguous",
             Self::ForgetPending { .. } => "forget_pending",
             Self::Refused(_) => "lifecycle_refused",

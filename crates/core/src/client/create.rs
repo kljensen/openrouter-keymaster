@@ -523,7 +523,7 @@ impl CreateKeyResponse {
         let plaintext = KeyPlaintext(self.key.take());
         let hash =
             KeyHash::parse(self.data.hash.as_str()).map_err(|error| ApiError::InvalidResponse {
-                message: format!("the created key has an unusable `hash`: {error}"),
+                message: format!("the created key has an unusable `hash`: {error}").into(),
             })?;
         Ok(CreatedKey { hash, plaintext })
     }

@@ -3,11 +3,16 @@
 # Every value here is fake. Copy this file to `openrouter-keymaster.toml`,
 # replace the names, paths, and identifiers, and run `openrouter-keymaster plan`.
 #
-# Keymaster never reads a credential from this file. The management key comes
-# from the `OPENROUTER_MANAGEMENT_KEY` environment variable, and a new
+# Keymaster never reads an OpenRouter credential from this file. The management
+# key comes from the `OPENROUTER_MANAGEMENT_KEY` environment variable, and a new
 # inference key's plaintext is delivered to a receiver — never written here,
 # never printed. A field whose value looks like an OpenRouter credential is
 # rejected, and so is any field this schema does not define.
+#
+# One thing here can be a secret: a log destination's `config` holds the
+# third-party credential OpenRouter needs to reach the sink. A file with a
+# `[log_destinations.*]` block belongs out of version control, or encrypted the
+# way any other secret is. See the block at the bottom.
 
 version = 1
 
@@ -96,3 +101,30 @@ path = "/var/lib/keymaster/laptop-pi.key"
 type = "command"
 program = "/usr/local/bin/keymaster-vault-receiver"
 args = ["add-file", "jobfeed_openrouter_api_key"]
+
+# A log destination is where OpenRouter forwards this workspace's request logs.
+# Identity is the destination UUID: removing this block orphans the binding, and
+# `openrouter-keymaster delete log-destination --id UUID` is the only deletion.
+#
+# `type` and the workspace are fixed when the destination is created —
+# OpenRouter's PATCH accepts neither — so changing either is held-back drift the
+# plan names, and the way out is an explicit delete followed by an apply.
+[log_destinations.club_audit]
+type = "datadog"
+name = "Golf Club audit log"
+# By local address, resolved through the workspace's binding at plan time, and
+# held back until there is one. `workspace_id = "…"` is the raw form, for a
+# workspace Keymaster does not manage; never both.
+workspace = "golf_club"
+enabled = true
+# When true, request and response bodies are withheld and only metadata is
+# forwarded.
+privacy_mode = false
+# The fraction of requests forwarded, between 0.0001 and 1. Omitting it leaves
+# whatever OpenRouter has.
+sampling_rate = 1
+# Provider-specific, validated server-side, and passed through as JSON. THIS IS
+# WHERE THE SECRET GOES: whatever key or token the sink needs. It is write-only
+# — OpenRouter masks it on read — so state records only a SHA-256 digest of it,
+# and a plan says `config: changed` and never what changed.
+config = { site = "datadoghq.com", apiKey = "REPLACE-ME" }

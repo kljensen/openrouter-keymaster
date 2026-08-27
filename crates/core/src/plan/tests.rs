@@ -2311,3 +2311,174 @@ fn a_default_guardrail_still_in_its_own_workspace_is_materialized_as_before() {
         guardrail.rationale
     );
 }
+
+// --- log destinations (ADR-0006) --------------------------------------------
+
+const DESTINATION_ID: &str = "77777777-7777-4777-8777-777777777777";
+
+/// A configuration with one destination, in the `club` workspace by address.
+const WITH_DESTINATION: &str = r#"
+version = 1
+
+[workspaces.club]
+name = "Golf Club"
+slug = "golf-club"
+
+[log_destinations.audit]
+type = "datadog"
+name = "Club audit"
+workspace = "club"
+config = { site = "datadoghq.com", apiKey = "dd-XXXXXXXXXXXXXXXXXXXX" }
+"#;
+
+impl World {
+    fn observe_destination(
+        &mut self,
+        id: &str,
+        kind: &str,
+        name: &str,
+    ) -> &mut ObservedDestination {
+        self.snapshot.log_destinations.push(ObservedDestination {
+            id: uuid(id),
+            kind: kind.to_owned(),
+            name: name.to_owned(),
+            enabled: true,
+            privacy_mode: false,
+            sampling_rate: None,
+            workspace_id: Some(uuid(CLUB_ID)),
+            api_key_hashes: BTreeSet::new(),
+            timestamps: RemoteTimestamps::default(),
+        });
+        self.snapshot
+            .log_destinations
+            .last_mut()
+            .expect("the destination just pushed")
+    }
+
+    fn bind_destination(&mut self, local: &str, id: &str, digest: Option<&str>) {
+        self.state
+            .bind_log_destination(
+                &address(local),
+                uuid(id),
+                digest.map(str::to_owned),
+                Origin::Imported,
+                at(0),
+            )
+            .expect("binding a log destination");
+    }
+}
+
+/// The digest of the `config` a configuration describes.
+fn destination_digest(source: &str) -> String {
+    Config::parse(source)
+        .expect("a valid test configuration")
+        .log_destinations
+        .get(&address("audit"))
+        .expect("the configured destination")
+        .config
+        .digest()
+}
+
+/// The one action at `address`.
+fn at_address<'a>(plan: &'a Plan, address: &str) -> &'a Action {
+    plan.actions()
+        .iter()
+        .find(|action| action.address.to_string() == address)
+        .unwrap_or_else(|| panic!("no action at {address}"))
+}
+
+#[test]
+fn a_converged_digest_leaves_the_write_only_configuration_out_of_the_diff() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.observe_workspace(CLUB_ID, "Golf Club", "golf-club");
+    world.observe_destination(DESTINATION_ID, "datadog", "Club audit");
+    world.bind_destination(
+        "audit",
+        DESTINATION_ID,
+        Some(&destination_digest(WITH_DESTINATION)),
+    );
+
+    let plan = world.plan(WITH_DESTINATION);
+    let action = at_address(&plan, "log_destinations.audit");
+    assert_eq!(action.kind, ActionKind::NoOp);
+    assert!(
+        action.changes.is_empty(),
+        "the masked value OpenRouter returns is never compared: {:?}",
+        action.changes
+    );
+}
+
+#[test]
+fn a_digest_that_differs_or_is_absent_is_the_only_thing_that_writes_the_configuration() {
+    for (description, stored) in [
+        ("an edited configuration", Some("0".repeat(64))),
+        ("an imported destination with no digest", None),
+    ] {
+        let mut world = World::new();
+        world.bind_workspace("club", CLUB_ID);
+        world.observe_workspace(CLUB_ID, "Golf Club", "golf-club");
+        world.observe_destination(DESTINATION_ID, "datadog", "Club audit");
+        world.bind_destination("audit", DESTINATION_ID, stored.as_deref());
+
+        let plan = world.plan(WITH_DESTINATION);
+        let action = at_address(&plan, "log_destinations.audit");
+        assert_eq!(action.kind, ActionKind::Update, "{description}");
+        let fields: Vec<&str> = action.changes.iter().map(|change| change.field).collect();
+        assert_eq!(fields, vec!["config"], "{description}");
+        assert!(
+            !format!("{:?}", action.changes).contains("datadoghq"),
+            "{description}: the diff carries no part of the value"
+        );
+    }
+}
+
+#[test]
+fn an_immutable_field_is_held_back_naming_the_field_and_writes_nothing() {
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.observe_workspace(CLUB_ID, "Golf Club", "golf-club");
+    world.observe_destination(DESTINATION_ID, "langfuse", "Club audit");
+    world.bind_destination(
+        "audit",
+        DESTINATION_ID,
+        Some(&destination_digest(WITH_DESTINATION)),
+    );
+
+    let plan = world.plan(WITH_DESTINATION);
+    let action = at_address(&plan, "log_destinations.audit");
+    assert_eq!(action.kind, ActionKind::NoOp);
+    assert!(action.is_blocked(), "held-back drift, not convergence");
+    assert!(action.holds_back(), "a plan carrying this is not converged");
+    assert!(
+        action.rationale.iter().any(|reason| matches!(
+            reason,
+            Reason::DestinationFixedAtCreation { field: "type", .. }
+        )),
+        "{:?}",
+        action.rationale
+    );
+    assert_eq!(plan.executable().count(), 0);
+}
+
+#[test]
+fn a_destination_is_ordered_after_the_workspace_it_waits_on() {
+    let plan = World::new().plan(WITH_DESTINATION);
+    let ordered: Vec<String> = plan
+        .actions()
+        .iter()
+        .map(|action| action.address.to_string())
+        .collect();
+    assert_eq!(
+        ordered,
+        vec!["workspaces.club", "log_destinations.audit"],
+        "workspaces exist before what is placed in them"
+    );
+
+    let destination = at_address(&plan, "log_destinations.audit");
+    assert_eq!(destination.kind, ActionKind::Create);
+    assert!(
+        !destination.is_executable(false),
+        "nothing is created in a workspace no binding names yet"
+    );
+}

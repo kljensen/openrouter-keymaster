@@ -63,15 +63,19 @@ use std::fmt;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::api::{ObservedAssignment, ObservedGuardrail, ObservedKey, ObservedWorkspace};
-use crate::config::{Config, Guardrail, Key, Managed, ResetInterval, Usd, Workspace};
+use crate::api::{
+    ObservedAssignment, ObservedDestination, ObservedGuardrail, ObservedKey, ObservedWorkspace,
+};
+use crate::config::{
+    Config, Guardrail, Key, LogDestination, Managed, ResetInterval, Usd, Workspace,
+};
 use crate::ids::{Address, KeyHash, OperationId, ReceiverFingerprint, RemoteName, Uuid};
 use crate::state::{CurrentKey, KeyBinding, PendingOperation, Phase, State};
 
 // The comparison itself, for the two commands that need one resource's managed
 // difference without a whole plan: `import`, which shows what a later apply
 // would reconcile, and apply, which builds the request body that reconciles it.
-pub use diff::{guardrail_changes, key_changes, workspace_changes};
+pub use diff::{guardrail_changes, key_changes, log_destination_changes, workspace_changes};
 
 /// Where a block's workspace stands, once its `workspace` address has been
 /// looked up (ADR-0004, item 2).
@@ -184,6 +188,16 @@ pub fn guardrail_placement(state: &State, desired: &Guardrail) -> Placement {
     )
 }
 
+/// Where a log destination is placed, before this run's scope has its say.
+#[must_use]
+pub fn destination_placement(state: &State, desired: &LogDestination) -> Placement {
+    placement(
+        state,
+        desired.workspace.as_ref(),
+        desired.workspace_id.as_ref(),
+    )
+}
+
 /// A complete, freshly observed picture of the resources Keymaster manages.
 ///
 /// Completeness matters: a partial read makes a key that exists look like one
@@ -199,6 +213,8 @@ pub struct Snapshot {
     pub assignments: Vec<ObservedAssignment>,
     /// Every workspace, each with the budgets it has.
     pub workspaces: Vec<ObservedWorkspace>,
+    /// Every observability log destination.
+    pub log_destinations: Vec<ObservedDestination>,
 }
 
 /// What Keymaster intends to do, in the order it intends to do it.
@@ -303,6 +319,7 @@ impl Action {
                     | Reason::DefaultGuardrailConflict { .. }
                     | Reason::DefaultGuardrailOwnedElsewhere { .. }
                     | Reason::WorkspaceFixedAtCreation { .. }
+                    | Reason::DestinationFixedAtCreation { .. }
             )
         })
     }
@@ -430,6 +447,8 @@ pub enum ResourceAddress {
     Guardrail(Address),
     /// A configured or bound key.
     Key(Address),
+    /// A configured or bound log destination.
+    LogDestination(Address),
     /// The guardrail assignment of one key.
     Assignment(Address),
     /// A remote key no local address owns.
@@ -438,6 +457,8 @@ pub enum ResourceAddress {
     RemoteGuardrail(Uuid),
     /// A remote workspace no local address owns.
     RemoteWorkspace(Uuid),
+    /// A remote log destination no local address owns.
+    RemoteLogDestination(Uuid),
 }
 
 impl fmt::Display for ResourceAddress {
@@ -446,10 +467,12 @@ impl fmt::Display for ResourceAddress {
             Self::Workspace(address) => write!(f, "workspaces.{address}"),
             Self::Guardrail(address) => write!(f, "guardrails.{address}"),
             Self::Key(address) => write!(f, "keys.{address}"),
+            Self::LogDestination(address) => write!(f, "log_destinations.{address}"),
             Self::Assignment(address) => write!(f, "keys.{address}.guardrail"),
             Self::RemoteKey(hash) => write!(f, "remote key {hash}"),
             Self::RemoteGuardrail(id) => write!(f, "remote guardrail {id}"),
             Self::RemoteWorkspace(id) => write!(f, "remote workspace {id}"),
+            Self::RemoteLogDestination(id) => write!(f, "remote log destination {id}"),
         }
     }
 }
@@ -463,6 +486,8 @@ pub enum Identity {
     Guardrail(Uuid),
     /// A workspace, by UUID.
     Workspace(Uuid),
+    /// A log destination, by UUID.
+    LogDestination(Uuid),
     /// One key's assignment to one guardrail.
     Assignment {
         /// The key's hash.
@@ -478,6 +503,7 @@ impl fmt::Display for Identity {
             Self::Key(hash) => write!(f, "key {hash}"),
             Self::Guardrail(id) => write!(f, "guardrail {id}"),
             Self::Workspace(id) => write!(f, "workspace {id}"),
+            Self::LogDestination(id) => write!(f, "log destination {id}"),
             Self::Assignment { key, guardrail } => write!(f, "key {key} on guardrail {guardrail}"),
         }
     }
@@ -674,6 +700,16 @@ pub enum Reason {
         /// The workspace whose budget is not in force.
         workspace: ResourceAddress,
     },
+    /// A log destination field OpenRouter fixes at creation differs. `PATCH`
+    /// accepts neither `type` nor `workspace_id`, and nothing here replaces a
+    /// destination on its own, so the drift is held back until an operator
+    /// deletes it and lets the next apply create it again (ADR-0006, item 2).
+    DestinationFixedAtCreation {
+        /// The configuration's name for the field.
+        field: &'static str,
+        /// The destination that would have to be deleted.
+        id: Uuid,
+    },
 }
 
 /// What executing an action would risk.
@@ -832,6 +868,7 @@ pub fn plan(config: &Config, state: &State, observed: &Snapshot, workspace: Opti
     let mut actions = Vec::new();
 
     plan_workspaces(&index, &mut actions);
+    plan_log_destinations(&index, &mut actions);
     plan_guardrails(&index, &mut actions);
     plan_keys(&index, &mut actions);
     plan_orphans(&index, &mut actions);
@@ -1011,9 +1048,13 @@ fn issues_credential(kind: ActionKind, address: &ResourceAddress) -> bool {
 enum Stage {
     /// An unresolved operation stops everything, so it is reported first.
     Recovery,
-    /// Workspaces exist before the guardrails and keys they hold, because a
-    /// workspace is fixed at creation on both (ADR-0004, item 2).
+    /// Workspaces exist before the guardrails, keys, and log destinations they
+    /// hold, because a workspace is fixed at creation on all three (ADR-0004,
+    /// item 2; ADR-0006, item 1).
     Workspace,
+    /// Log destinations sit directly inside a workspace and nothing else
+    /// depends on one, so they come next.
+    LogDestination,
     /// Guardrails exist before the keys that must be secured by them.
     Guardrail,
     /// Keys exist before their assignments.
@@ -1036,12 +1077,14 @@ fn ordering_key(action: &Action) -> (Stage, &ResourceAddress, ActionKind, Option
     } else {
         match action.address {
             ResourceAddress::Workspace(_) => Stage::Workspace,
+            ResourceAddress::LogDestination(_) => Stage::LogDestination,
             ResourceAddress::Guardrail(_) => Stage::Guardrail,
             ResourceAddress::Key(_) => Stage::Key,
             ResourceAddress::Assignment(_) => Stage::Assignment,
             ResourceAddress::RemoteKey(_)
             | ResourceAddress::RemoteGuardrail(_)
-            | ResourceAddress::RemoteWorkspace(_) => Stage::Remote,
+            | ResourceAddress::RemoteWorkspace(_)
+            | ResourceAddress::RemoteLogDestination(_) => Stage::Remote,
         }
     };
     (
@@ -1090,10 +1133,12 @@ struct Index<'a> {
     keys: BTreeMap<&'a KeyHash, &'a ObservedKey>,
     guardrails: BTreeMap<&'a Uuid, &'a ObservedGuardrail>,
     workspaces: BTreeMap<&'a Uuid, &'a ObservedWorkspace>,
+    destinations: BTreeMap<&'a Uuid, &'a ObservedDestination>,
     assignments: BTreeMap<&'a KeyHash, BTreeMap<&'a Uuid, &'a ObservedAssignment>>,
     key_owner: BTreeMap<&'a KeyHash, &'a Address>,
     guardrail_owner: BTreeMap<&'a Uuid, &'a Address>,
     workspace_owner: BTreeMap<&'a Uuid, &'a Address>,
+    destination_owner: BTreeMap<&'a Uuid, &'a Address>,
 }
 
 impl<'a> Index<'a> {
@@ -1127,6 +1172,11 @@ impl<'a> Index<'a> {
                 .iter()
                 .map(|workspace| (&workspace.id, workspace))
                 .collect(),
+            destinations: observed
+                .log_destinations
+                .iter()
+                .map(|destination| (&destination.id, destination))
+                .collect(),
             assignments,
             key_owner: state
                 .keys()
@@ -1143,7 +1193,37 @@ impl<'a> Index<'a> {
                 .iter()
                 .map(|(address, binding)| (&binding.id, address))
                 .collect(),
+            destination_owner: state
+                .log_destinations()
+                .iter()
+                .map(|(address, binding)| (&binding.id, address))
+                .collect(),
         }
+    }
+
+    /// Every remote log destination carrying `name` and in scope, owned or not.
+    fn destinations_named(&self, name: &RemoteName) -> Vec<Identity> {
+        self.destinations
+            .values()
+            .filter(|destination| self.in_scope(destination.workspace_id.as_ref()))
+            .filter(|destination| destination.name.trim() == name.as_str())
+            .map(|destination| Identity::LogDestination(destination.id.clone()))
+            .collect()
+    }
+
+    /// Remote log destinations carrying `name`, in scope, that no local address
+    /// owns.
+    fn unowned_destinations_named(&self, name: &RemoteName) -> Vec<Identity> {
+        self.destinations_named(name)
+            .into_iter()
+            .filter(|identity| match identity {
+                Identity::LogDestination(id) => !self.destination_owner.contains_key(id),
+                Identity::Key(_)
+                | Identity::Guardrail(_)
+                | Identity::Workspace(_)
+                | Identity::Assignment { .. } => true,
+            })
+            .collect()
     }
 
     /// Remote workspaces carrying `name`, in scope, that no local address owns.
@@ -1152,7 +1232,10 @@ impl<'a> Index<'a> {
             .into_iter()
             .filter(|identity| match identity {
                 Identity::Workspace(id) => !self.workspace_owner.contains_key(id),
-                Identity::Key(_) | Identity::Guardrail(_) | Identity::Assignment { .. } => true,
+                Identity::Key(_)
+                | Identity::Guardrail(_)
+                | Identity::LogDestination(_)
+                | Identity::Assignment { .. } => true,
             })
             .collect()
     }
@@ -1225,7 +1308,10 @@ impl<'a> Index<'a> {
             .into_iter()
             .filter(|identity| match identity {
                 Identity::Guardrail(id) => !self.guardrail_owner.contains_key(id),
-                Identity::Key(_) | Identity::Workspace(_) | Identity::Assignment { .. } => true,
+                Identity::Key(_)
+                | Identity::Workspace(_)
+                | Identity::LogDestination(_)
+                | Identity::Assignment { .. } => true,
             })
             .collect()
     }
@@ -1279,10 +1365,14 @@ impl<'a> Index<'a> {
                 }
                 placement
             }
+            ResourceAddress::LogDestination(address) => {
+                destination_placement(self.state, self.config.log_destinations.get(address)?)
+            }
             ResourceAddress::Workspace(_)
             | ResourceAddress::RemoteKey(_)
             | ResourceAddress::RemoteGuardrail(_)
-            | ResourceAddress::RemoteWorkspace(_) => return None,
+            | ResourceAddress::RemoteWorkspace(_)
+            | ResourceAddress::RemoteLogDestination(_) => return None,
         };
         match placement {
             Placement::In(id) => Some(id),
@@ -1399,6 +1489,107 @@ fn plan_workspace(address: &Address, desired: &Workspace, index: &Index<'_>) -> 
         changes,
         rationale: vec![reason],
         ..Proposal::default()
+    }
+    .into_action(kind, at)
+}
+
+// --- log destinations -------------------------------------------------------
+
+fn plan_log_destinations(index: &Index<'_>, actions: &mut Vec<Action>) {
+    for (address, desired) in &index.config.log_destinations {
+        actions.push(plan_log_destination(address, desired, index));
+    }
+}
+
+/// The plan for one `[log_destinations.<address>]` block (ADR-0006).
+///
+/// The shape is a workspace's: bound or not, present or not, drifted or not.
+/// Two things are its own. `config` is write-only, so the comparison reads the
+/// digest state records rather than anything OpenRouter returned. And `type`
+/// and the workspace are fixed at creation on a resource nothing here replaces,
+/// so a difference in either is held back rather than patched.
+fn plan_log_destination(address: &Address, desired: &LogDestination, index: &Index<'_>) -> Action {
+    let at = ResourceAddress::LogDestination(address.clone());
+    let depends_on = workspace_dependency(desired.workspace.as_ref());
+    // Where the configuration puts it, in the same order every other block
+    // resolves: what the block names, then this run's scope.
+    let placed = destination_placement(index.state, desired)
+        .identity()
+        .cloned()
+        .or_else(|| index.workspace.cloned());
+
+    let Some(binding) = index.state.log_destination(address) else {
+        let candidates = index.unowned_destinations_named(&desired.name);
+        if !candidates.is_empty() {
+            // A name is mutable and not unique, so a match is a candidate for
+            // `import`, never an adoption (ADR-0001).
+            return Proposal {
+                rationale: vec![Reason::NameMatches { candidates }],
+                ..Proposal::default()
+            }
+            .into_action(ActionKind::AdoptionRequired, at);
+        }
+        return Proposal {
+            changes: diff::log_destination_changes(desired, None, placed.as_ref(), None),
+            depends_on,
+            rationale: vec![Reason::NotCreatedYet],
+            ..Proposal::default()
+        }
+        .into_action(ActionKind::Create, at);
+    };
+
+    let identity = Some(Identity::LogDestination(binding.id.clone()));
+    let Some(observed) = index.destinations.get(&binding.id) else {
+        // Bound but absent, and never recreated: a new destination would have a
+        // new UUID, and recreating one silently would restart log forwarding
+        // under an identity nothing recorded.
+        let mut rationale = vec![Reason::AbsentRemotely];
+        let holders = index.destinations_named(&desired.name);
+        if !holders.is_empty() {
+            rationale.push(Reason::NameCollision { holders });
+        }
+        return Proposal {
+            identity,
+            rationale,
+            ..Proposal::default()
+        }
+        .into_action(ActionKind::Missing, at);
+    };
+
+    let changes = diff::log_destination_changes(
+        desired,
+        Some(observed),
+        placed.as_ref(),
+        binding.config_digest.as_deref(),
+    );
+
+    if let Some(field) = changes
+        .iter()
+        .map(|change| change.field)
+        .find(|field| diff::IMMUTABLE_DESTINATION_FIELDS.contains(field))
+    {
+        return Proposal {
+            identity,
+            changes,
+            depends_on,
+            rationale: vec![Reason::DestinationFixedAtCreation {
+                field,
+                id: binding.id.clone(),
+            }],
+        }
+        .into_action(ActionKind::NoOp, at);
+    }
+
+    let (kind, reason) = if changes.is_empty() {
+        (ActionKind::NoOp, Reason::InSync)
+    } else {
+        (ActionKind::Update, Reason::Drift)
+    };
+    Proposal {
+        identity,
+        changes,
+        depends_on,
+        rationale: vec![reason],
     }
     .into_action(kind, at)
 }
@@ -2226,6 +2417,23 @@ fn plan_orphans(index: &Index<'_>, actions: &mut Vec<Action>) {
             ),
         );
     }
+
+    for (address, binding) in index.state.log_destinations() {
+        if index.config.log_destinations.contains_key(address) {
+            continue;
+        }
+        actions.push(
+            Proposal {
+                identity: Some(Identity::LogDestination(binding.id.clone())),
+                rationale: vec![Reason::RemovedFromConfiguration],
+                ..Proposal::default()
+            }
+            .into_action(
+                ActionKind::OrphanedBinding,
+                ResourceAddress::LogDestination(address.clone()),
+            ),
+        );
+    }
 }
 
 /// Remote resources no local address owns. Reported so an operator can see
@@ -2285,6 +2493,25 @@ fn plan_unmanaged(index: &Index<'_>, actions: &mut Vec<Action>) {
             .into_action(
                 ActionKind::Unmanaged,
                 ResourceAddress::RemoteWorkspace(workspace.id.clone()),
+            ),
+        );
+    }
+
+    for destination in index.destinations.values() {
+        if index.destination_owner.contains_key(&destination.id)
+            || !index.in_scope(destination.workspace_id.as_ref())
+        {
+            continue;
+        }
+        actions.push(
+            Proposal {
+                identity: Some(Identity::LogDestination(destination.id.clone())),
+                rationale: vec![Reason::NotConfigured],
+                ..Proposal::default()
+            }
+            .into_action(
+                ActionKind::Unmanaged,
+                ResourceAddress::RemoteLogDestination(destination.id.clone()),
             ),
         );
     }

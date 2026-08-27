@@ -198,6 +198,8 @@ openrouter-keymaster apply                         converge OpenRouter with the 
 openrouter-keymaster import key NAME --hash HASH   bind an existing key by its hash
 openrouter-keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID
 openrouter-keymaster import workspace NAME --id ID bind an existing workspace by its UUID
+openrouter-keymaster import log-destination NAME --id ID
+                                                   bind an existing log destination by its UUID
 openrouter-keymaster rotate NAME                   stage a replacement key
 openrouter-keymaster recover inspect NAME          report an interrupted key operation
 openrouter-keymaster recover resolve NAME ...      attest what an ambiguous operation did
@@ -206,6 +208,8 @@ openrouter-keymaster retire NAME --hash HASH       disable a tracked retained ke
 openrouter-keymaster decommission NAME --hash HASH end the key an address is using
 openrouter-keymaster delete key --hash HASH        permanently delete a tracked key
 openrouter-keymaster delete workspace --id UUID    permanently delete a tracked workspace
+openrouter-keymaster delete log-destination --id UUID
+                                                   permanently delete a tracked log destination
 openrouter-keymaster state forget ADDRESS          relinquish local ownership of an address
 ```
 
@@ -362,17 +366,60 @@ the old one held would be beyond reach, and a bound workspace that is absent is
 reported as `missing` like a missing key.
 
 `openrouter-keymaster delete workspace --id UUID` refuses while OpenRouter shows
-the workspace holding any key or guardrail, tracked or not, because deleting a
-workspace deletes what is in it and Keymaster does not destroy what it does not
-manage. The workspace's own default guardrail is not an occupant: it cannot
-outlive the workspace, so its binding is released with it.
+the workspace holding any key, guardrail, or log destination, tracked or not,
+because deleting a workspace deletes what is in it and Keymaster does not
+destroy what it does not manage. The workspace's own default guardrail is not an
+occupant: it cannot outlive the workspace, so its binding is released with it.
+
+## Log destinations
+
+A `[log_destinations.NAME]` block is where OpenRouter forwards a workspace's
+request logs — Datadog, S3, a webhook, and a dozen others. It carries `type`,
+`name`, `config`, `enabled`, `privacy_mode`, `sampling_rate`, and a workspace by
+local address or raw UUID. Identity is the destination UUID, the planner orders
+destinations after workspaces and holds one back until its workspace is bound,
+and removal orphans the binding like everything else (ADR-0006).
+
+Three things about it are unlike any other resource.
+
+**`config` may be a secret, and is write-only.** It holds whatever credential
+the sink needs — a Datadog API key, a webhook token — because there is no other
+channel through which OpenRouter can be told what to send logs to. That makes
+the configuration file a secret: keep it out of version control, or encrypt it.
+Inside Keymaster the value is a `DestinationConfig`, which deserializes through
+its own visitors so no rejected value ever enters a deserializer message, prints
+`[redacted]`, has no public `Serialize`, and clears its strings when dropped;
+`Config::load` reads the file into a buffer it clears, and registers every
+string of sixteen characters or more with the redactor for the rest of the run,
+which scrubs them by exact match from every error, warning, and report. A
+destination write's failure carries an HTTP status and OpenRouter's error code
+and never a response body, which can quote what it refused.
+
+Because reads mask `config`, state records a SHA-256 digest of the canonical
+JSON of what was written, and the planner compares digests: a changed digest is
+an `update` whose diff says `config` and nothing else, and an imported
+destination has no digest so its first apply writes `config` once. Apply does
+not read it back — the `2xx` is the only evidence the API offers — and verifies
+every other field as usual.
+
+**`type` and the workspace are fixed at creation.** OpenRouter's `PATCH` accepts
+neither, and nothing here replaces a destination on its own, so a change to
+either is held-back drift naming the field. `openrouter-keymaster delete
+log-destination --id UUID` is the explicit step that clears it, and the next
+apply creates the destination the configuration now describes.
+
+**The key allowlist is managed as always empty**, so a destination forwards
+every key in its workspace. A non-empty allowlist OpenRouter holds is drift the
+next apply clears by sending `null`. `filter_rules` and the `broadcast_*` flags
+are not modelled at all: never sent, never diffed, preserved.
 
 ## Import
 
 `openrouter-keymaster import key NAME --hash HASH`,
-`openrouter-keymaster import guardrail NAME --id UUID`, and
-`openrouter-keymaster import workspace NAME --id UUID` bind an existing remote
-object to a local address. **Import is the operator's authority to make that
+`openrouter-keymaster import guardrail NAME --id UUID`,
+`openrouter-keymaster import workspace NAME --id UUID`, and
+`openrouter-keymaster import log-destination NAME --id UUID` bind an existing
+remote object to a local address. **Import is the operator's authority to make that
 binding**; Keymaster never makes it on its own, because a display name is
 mutable and not unique. A remote object whose name matches an unbound address
 is reported by `plan` as `adoption_required` — a candidate, never an adoption.
@@ -387,9 +434,9 @@ The command reads one object and writes one binding, in this order:
    desired state nobody wrote is one no plan can act on, and a key's generation
    comes from the configuration, so the file it is read from must be one
    nothing can edit out from under the write that follows.
-4. `GET /keys/{hash}` or `GET /guardrails/{id}` — the exact identity, never a
-   listing filtered by name. A confirmed 404 ends the run and state is
-   untouched.
+4. `GET /keys/{hash}`, `GET /guardrails/{id}`, `GET /workspaces/{id}`, or
+   `GET /observability/destinations/{id}` — the exact identity, never a listing
+   filtered by name. A confirmed 404 ends the run and state is untouched.
 5. Refuse an address already bound to a different object, and refuse an object
    another address already owns. Either refusal names both addresses.
 6. Report the managed fields a later `openrouter-keymaster apply` would
@@ -400,6 +447,11 @@ The command reads one object and writes one binding, in this order:
 remote object does not have is reported, not applied. Repeating an import that
 changes nothing writes nothing at all — not even a new serial — and says
 `unchanged`.
+
+**An imported log destination records no `config` digest.** OpenRouter masks a
+destination's configuration on read, so there is nothing Keymaster could
+honestly claim to have written; the first apply after the import writes the
+configured value once and records its digest from then on.
 
 **An imported key records no delivery.** Its plaintext was never Keymaster's to
 hold, so it can never be delivered to a receiver; the way to put a

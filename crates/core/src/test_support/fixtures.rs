@@ -141,6 +141,36 @@ pub fn workspace_budgets(budgets: &[(&str, f64)], include_byok_in_budgets: bool)
     json!({ "data": data, "include_byok_in_budgets": include_byok_in_budgets })
 }
 
+/// Obviously fake log destination UUIDs.
+pub const FAKE_DESTINATION_ID: &str = "55555555-5555-4555-8555-555555555555";
+pub const OTHER_FAKE_DESTINATION_ID: &str = "66666666-6666-4666-8666-666666666666";
+
+/// One log destination as a list, get, or write response returns it.
+///
+/// `config` is present and masked, exactly as OpenRouter returns one. It is
+/// here precisely because Keymaster must ignore it: the wire type does not
+/// model the field, and a test that found a masked value in a plan should fail.
+#[must_use]
+pub fn log_destination(id: &str, kind: &str, name: &str) -> Value {
+    json!({
+        "id": id,
+        "type": kind,
+        "name": name,
+        "config": { "site": "datadoghq.com", "apiKey": "dd-a...Z9" },
+        "enabled": true,
+        "privacy_mode": false,
+        "sampling_rate": 1,
+        "api_key_hashes": null,
+        "filter_rules": null,
+        "broadcast_generation_cost": false,
+        "broadcast_generation_identity": false,
+        "broadcast_generation_request_context": false,
+        "workspace_id": FAKE_WORKSPACE_ID,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    })
+}
+
 /// One key-to-guardrail assignment.
 #[must_use]
 pub fn assignment(id: &str, key_hash: &str, guardrail_id: &str) -> Value {

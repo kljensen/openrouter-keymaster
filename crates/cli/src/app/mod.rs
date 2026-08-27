@@ -59,6 +59,9 @@ pub fn run<O: Write, E: Write>(cli: &Cli, renderer: &mut Renderer<O, E>) -> Resu
         Command::Import {
             resource: ImportResource::Workspace { name, id },
         } => rendered!(renderer, ops::import_workspace(context, name, id)),
+        Command::Import {
+            resource: ImportResource::LogDestination { name, id },
+        } => rendered!(renderer, ops::import_log_destination(context, name, id)),
         // The CLI applies whatever the recomputed plan says. Binding a plan to
         // the one an operator read is a caller's to ask for, and no terminal
         // run has a plan to bind.
@@ -86,6 +89,9 @@ pub fn run<O: Write, E: Write>(cli: &Cli, renderer: &mut Renderer<O, E>) -> Resu
         Command::Delete {
             resource: DeleteResource::Workspace { id },
         } => rendered!(renderer, ops::delete_workspace(context, id)),
+        Command::Delete {
+            resource: DeleteResource::LogDestination { id },
+        } => rendered!(renderer, ops::delete_log_destination(context, id)),
         Command::State {
             action: StateAction::Forget { address },
         } => rendered!(renderer, ops::forget(context, address)),

@@ -110,6 +110,27 @@ impl ImportReport {
         )
     }
 
+    /// Describes an imported log destination.
+    #[must_use]
+    pub(crate) fn log_destination(
+        address: &Address,
+        id: &Uuid,
+        origin: Origin,
+        remote_name: &str,
+        changes: &[FieldChange],
+        bound: bool,
+    ) -> Self {
+        Self::new(
+            "log destination",
+            format!("log_destinations.{address}"),
+            format!("log destination {id}"),
+            origin,
+            remote_name,
+            changes,
+            bound,
+        )
+    }
+
     fn new(
         resource: &'static str,
         address: String,
@@ -154,6 +175,21 @@ impl ImportReport {
                  and `openrouter-keymaster plan` shows what it would do",
                 plural(self.changes.len(), "managed field")
             ));
+        }
+        // Said only when the import actually leaves `config` to be written: a
+        // first import records no digest, so the next apply writes the
+        // configured value over whatever OpenRouter holds. Repeating an import
+        // that changed nothing has a digest already, `config` is not in the
+        // change list, and there is nothing to warn about (ADR-0006, item 3).
+        if self.resource == "log destination"
+            && self.changes.iter().any(|change| change.field() == "config")
+        {
+            warnings.push(
+                "a log destination's `config` is write-only and OpenRouter masks it, so this \
+                 import records no digest for it; the next `openrouter-keymaster apply` writes \
+                 the configured value once and records its digest"
+                    .to_owned(),
+            );
         }
         if self.resource == "key" {
             // Worth saying plainly rather than leaving to be discovered: an
