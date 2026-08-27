@@ -118,6 +118,7 @@ fn context(project: &Project) -> Context {
             ManagementKey::from_secret(Zeroizing::new(SECRET_SENTINEL_KEY.to_owned()))
                 .expect("a usable test credential"),
         ),
+        workspace: None,
     }
 }
 

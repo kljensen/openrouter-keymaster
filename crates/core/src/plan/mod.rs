@@ -18,6 +18,10 @@
 //!   reported as unmanaged.
 //! - A remote object no address owns is reported as [`ActionKind::Unmanaged`]
 //!   and never changed.
+//! - A run scoped to one workspace reports and matches names only there. The
+//!   snapshot is still the whole organization, so identity — which decides
+//!   whether a bound object is present or missing — is unaffected (ADR-0004,
+//!   item 5).
 //! - Removing a block from the configuration does not delete or forget
 //!   anything; the binding is reported as [`ActionKind::OrphanedBinding`] and
 //!   stays tracked.
@@ -649,10 +653,15 @@ impl fmt::Display for Expansion {
 
 /// Computes the plan.
 ///
-/// Pure: the same three inputs always produce the same plan.
+/// Pure: the same inputs always produce the same plan.
+///
+/// `workspace` is the run's scope (ADR-0004, item 5). With `Some(id)`, matching
+/// by name and the report of unmanaged resources consider only remote
+/// resources in that workspace; matching by identity, which decides whether a
+/// bound resource is present or missing, still uses the whole snapshot.
 #[must_use]
-pub fn plan(config: &Config, state: &State, observed: &Snapshot) -> Plan {
-    let index = Index::build(config, state, observed);
+pub fn plan(config: &Config, state: &State, observed: &Snapshot, workspace: Option<&Uuid>) -> Plan {
+    let index = Index::build(config, state, observed, workspace);
     let mut actions = Vec::new();
 
     plan_guardrails(&index, &mut actions);
@@ -831,6 +840,9 @@ impl Proposal {
 struct Index<'a> {
     config: &'a Config,
     state: &'a State,
+    /// The one workspace this run reports on and matches names in, when it is
+    /// scoped to one.
+    workspace: Option<&'a Uuid>,
     keys: BTreeMap<&'a KeyHash, &'a ObservedKey>,
     guardrails: BTreeMap<&'a Uuid, &'a ObservedGuardrail>,
     assignments: BTreeMap<&'a KeyHash, BTreeMap<&'a Uuid, &'a ObservedAssignment>>,
@@ -839,7 +851,12 @@ struct Index<'a> {
 }
 
 impl<'a> Index<'a> {
-    fn build(config: &'a Config, state: &'a State, observed: &'a Snapshot) -> Self {
+    fn build(
+        config: &'a Config,
+        state: &'a State,
+        observed: &'a Snapshot,
+        workspace: Option<&'a Uuid>,
+    ) -> Self {
         let mut assignments: BTreeMap<&KeyHash, BTreeMap<&Uuid, &ObservedAssignment>> =
             BTreeMap::new();
         for assignment in &observed.assignments {
@@ -852,6 +869,7 @@ impl<'a> Index<'a> {
         Self {
             config,
             state,
+            workspace,
             keys: observed.keys.iter().map(|key| (&key.hash, key)).collect(),
             guardrails: observed
                 .guardrails
@@ -872,10 +890,21 @@ impl<'a> Index<'a> {
         }
     }
 
-    /// Remote keys carrying `name` that no local address owns.
+    /// Whether a remote resource in `workspace` is one this run reports on and
+    /// matches names against.
+    ///
+    /// Everything is, without a scope. With one, only what is in it: another
+    /// club's identically named key must not block this one, and must not be
+    /// reported as noise either (ADR-0004, item 5).
+    fn in_scope(&self, workspace: Option<&Uuid>) -> bool {
+        self.workspace.is_none_or(|scope| workspace == Some(scope))
+    }
+
+    /// Remote keys carrying `name`, in scope, that no local address owns.
     fn unowned_keys_named(&self, name: &RemoteName) -> Vec<Identity> {
         self.keys
             .values()
+            .filter(|key| self.in_scope(key.workspace_id.as_ref()))
             .filter(|key| key.name.trim() == name.as_str())
             .filter(|key| !self.key_owner.contains_key(&key.hash))
             .map(|key| Identity::Key(key.hash.clone()))
@@ -896,7 +925,7 @@ impl<'a> Index<'a> {
             .collect()
     }
 
-    /// Every remote guardrail carrying `name`, owned or not.
+    /// Every remote guardrail carrying `name` and in scope, owned or not.
     ///
     /// What a recreation has to be checked against: a guardrail another
     /// address owns and someone renamed still collides, and creating a second
@@ -905,6 +934,7 @@ impl<'a> Index<'a> {
     fn guardrails_named(&self, name: &RemoteName) -> Vec<Identity> {
         self.guardrails
             .values()
+            .filter(|guardrail| self.in_scope(guardrail.workspace_id.as_ref()))
             .filter(|guardrail| guardrail.name.trim() == name.as_str())
             .map(|guardrail| Identity::Guardrail(guardrail.id.clone()))
             .collect()
@@ -1545,37 +1575,43 @@ fn plan_orphans(index: &Index<'_>, actions: &mut Vec<Action>) {
 
 /// Remote resources no local address owns. Reported so an operator can see
 /// them, and never changed.
+///
+/// A scoped run reports only what is in its workspace: another club's keys are
+/// not this operator's to see, and reporting them as unmanaged would make every
+/// run noise (ADR-0004, item 5).
 fn plan_unmanaged(index: &Index<'_>, actions: &mut Vec<Action>) {
-    for hash in index.keys.keys() {
-        if index.key_owner.contains_key(hash) {
+    for key in index.keys.values() {
+        if index.key_owner.contains_key(&key.hash) || !index.in_scope(key.workspace_id.as_ref()) {
             continue;
         }
         actions.push(
             Proposal {
-                identity: Some(Identity::Key((*hash).clone())),
+                identity: Some(Identity::Key(key.hash.clone())),
                 rationale: vec![Reason::NotConfigured],
                 ..Proposal::default()
             }
             .into_action(
                 ActionKind::Unmanaged,
-                ResourceAddress::RemoteKey((*hash).clone()),
+                ResourceAddress::RemoteKey(key.hash.clone()),
             ),
         );
     }
 
-    for id in index.guardrails.keys() {
-        if index.guardrail_owner.contains_key(id) {
+    for guardrail in index.guardrails.values() {
+        if index.guardrail_owner.contains_key(&guardrail.id)
+            || !index.in_scope(guardrail.workspace_id.as_ref())
+        {
             continue;
         }
         actions.push(
             Proposal {
-                identity: Some(Identity::Guardrail((*id).clone())),
+                identity: Some(Identity::Guardrail(guardrail.id.clone())),
                 rationale: vec![Reason::NotConfigured],
                 ..Proposal::default()
             }
             .into_action(
                 ActionKind::Unmanaged,
-                ResourceAddress::RemoteGuardrail((*id).clone()),
+                ResourceAddress::RemoteGuardrail(guardrail.id.clone()),
             ),
         );
     }

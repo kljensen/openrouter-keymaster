@@ -25,14 +25,15 @@ use serde::Serialize;
 
 use crate::client::Patch;
 use crate::config::{Guardrail, Key, Managed, ResetInterval, Usd};
-use crate::ids::{KeyHash, RemoteName};
+use crate::ids::{KeyHash, RemoteName, Uuid};
 
 /// The body of `POST /guardrails` and `PATCH /guardrails/{id}`.
 ///
 /// One type for both, because the managed fields are the same ones. They
-/// differ in exactly one way, which [`GuardrailBody::create`] applies: a create
-/// omits what an update would clear, since a field that has never existed
-/// cannot be unset.
+/// differ in two ways, both of which [`GuardrailBody::create`] applies: a
+/// create omits what an update would clear, since a field that has never
+/// existed cannot be unset, and a create is the only place a workspace can be
+/// named, since OpenRouter fixes one when the guardrail is created.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GuardrailBody {
     /// Display name. Always managed, so always sent.
@@ -59,14 +60,19 @@ pub struct GuardrailBody {
     /// per-provider flags are OpenRouter's and are never sent.
     #[serde(skip_serializing_if = "Patch::is_omitted")]
     enforce_zdr: Patch<bool>,
+    /// The workspace a create places the guardrail in, when this run is scoped
+    /// to one. Never sent by an update: OpenRouter fixes it at creation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_id: Option<Uuid>,
 }
 
 impl GuardrailBody {
-    /// The body that creates `desired`.
+    /// The body that creates `desired`, in `workspace` when a scope names one.
     #[must_use]
-    pub fn create(desired: &Guardrail) -> Self {
+    pub fn create(desired: &Guardrail, workspace: Option<&Uuid>) -> Self {
         let update = Self::update(desired);
         Self {
+            workspace_id: workspace.cloned(),
             description: update.description.omit_clears(),
             allowed_models: update.allowed_models.omit_clears(),
             ignored_models: update.ignored_models.omit_clears(),
@@ -93,6 +99,7 @@ impl GuardrailBody {
             reset_interval: interval(&desired.reset_interval),
             include_byok_in_budgets: desired.include_byok_in_limit,
             enforce_zdr: desired.require_zdr.map_or(Patch::Omit, Patch::Set),
+            workspace_id: None,
         }
     }
 }
@@ -279,9 +286,24 @@ mod tests {
             Value::Null
         );
         assert_eq!(
-            body(&GuardrailBody::create(&desired)),
+            body(&GuardrailBody::create(&desired, None)),
             json!({ "name": "cheap-rail", "include_byok_in_budgets": false }),
             "a field that has never existed cannot be unset"
+        );
+    }
+
+    #[test]
+    fn a_scoped_create_places_the_guardrail_in_the_scope() {
+        let desired = guardrail("version = 1\n[guardrails.cheap]\nname = \"cheap-rail\"\n");
+        let scope = Uuid::parse("00000000-0000-4000-8000-000000000001").expect("a valid UUID");
+        assert_eq!(
+            body(&GuardrailBody::create(&desired, Some(&scope)))["workspace_id"],
+            json!("00000000-0000-4000-8000-000000000001")
+        );
+        assert_eq!(
+            body(&GuardrailBody::update(&desired)).get("workspace_id"),
+            None,
+            "a workspace is fixed at creation and is never patched"
         );
     }
 

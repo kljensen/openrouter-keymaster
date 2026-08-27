@@ -9,6 +9,21 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Added
 
+- A workspace scope. `Context.workspace` — set from the new `--workspace UUID`
+  global option — names the one OpenRouter workspace a run places resources in
+  and reports on. With a scope, a configuration whose key names a different
+  `workspace_id` is refused before any request, every key and guardrail the run
+  creates is placed in the scope, `plan` and `status` leave out `unmanaged`
+  resources from other workspaces, and matching by name — adoption candidates,
+  and the collision check before a guarded recreation — considers only
+  resources in the scope, so another club's identically named key cannot block
+  this one. The snapshot is still the whole organization, so a bound resource
+  is judged present or missing exactly as before; the scope is a guard on
+  placement and a filter on noise, not an isolation mechanism. Without it,
+  behavior is unchanged. The plan fingerprint now covers the scope, so a
+  fingerprint taken by an earlier build no longer matches. First step of
+  [ADR-0004](docs/adr/0004-workspaces.md).
+
 - A Rust API. `openrouter_keymaster_core::ops` holds one function per command —
   `plan`, `status`, `apply`, `import_key`, `import_guardrail`, `rotate`,
   `recover_inspect`, `recover_resolve`, `recover_replace`, `retire`,

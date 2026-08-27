@@ -68,8 +68,8 @@ openrouter-keymaster-core = { git = "https://github.com/kljensen/openrouter-keym
 ```
 
 Every operation is a function in `ops` taking an owned `Context` — the two file
-paths, the endpoint, and the credential — and returning the command's report
-rather than printing it:
+paths, the endpoint, the credential, and an optional workspace scope — and
+returning the command's report rather than printing it:
 
 ```rust
 use openrouter_keymaster_core::ops::{self, Context, ManagementKey, Options, Paths};
@@ -79,6 +79,7 @@ let context = Context {
     paths: Paths { config: "keymaster.toml".into(), state: "state.json".into() },
     options: Options::default(),
     key: Some(ManagementKey::from_secret(Zeroizing::new(secret))?),
+    workspace: None,
 };
 
 let outcome = ops::plan(context)?;
@@ -96,6 +97,25 @@ whole call — context in, outcome out — to `tokio::task::spawn_blocking` or a
 equivalent; that is what `Context: Send + 'static` is for. And the state lock
 refuses a concurrent writer rather than queueing it, so a process that serves
 many requests serializes its own operations on one state file.
+
+### Scoping a run to one workspace
+
+`Context.workspace`, and the `--workspace UUID` global option that sets it, name
+the one OpenRouter workspace a run places resources in and reports on. With a
+scope, a configuration whose key names a different `workspace_id` is refused
+before any request; every key and guardrail the run creates is placed in the
+scope; `plan` and `status` leave out `unmanaged` resources from other
+workspaces; and matching by *name* — adoption candidates, and the collision
+check before a guarded recreation — considers only resources in the scope, so
+another club's identically named key cannot block this one. The plan
+fingerprint covers the scope, so a scoped plan can never be applied unscoped.
+
+It is not an isolation mechanism. The snapshot is still the whole organization,
+because state records no workspace per binding: filtering the snapshot would
+make every out-of-scope binding look missing. So a bound resource is judged
+present or missing exactly as it is without a scope, and two scopes pointed at
+one state file produce correct but mixed plans. A host that wants clubs to stay
+separate keeps one configuration and one state file per club.
 
 What the crate promises, and what it does not, is
 [`docs/compatibility.md`](docs/compatibility.md#the-core-crates-rust-api).
@@ -137,7 +157,9 @@ openrouter-keymaster state forget ADDRESS          relinquish local ownership of
 ```
 
 Global options: `--config PATH` (default `openrouter-keymaster.toml`),
-`--state PATH` (default `.openrouter-keymaster/state.json`), and `--json`.
+`--state PATH` (default `.openrouter-keymaster/state.json`), `--workspace UUID`
+(see [Scoping a run to one workspace](#scoping-a-run-to-one-workspace)), and
+`--json`.
 
 `recover resolve` requires exactly one attested finding, either
 `--no-resource-created` or `--leaked-hash HASH`. Keymaster never guesses which

@@ -80,6 +80,9 @@ pub(super) struct Issuer<'a> {
     pub(super) writer: &'a Writer<'a>,
     /// The exclusive lock every journal entry is written under.
     pub(super) lock: &'a StateLock<'a>,
+    /// The workspace this run places new keys in, when it is scoped to one
+    /// (ADR-0004, item 5).
+    pub(super) workspace: Option<&'a Uuid>,
 }
 
 /// What one completed transaction produced.
@@ -213,6 +216,10 @@ impl Issuer<'_> {
             receiver: crate::receiver::from_config(spec),
             guardrail: self.converged_guardrail(desired, state)?,
             generation: next_generation(address, state, desired)?,
+            workspace: desired
+                .workspace_id
+                .clone()
+                .or_else(|| self.workspace.cloned()),
         })
     }
 
@@ -269,7 +276,7 @@ impl Issuer<'_> {
             operation: operation.clone(),
             generation: prepared.generation,
             name: prepared.desired.name.clone(),
-            workspace: prepared.desired.workspace_id.clone(),
+            workspace: prepared.workspace.clone(),
             receiver: prepared.fingerprint.clone(),
         };
         self.journal(state, |state| state.begin_create(address, begin, at))
@@ -829,6 +836,10 @@ pub(super) struct Prepared<'a> {
     guardrail: Option<Uuid>,
     /// The generation this attempt would become.
     generation: u32,
+    /// The workspace the key is created in: the one the block names, or the
+    /// run's scope when the block names none. Journaled as well as sent, so
+    /// `recover` looks for a candidate where the key was actually placed.
+    workspace: Option<Uuid>,
 }
 
 impl Prepared<'_> {
@@ -846,7 +857,7 @@ impl Prepared<'_> {
             limit_reset: self.desired.limit_reset.value().copied(),
             include_byok_in_limit: self.desired.include_byok_in_limit,
             expires_at: self.desired.expires_at.value().copied(),
-            workspace_id: self.desired.workspace_id.clone(),
+            workspace_id: self.workspace.clone(),
             creator_user_id: self.desired.creator_user_id.clone(),
         }
     }

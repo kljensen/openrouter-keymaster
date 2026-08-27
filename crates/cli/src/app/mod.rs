@@ -20,6 +20,7 @@ use crate::cli::{Cli, Command, DeleteResource, ImportResource, RecoverAction, Re
 use crate::output::Renderer;
 use openrouter_keymaster_core::error::ApiError;
 use openrouter_keymaster_core::error::Error;
+use openrouter_keymaster_core::ids::Uuid;
 use openrouter_keymaster_core::ops::recover::RecoverError;
 use openrouter_keymaster_core::ops::{
     self, Context, Finding, ManagementKey, Options, Outcome, Paths,
@@ -103,6 +104,7 @@ fn context(cli: &Cli) -> Result<Context, Error> {
         config: cli.config.clone(),
         state: cli.state.clone(),
     };
+    let workspace = cli.workspace.clone();
 
     // `state forget` makes no request at all — no credential, no network, no
     // configuration — so it reads neither variable and neither can refuse it.
@@ -112,7 +114,7 @@ fn context(cli: &Cli) -> Result<Context, Error> {
             action: StateAction::Forget { .. }
         }
     ) {
-        return Ok(offline(paths));
+        return Ok(offline(paths, workspace));
     }
 
     let endpoint = env::options();
@@ -124,23 +126,25 @@ fn context(cli: &Cli) -> Result<Context, Error> {
     // to need a candidate listing then reports `missing_credential`, which is
     // the honest answer for an environment whose endpoint is unusable.
     if inspecting(&cli.command) && !usable(endpoint.as_ref()) {
-        return Ok(offline(paths));
+        return Ok(offline(paths, workspace));
     }
 
     Ok(Context {
         paths,
         options: endpoint?,
         key: credential(&cli.command)?,
+        workspace,
     })
 }
 
 /// A context that reaches nothing: the production defaults, and no credential
 /// to send anywhere.
-fn offline(paths: Paths) -> Context {
+fn offline(paths: Paths, workspace: Option<Uuid>) -> Context {
     Context {
         paths,
         options: Options::default(),
         key: None,
+        workspace,
     }
 }
 

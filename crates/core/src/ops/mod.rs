@@ -37,9 +37,9 @@ use std::path::PathBuf;
 
 use crate::api::Reader;
 use crate::client::{ApiError, Client};
-use crate::config::Config;
+use crate::config::{Config, ConfigError, Problem};
 use crate::error::Error;
-use crate::ids::Address;
+use crate::ids::{Address, Uuid};
 use crate::plan::{self, Snapshot};
 use crate::report::{PlanReport, StatusReport};
 use crate::state::{Phase, State, StateFile};
@@ -78,6 +78,20 @@ pub struct Context {
     pub options: Options,
     /// The management credential, when the caller has one.
     pub key: Option<ManagementKey>,
+    /// The one workspace this run places resources in and reports on.
+    ///
+    /// `None` is the whole organization, which is what every run did before
+    /// the scope existed. `Some(id)` is a guard on placement and a filter on
+    /// noise, and nothing more (ADR-0004, item 5): every key and guardrail
+    /// this run creates is placed in that workspace, a configuration naming
+    /// another one is refused, reports leave out `unmanaged` resources
+    /// elsewhere, and matching by *name* — adoption candidates, the collision
+    /// check before a recreation — considers only resources in it. Matching by
+    /// *identity* does not change: the snapshot is still the whole
+    /// organization, so a bound resource is judged present or missing exactly
+    /// as it is without a scope. Two scopes pointed at one state file give
+    /// correct but mixed plans; the scope does not isolate.
+    pub workspace: Option<Uuid>,
 }
 
 impl Context {
@@ -90,6 +104,52 @@ impl Context {
         let key = self.key.as_ref().ok_or(ApiError::MissingCredential)?;
         Client::new(self.options.clone(), key)
     }
+
+    /// Reads the configuration and checks it against the workspace scope.
+    ///
+    /// Every operation that reads a configuration reads it here, so a scoped
+    /// run refuses a configuration that describes another workspace before it
+    /// has built a client, sent a request, or taken anything but the lock.
+    fn config(&self) -> Result<Config, Error> {
+        let config = Config::load(&self.paths.config)?;
+        if let Some(scope) = &self.workspace {
+            refuse_other_workspaces(&config, scope)?;
+        }
+        Ok(config)
+    }
+
+    /// The scope, as the planner and the write bodies take it.
+    const fn scope(&self) -> Option<&Uuid> {
+        self.workspace.as_ref()
+    }
+}
+
+/// Refuses a configuration that names a workspace other than `scope`.
+///
+/// A block that names no workspace is not a problem — the scope is where it
+/// gets placed. Naming a different one is, because a scoped run creates
+/// nothing outside its scope and reports nothing from outside it either, so
+/// such a block could never converge.
+fn refuse_other_workspaces(config: &Config, scope: &Uuid) -> Result<(), ConfigError> {
+    // `[workspaces.NAME]` blocks (#33) are checked in this same pass once they
+    // exist: a scoped run rejects one not already bound to `scope`, since the
+    // UUID a create returns could never be the one it was scoped to.
+    let problems: Vec<Problem> = config
+        .keys
+        .iter()
+        .filter(|(_, key)| key.workspace_id.as_ref().is_some_and(|id| id != scope))
+        .map(|(address, _)| Problem {
+            path: format!("keys.{address}.workspace_id"),
+            message: format!(
+                "this run is scoped to workspace {scope} and places every resource it creates \
+                 there, so a block may name that workspace or none"
+            ),
+        })
+        .collect();
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(ConfigError::Invalid { problems })
 }
 
 /// A report, and the failure that stands beside it.
@@ -194,7 +254,12 @@ impl Resolution {
 /// `missing_credential` when the context carries no credential.
 pub fn plan(context: Context) -> Result<Outcome<PlanReport>, Error> {
     let observed = observe(&context)?;
-    let plan = plan::plan(&observed.config, &observed.state, &observed.snapshot);
+    let plan = plan::plan(
+        &observed.config,
+        &observed.state,
+        &observed.snapshot,
+        context.scope(),
+    );
 
     let mut report = PlanReport::new(&plan);
     let fingerprint = fingerprint::of(&context, &observed.config, &observed.state, &report);
@@ -216,6 +281,7 @@ pub fn status(context: Context) -> Result<Outcome<StatusReport>, Error> {
         &observed.config,
         &observed.state,
         &observed.snapshot,
+        context.scope(),
     )))
 }
 
@@ -237,12 +303,13 @@ struct Observation {
 /// nothing: observing remote drift is not a reason to rewrite state, and the
 /// exclusive lock belongs to the commands that write.
 ///
-/// The listings are unfiltered even when the configuration names a workspace.
-/// The planner needs a *complete* snapshot: a key left out of it reads as a key
-/// that does not exist, and a remote resource left out of it is one nothing
-/// would report as unmanaged.
+/// The listings are unfiltered even when the configuration names a workspace or
+/// the context is scoped to one. The planner needs a *complete* snapshot: a key
+/// left out of it reads as a key that does not exist, and a bound resource in
+/// another workspace would look orphaned. The scope filters what is reported
+/// and matched by name, never what is observed (ADR-0004, item 5).
 fn observe(context: &Context) -> Result<Observation, Error> {
-    let config = Config::load(&context.paths.config)?;
+    let config = context.config()?;
     let state = StateFile::new(&context.paths.state).read()?;
 
     let client = context.client()?;

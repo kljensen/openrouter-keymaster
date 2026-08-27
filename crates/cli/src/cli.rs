@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
+use openrouter_keymaster_core::ids::Uuid;
 
 /// Where local state lives unless `--state` says otherwise. The command line
 /// is the only place this default lives: core's
@@ -38,6 +39,10 @@ pub struct Cli {
         default_value = DEFAULT_STATE_PATH
     )]
     pub state: PathBuf,
+
+    /// Place and report only in this OpenRouter workspace.
+    #[arg(long, global = true, value_name = "UUID", value_parser = Uuid::parse)]
+    pub workspace: Option<Uuid>,
 
     /// Print one JSON document instead of human-readable output.
     #[arg(long, global = true)]

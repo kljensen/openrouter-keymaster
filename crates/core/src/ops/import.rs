@@ -37,7 +37,6 @@ use time::OffsetDateTime;
 
 use crate::api::Reader;
 use crate::client::ApiError;
-use crate::config::Config;
 use crate::error::Error;
 use crate::ids::{Address, IdError, KeyHash, Uuid};
 use crate::plan;
@@ -68,7 +67,7 @@ pub fn import_key(
     // so the configuration has to be the one that cannot change underneath it.
     let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
-    let config = Config::load(&context.paths.config)?;
+    let config = context.config()?;
     let desired = config
         .keys
         .get(&address)
@@ -113,7 +112,7 @@ pub fn import_guardrail(
     // from.
     let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
-    let config = Config::load(&context.paths.config)?;
+    let config = context.config()?;
     let desired = config
         .guardrails
         .get(&address)

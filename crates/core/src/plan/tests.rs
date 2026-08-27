@@ -210,7 +210,7 @@ impl World {
 
     fn plan(&self, config: &str) -> Plan {
         let config = Config::parse(config).expect("a valid test configuration");
-        plan(&config, &self.state, &self.snapshot)
+        plan(&config, &self.state, &self.snapshot, None)
     }
 }
 

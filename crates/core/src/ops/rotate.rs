@@ -38,7 +38,6 @@
 use time::OffsetDateTime;
 
 use crate::api::{Reader, Writer};
-use crate::config::Config;
 use crate::error::Error;
 use crate::ids::{Address, IdError, OperationId};
 use crate::report::{Predecessor, RotateReport, Successor};
@@ -62,7 +61,7 @@ pub fn rotate(context: Context, name: &str) -> Result<Outcome<RotateReport>, Err
     // made from, so neither can change underneath it.
     let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
-    let config = Config::load(&context.paths.config)?;
+    let config = context.config()?;
     let mut state = lock.read()?;
 
     check_nothing_pending(&state)?;
@@ -82,6 +81,7 @@ pub fn rotate(context: Context, name: &str) -> Result<Outcome<RotateReport>, Err
         reader: &reader,
         writer: &writer,
         lock: &lock,
+        workspace: context.scope(),
     };
 
     // Nothing has been sent or written yet, and nothing will be until this

@@ -190,7 +190,8 @@ done
 
 **Expected:** every command in
 [the README's command list](../README.md#commands) appears, spelled the same
-way; the three global options are `--config`, `--state`, and `--json`; there is
+way; the four global options are `--config`, `--state`, `--workspace`, and
+`--json`; there is
 **no** option for the management credential.
 
 Reviewed. The surface itself, and the rules for changing it, are written down in

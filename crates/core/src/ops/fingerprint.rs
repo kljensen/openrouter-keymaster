@@ -8,9 +8,11 @@
 //!
 //! What it covers, and why that is enough: the endpoint and a non-reversible
 //! digest of the management credential (the same plan against a different
-//! account is a different plan), the state file path, the whole normalized
-//! configuration, the whole state as read — its serial advances on every write,
-//! so any state change is a different plan — and the executable actions.
+//! account is a different plan), the workspace scope (the same plan placed
+//! somewhere else is a different plan), the state file path, the whole
+//! normalized configuration, the whole state as read — its serial advances on
+//! every write, so any state change is a different plan — and the executable
+//! actions.
 //! Binding the whole configuration and the whole state rather than a list of
 //! fields is deliberate: every value apply resolves while issuing a key — the
 //! bound guardrail's UUID, the effective generation, the receiver destination —
@@ -24,13 +26,14 @@ use sha2::{Digest, Sha256};
 
 use super::Context;
 use crate::config::Config;
+use crate::ids::Uuid;
 use crate::report::PlanReport;
 use crate::state::State;
 
 /// Separates this preimage from every other SHA-256 in Keymaster, and pins the
 /// set of inputs: a build that binds something else must not produce a digest
 /// an older one could match.
-const DOMAIN: &[u8] = b"openrouter-keymaster plan fingerprint v1";
+const DOMAIN: &[u8] = b"openrouter-keymaster plan fingerprint v2";
 
 /// How many characters a fingerprint has: SHA-256, lowercase hexadecimal.
 const LENGTH: usize = 64;
@@ -134,6 +137,11 @@ pub(super) fn of(
         DOMAIN,
         context.options.base_url.as_bytes(),
         &key.digest(),
+        context
+            .workspace
+            .as_ref()
+            .map_or("", Uuid::as_str)
+            .as_bytes(),
         context.paths.state.as_os_str().as_encoded_bytes(),
         &config,
         &state,

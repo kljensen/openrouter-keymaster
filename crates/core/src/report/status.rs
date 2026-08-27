@@ -38,16 +38,25 @@ pub struct StatusReport {
 }
 
 impl StatusReport {
-    /// Describes the three read-only inputs.
+    /// Describes the three read-only inputs, under this run's workspace scope.
+    ///
+    /// The scope reaches exactly one section: `unmanaged`, which a scoped run
+    /// reports only for its own workspace. Bindings are judged from the whole
+    /// snapshot either way (ADR-0004, item 5).
     #[must_use]
-    pub(crate) fn new(config: &Config, state: &State, observed: &Snapshot) -> Self {
+    pub(crate) fn new(
+        config: &Config,
+        state: &State,
+        observed: &Snapshot,
+        workspace: Option<&Uuid>,
+    ) -> Self {
         let index = Observed::build(observed);
         let mut report = Self {
             command: "status",
             warnings: Vec::new(),
             keys: key_statuses(config, state, &index),
             guardrails: guardrail_statuses(config, state, &index),
-            unmanaged: unmanaged_statuses(state, &index),
+            unmanaged: unmanaged_statuses(state, &index, workspace),
             operation: state
                 .pending_operation()
                 .map(|(address, pending)| OperationStatus::new(address, pending)),
@@ -560,7 +569,15 @@ fn guardrail_statuses(
 }
 
 /// Remote resources no local address owns, by immutable identity.
-fn unmanaged_statuses(state: &State, index: &Observed<'_>) -> Vec<UnmanagedStatus> {
+///
+/// A scoped run leaves out everything outside its workspace: those resources
+/// are another operator's, and nothing here would ever act on them.
+fn unmanaged_statuses(
+    state: &State,
+    index: &Observed<'_>,
+    workspace: Option<&Uuid>,
+) -> Vec<UnmanagedStatus> {
+    let in_scope = |observed: Option<&Uuid>| workspace.is_none_or(|scope| observed == Some(scope));
     let owned_guardrails: BTreeSet<&Uuid> = state
         .guardrails()
         .values()
@@ -570,6 +587,7 @@ fn unmanaged_statuses(state: &State, index: &Observed<'_>) -> Vec<UnmanagedStatu
     index
         .keys
         .values()
+        .filter(|key| in_scope(key.workspace_id.as_ref()))
         .filter(|key| state.address_owning(&key.hash).is_none())
         .map(|key| UnmanagedStatus {
             resource: "key",
@@ -580,6 +598,7 @@ fn unmanaged_statuses(state: &State, index: &Observed<'_>) -> Vec<UnmanagedStatu
             index
                 .guardrails
                 .values()
+                .filter(|guardrail| in_scope(guardrail.workspace_id.as_ref()))
                 .filter(|guardrail| !owned_guardrails.contains(&guardrail.id))
                 .map(|guardrail| UnmanagedStatus {
                     resource: "guardrail",

@@ -84,7 +84,7 @@ use crate::api::{GuardrailBody, Reader, UpdateKey, Writer};
 use crate::client::Client;
 use crate::config::Config;
 use crate::error::Error;
-use crate::ids::{Address, KeyHash};
+use crate::ids::{Address, KeyHash, Uuid};
 use crate::plan::{self, Action, ActionKind, Identity, Plan, Reason, ResourceAddress, Snapshot};
 use crate::report::{ActionOutcome, ApplyReport, PlanReport};
 use crate::state::{KeyBinding, Phase as JournalPhase, State, StateFile, StateLock};
@@ -129,7 +129,7 @@ pub fn apply(
     // one input over.
     let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
-    let config = Config::load(&context.paths.config)?;
+    let config = context.config()?;
     let mut state = lock.read()?;
 
     // The credential, before the first write of any kind. Apply always needs
@@ -155,7 +155,7 @@ pub fn apply(
 
     // Read and planned here, under the lock, from this run's own snapshot.
     let snapshot = super::snapshot(&reader)?;
-    let plan = plan::plan(&config, &state, &snapshot);
+    let plan = plan::plan(&config, &state, &snapshot, context.scope());
 
     if let Some(expected) = &expected
         && let Some(refusal) = refuse_changed_plan(&context, &config, &state, &plan, expected)
@@ -170,11 +170,19 @@ pub fn apply(
         writer: &writer,
         lock: &lock,
         snapshot: &snapshot,
+        workspace: context.scope(),
         stopped: false,
         issued: BTreeSet::new(),
     };
     let mut outcomes = apply.execute(&plan, &mut state);
-    let failure = verify(&plan, &config, &state, &reader, &mut outcomes);
+    let failure = verify(
+        &plan,
+        &config,
+        &state,
+        &reader,
+        context.scope(),
+        &mut outcomes,
+    );
 
     let mut report = ApplyReport::new(&plan, &outcomes, failure);
     report.note(promoted);
@@ -310,6 +318,9 @@ struct Apply<'a> {
     /// observed about a key apply does not write — a replacement's
     /// predecessor — instead of asserting it.
     snapshot: &'a Snapshot,
+    /// The workspace every create this run makes is placed in, when it is
+    /// scoped to one (ADR-0004, item 5).
+    workspace: Option<&'a Uuid>,
     /// Set by the first failed write. Nothing is attempted after it: a later
     /// action may depend on the one that failed, and a run that pressed on
     /// would report a second failure caused by the first.
@@ -417,6 +428,7 @@ impl Apply<'_> {
             reader: self.reader,
             writer: self.writer,
             lock: self.lock,
+            workspace: self.workspace,
         };
         let predecessor = state
             .key(address)
@@ -468,7 +480,7 @@ impl Apply<'_> {
 
         let created = self
             .writer
-            .create_guardrail(&GuardrailBody::create(desired))
+            .create_guardrail(&GuardrailBody::create(desired, self.workspace))
             .map_err(|error| {
                 format!(
                     "the guardrail could not be created: {error}. It may exist all the same — the \
@@ -608,6 +620,7 @@ fn verify(
     config: &Config,
     state: &State,
     reader: &Reader<'_>,
+    workspace: Option<&Uuid>,
     outcomes: &mut [ActionOutcome],
 ) -> Option<String> {
     if !outcomes.iter().any(ActionOutcome::was_attempted) {
@@ -623,7 +636,7 @@ fn verify(
         }
     };
 
-    let replan = plan::plan(config, state, &after);
+    let replan = plan::plan(config, state, &after, workspace);
     let settled = settled_addresses(&replan);
 
     for (outcome, action) in outcomes.iter_mut().zip(plan.actions()) {

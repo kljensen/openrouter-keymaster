@@ -99,7 +99,8 @@ fn find_blank_line(buffer: &[u8]) -> Option<usize> {
         .map(|start| start + 4)
 }
 
-/// Everything a host holds: the two paths, the endpoint, the credential.
+/// Everything a host holds: the two paths, the endpoint, the credential, and
+/// the optional workspace scope.
 fn context(directory: &Path, base_url: String) -> Context {
     Context {
         paths: Paths {
@@ -111,6 +112,7 @@ fn context(directory: &Path, base_url: String) -> Context {
             ManagementKey::from_secret(Zeroizing::new(FAKE_KEY.to_owned()))
                 .expect("a well-formed credential"),
         ),
+        workspace: None,
     }
 }
 

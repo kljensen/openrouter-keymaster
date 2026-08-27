@@ -18,10 +18,14 @@ use crate::api::{
 };
 use crate::config::{Config, Usd};
 use crate::ids::{Address, KeyHash, OperationId, ReceiverFingerprint, RemoteName, Uuid};
-use crate::plan::{
-    Expansion, FieldValue, Identity, Reason, ResourceAddress, Snapshot, plan as compute,
-};
+use crate::plan::{Expansion, FieldValue, Identity, Plan, Reason, ResourceAddress, Snapshot};
 use crate::state::{BeginCreate, Origin, Phase, RetainedKey, RetainedStatus, State, Transition};
+
+/// The planner, unscoped: these cases are about what a report renders, and the
+/// workspace scope has its own tests.
+fn compute(config: &Config, state: &State, observed: &Snapshot) -> Plan {
+    crate::plan::plan(config, state, observed, None)
+}
 
 const JOBFEED_HASH: &str = "hash-jobfeed-1";
 const STEADY_HASH: &str = "hash-steady-1";
@@ -595,11 +599,12 @@ fn a_remote_name_cannot_smuggle_a_credential_or_an_escape_into_output() {
     let rendered = [
         PlanReport::new(&plan).to_string(),
         serde_json::to_string(&PlanReport::new(&plan)).expect("json"),
-        StatusReport::new(&config(SCRUB), &world.state, &world.snapshot).to_string(),
+        StatusReport::new(&config(SCRUB), &world.state, &world.snapshot, None).to_string(),
         serde_json::to_string(&StatusReport::new(
             &config(SCRUB),
             &world.state,
             &world.snapshot,
+            None,
         ))
         .expect("json"),
     ];
@@ -637,7 +642,7 @@ fn a_retained_key_is_joined_against_the_snapshot() {
         .observe_key(OLD_HASH, "golf-jobfeed-predecessor")
         .disabled = true;
 
-    let report = StatusReport::new(&config(RETAINED), &world.state, &world.snapshot);
+    let report = StatusReport::new(&config(RETAINED), &world.state, &world.snapshot, None);
     let document = serde_json::to_value(&report).expect("the report serializes");
     let keys = document["keys"].as_array().expect("a key array");
 
@@ -873,7 +878,7 @@ fn a_field_value_reaches_output_as_its_own_rendering() {
 #[test]
 fn status_reports_bindings_presence_usage_and_unmanaged() {
     let world = wide_world();
-    let report = StatusReport::new(&config(WIDE), &world.state, &world.snapshot);
+    let report = StatusReport::new(&config(WIDE), &world.state, &world.snapshot, None);
     let document = serde_json::to_value(&report).expect("the report serializes");
 
     let keys = document["keys"].as_array().expect("a key array");
@@ -933,7 +938,7 @@ fn status_reports_an_unfinished_operation_with_its_remediation() {
     let mut world = World::new();
     world.pending("jobfeed", &[]);
 
-    let report = StatusReport::new(&config(NARROW), &world.state, &world.snapshot);
+    let report = StatusReport::new(&config(NARROW), &world.state, &world.snapshot, None);
     let document = serde_json::to_value(&report).expect("the report serializes");
     let operation = &document["operation"];
 
@@ -962,7 +967,7 @@ fn status_reports_an_unfinished_operation_with_its_remediation() {
 #[test]
 fn status_of_an_empty_project_renders_both_formats() {
     let world = World::new();
-    let report = StatusReport::new(&config(NARROW), &world.state, &world.snapshot);
+    let report = StatusReport::new(&config(NARROW), &world.state, &world.snapshot, None);
 
     let human = report.to_string();
     assert!(human.contains("keys (1):"));

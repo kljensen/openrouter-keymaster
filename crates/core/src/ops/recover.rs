@@ -47,7 +47,6 @@ use time::OffsetDateTime;
 
 use crate::api::{ObservedKey, Reader, Writer};
 use crate::client::ApiError;
-use crate::config::Config;
 use crate::error::Error;
 use crate::ids::{Address, IdError, KeyHash};
 use crate::report::{
@@ -291,7 +290,7 @@ pub fn recover_replace(context: Context, name: &str) -> Result<Outcome<ReplaceRe
 
     let file = StateFile::new(&context.paths.state);
     let lock = file.lock()?;
-    let config = Config::load(&context.paths.config)?;
+    let config = context.config()?;
     let mut state = lock.read()?;
 
     let operation =
@@ -310,6 +309,7 @@ pub fn recover_replace(context: Context, name: &str) -> Result<Outcome<ReplaceRe
         reader: &reader,
         writer: &writer,
         lock: &lock,
+        workspace: context.scope(),
     };
 
     // Everything the successor needs is checked before anything is closed or
