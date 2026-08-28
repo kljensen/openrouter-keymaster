@@ -50,7 +50,7 @@ use time::OffsetDateTime;
 use crate::api::{ObservedKey, Reader, Writer};
 use crate::client::ApiError;
 use crate::error::Error;
-use crate::ids::{Address, IdError, KeyHash};
+use crate::ids::{Address, IdError, KeyHash, Uuid};
 use crate::report::{
     CandidateReport, InspectReport, ReplaceReport, ResolveReport, RetainedReport, Retired,
     Successor, created_near,
@@ -117,7 +117,16 @@ pub fn recover_inspect(context: Context, name: &str) -> Result<Outcome<InspectRe
     // older would be describing an organization that has since changed, which
     // is the one thing an operator must not be handed here.
     let client = context.client()?;
-    let observed = Reader::new(&client).list_keys(None)?;
+    // Every workspace's keys, not just the default workspace's: an unscoped
+    // `GET /keys` answers for one workspace, and a leaked key in another one is
+    // exactly what this listing exists to find (ADR-0004, item 5).
+    let reader = Reader::new(&client);
+    let workspaces: Vec<Uuid> = reader
+        .list_workspaces()?
+        .into_iter()
+        .map(|workspace| workspace.id)
+        .collect();
+    let observed = reader.list_keys(&workspaces)?;
 
     let candidates = candidates(&state, operation, &observed);
     Ok(Outcome::ok(InspectReport::found(

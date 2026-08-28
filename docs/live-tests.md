@@ -57,7 +57,7 @@ silently would tell you the API had been checked when it had not.
 | --- | --- |
 | `live_guardrail_create_read_import_update` | Guardrail create through `apply`; a one-record-per-page listing that must still return every guardrail exactly once; exact `GET` by UUID; `state forget` then `import guardrail --id`, which must report the description **OpenRouter** holds rather than the edited one on disk; the update that follows, verified by reading it back. |
 | `live_key_create_rotate_retire_delete` | Key create with the hash captured immediately; the update-only `disabled` policy, which `POST /keys` cannot set; guardrail assignment verified through the assignment endpoint; file-receiver delivery at `0600`; non-disclosure of the delivered plaintext; `rotate`, after which the predecessor — enabled by the test beforehand, so the check means something — must still be **enabled** and tracked; `retire`, after which it must be disabled; `delete key`, after which reading it must give 404. Key listing across both generations. |
-| `live_workspace_create_budget_default_guardrail_and_scoped_key` | Workspace create through `apply`; the default guardrail, which appears in no listing until the first `PATCH` to the identity the workspace names, and must be in one afterwards; one budget `PUT`, whose answer must be **definite** either way (see below); the description update in the same action, which must land whatever became of the budget; a key created inside the workspace by a `--workspace` run, whose `workspace_id` must come back as the scope; `state forget workspaces.club` then `import workspace --id`, which must report the description OpenRouter holds. |
+| `live_workspace_create_budget_default_guardrail_and_scoped_key` | Workspace create through `apply`; the default guardrail, which is created by the first `PATCH` to the identity the workspace names and must then be in its own workspace's guardrail listing, in no unscoped listing, and carry the configured budget and the name OpenRouter gave it; one budget `PUT`, whose answer must be **definite** either way (see below); the description update in the same action, which must land whatever became of the budget; a key created inside the workspace by a `--workspace` run, whose `workspace_id` must come back as the scope; `state forget workspaces.club` then `import workspace --id`, which must report the description OpenRouter holds. |
 | `live_caller_receiver_hands_a_key_to_host_code` | A `caller` receiver end to end, through `ops::apply` called directly — the command line supplies no callback and can never reach this path. The callback must be handed the address, the created key's hash, and the configured destination, with a plaintext that carries OpenRouter's own `sk-or-` marker; the serialized report must carry no part of it. The test records the plaintext's *shape*, never the plaintext. |
 | `live_log_destination_webhook_create_update_delete` | A `webhook` destination created through `apply`, read back as `type = webhook`, enabled, with an empty key allowlist; a `config` change, which must plan as a diff of `config` **and nothing else** and leave the next plan `converged`; `delete log-destination --id`, after which reading it must give 404. The configured URL must appear in no stream. |
 | `live_spend_reports_credits_and_key_costs` | `GET /credits` and the analytics vocabulary this organization offers: the report's `columns` must be `api_key_id`, `tokens_total`, and one of the three cost metrics Keymaster knows. Every cost and token in every row and period must be a number by the time it is reported, which is what proves the quoted-integer handling. |
@@ -135,14 +135,23 @@ prefix, unions that with what was journaled, deletes each resource by its
 immutable identity, and reads that identity back until OpenRouter answers 404 —
 a 2xx on the delete is not proof.
 
-**Cleanup in dependency order.** Log destinations first, then keys, then
-workspaces. A destination is what watches the keys, so it goes before them: the
+**Listings are per workspace.** `GET /keys` and `GET /guardrails` answer for the
+credential's default workspace unless `workspace_id` names another, so the suite
+adopts and sweeps by listing every workspace it created as well as the default
+one. A key created in a workspace is in that workspace's listing and in no
+other, and a sweep that read only the unscoped listing would leave it behind.
+
+**Cleanup in dependency order.** Log destinations first, then keys, then each
+workspace's own default guardrail, then workspaces. A destination is what watches the keys, so it goes before them: the
 run stops forwarding before it starts churning what was being forwarded, rather
 than aiming a burst of log traffic at an endpoint that deliberately cannot
 answer. OpenRouter refuses to delete a workspace that still holds anything, so a
 workspace goes last and only once its occupants are gone. A workspace's own
-default guardrail is not an occupant: it cannot be deleted on its own and goes
-with the workspace, so it is not reported as something to remove by hand.
+default guardrail is not an occupant: it goes with the workspace, so it is not
+reported as something to remove by hand. Whether it can be deleted on its own is
+a question the sweep asks once per run — one `DELETE` per default guardrail,
+where a `400` or a `403` is the expected answer — and journals, because the
+answer is the API's to give and nothing in Keymaster depends on it.
 
 **No response bodies in cleanup output.** A failure is reported as an identity
 and an error kind. A body from a failed cleanup call is exactly where a stray

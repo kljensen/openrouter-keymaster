@@ -163,7 +163,13 @@ fingerprint covers the scope, so a scoped plan can never be applied unscoped.
 
 It is not an isolation mechanism. The snapshot is still the whole organization,
 because state records no workspace per binding: filtering the snapshot would
-make every out-of-scope binding look missing. So a bound resource is judged
+make every out-of-scope binding look missing. Reading the whole organization
+takes more than one request per resource: `GET /keys`, `GET /guardrails`, and
+`GET /observability/destinations` each answer for one workspace at a time — the
+credential's default workspace unless `workspace_id` names another — so every
+snapshot reads each of them once without a workspace and once per workspace it
+found, and takes the union, deduplicated by identity. So `plan` and `status`
+see every workspace's keys and guardrails, scoped or not. So a bound resource is judged
 present or missing exactly as it is without a scope, and two scopes pointed at
 one state file produce correct but mixed plans. A host that wants clubs to stay
 separate keeps one configuration and one state file per club.
@@ -438,8 +444,8 @@ slug = "golf-club"
 budgets = { monthly = 50, lifetime = 500 }
 default_guardrail = "house_rail"
 
+# A workspace's default guardrail takes no `name`: OpenRouter names that one.
 [guardrails.house_rail]
-name = "golf-house-rail"
 
 [keys.golf_jobfeed]
 name = "golf-jobfeed"
@@ -470,10 +476,12 @@ exactly what the budget was for. Routine writes proceed.
 
 **The default guardrail is a guardrail block bound to the workspace's
 `default_guardrail_id`.** That identity is derived from the workspace's own and
-governs all traffic in it, but the guardrail appears in no listing until its
-configuration is first written. So it is the one exception to "bound but absent
-means missing": the plan shows a `create` that already knows its identity, and
-apply performs it as the first `PATCH`. After that it is an ordinary guardrail.
+governs all traffic in it. Until its configuration is first written the
+guardrail is in no listing at all, and after that only in its own workspace's.
+So it is the one exception to "bound but absent means missing": the plan shows a
+`create` that already knows its identity, and apply performs it as the first
+`PATCH`. Its block omits `name` — OpenRouter names that guardrail itself and
+refuses to change it — and every other field is managed as usual.
 It is never `POST`ed, never imported by name, and never deleted on its own; if
 the address it names already owns another guardrail, or if the identity the
 workspace names belongs to another address, the plan writes nothing and says
@@ -1235,7 +1243,9 @@ spend.
 
 Pagination is centralized in `api::pagination` because a partial snapshot is
 worse than none: a key that pagination missed reads as a key that is not there,
-and the plan that follows would propose creating a second one. So a listing
+and the plan that follows would propose creating a second one. A workspace left
+unlisted is the same defect one level up, which is why the snapshot reads every
+listing once per workspace as well as once without one. So a listing
 stops on an empty page, advances by the records actually returned, deduplicates
 by immutable identity, and refuses — with a diagnostic naming the offset and
 the page — a non-empty page that repeats only identities already seen. A
@@ -1346,7 +1356,8 @@ artifact.
 
 - `project` — the part that cannot be shared, because `Command::cargo_bin`
   only finds a binary of the package under test: a temporary project directory,
-  a server answering the three listings a snapshot reads, and the compiled
+  a server answering the listings a snapshot reads — unscoped and per
+  workspace — and the compiled
   binary pointed at both with a sentinel credential. Every run it starts is
   scanned for the sentinel in stdout, stderr, and every file under the project
   directory.

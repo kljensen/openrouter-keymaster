@@ -164,6 +164,19 @@ impl ActionOutcome {
         Self::new(Status::HeldBack, Some(detail.into()))
     }
 
+    /// Why this write was held back, when it was.
+    ///
+    /// What a dependent inherits: an action apply held back at execution time
+    /// did not happen, so everything waiting on it is held back with the same
+    /// sentence rather than attempted against a resource that is not there.
+    #[must_use]
+    pub(crate) fn held_back_detail(&self) -> Option<&str> {
+        match self.status {
+            Status::HeldBack => self.detail.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Something the plan reports and apply never touches.
     #[must_use]
     pub(crate) fn reported() -> Self {

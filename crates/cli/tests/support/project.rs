@@ -24,7 +24,9 @@ use serde_json::Value;
 use tempfile::TempDir;
 use time::OffsetDateTime;
 use wiremock::Mock;
-use wiremock::matchers::{method, path, path_regex, query_param};
+use wiremock::matchers::{
+    method, path, path_regex, query_param, query_param_contains, query_param_is_missing,
+};
 
 use super::fixtures::{empty_page, page};
 use super::http::{Scripted, TestServer, json_response};
@@ -68,16 +70,20 @@ impl Project {
     /// The answer depends on the offset rather than on call order, because
     /// several cases run the binary more than once against one server and each
     /// run reads every listing from the beginning.
+    ///
+    /// The key and guardrail listings answer here only when no `workspace_id`
+    /// is asked for, which is what the real API does with them: an unscoped
+    /// listing carries the credential's default workspace and nothing else.
+    /// A case that puts something in a workspace mounts it with
+    /// [`Project::observe_keys_in`] or [`Project::observe_guardrails_in`]; a
+    /// workspace nothing mounted answers empty.
     pub fn observe(&self, keys: Vec<Value>, guardrails: Vec<Value>, assignments: Vec<Value>) {
         self.observe_defaults();
-        for (route, items) in [
-            ("/api/v1/keys", keys),
-            ("/api/v1/guardrails", guardrails),
-            ("/api/v1/guardrails/assignments/keys", assignments),
-        ] {
+        for (route, items) in [("/api/v1/keys", keys), ("/api/v1/guardrails", guardrails)] {
             self.server.mount(
                 Mock::given(method("GET"))
                     .and(path(route))
+                    .and(query_param_is_missing("workspace_id"))
                     .and(query_param("offset", "0"))
                     .respond_with(json_response(200, &page(items)))
                     .with_priority(1),
@@ -85,10 +91,70 @@ impl Project {
             self.server.mount(
                 Mock::given(method("GET"))
                     .and(path(route))
+                    .and(query_param_is_missing("workspace_id"))
                     .respond_with(json_response(200, &empty_page()))
                     .with_priority(2),
             );
         }
+        let route = "/api/v1/guardrails/assignments/keys";
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path(route))
+                .and(query_param("offset", "0"))
+                .respond_with(json_response(200, &page(assignments)))
+                .with_priority(1),
+        );
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(json_response(200, &empty_page()))
+                .with_priority(2),
+        );
+    }
+
+    /// Answers `GET /keys?workspace_id=…` with these keys.
+    pub fn observe_keys_in(&self, workspace: &str, keys: Vec<Value>) {
+        self.observe_in("/api/v1/keys", workspace, vec![keys]);
+    }
+
+    /// Answers one workspace's key listing differently each time it is read, as
+    /// [`Project::observe_sequence`] does for the unscoped ones.
+    pub fn observe_keys_in_sequence(&self, workspace: &str, reads: Vec<Vec<Value>>) {
+        self.observe_in("/api/v1/keys", workspace, reads);
+    }
+
+    /// Answers `GET /guardrails?workspace_id=…` with these guardrails.
+    ///
+    /// A workspace's own materialized default guardrail belongs here: it is in
+    /// its workspace's listing and in no other (ADR-0004, item 3).
+    pub fn observe_guardrails_in(&self, workspace: &str, guardrails: Vec<Value>) {
+        self.observe_in("/api/v1/guardrails", workspace, vec![guardrails]);
+    }
+
+    /// Answers one workspace's guardrail listing differently each time it is
+    /// read, as [`Project::observe_sequence`] does for the unscoped ones.
+    pub fn observe_guardrails_in_sequence(&self, workspace: &str, reads: Vec<Vec<Value>>) {
+        self.observe_in("/api/v1/guardrails", workspace, reads);
+    }
+
+    /// Answers one workspace's listing at `route` with each set of records in
+    /// turn, the last repeating.
+    fn observe_in(&self, route: &str, workspace: &str, reads: Vec<Vec<Value>>) {
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path(route))
+                .and(query_param("workspace_id", workspace))
+                .and(query_param("offset", "0"))
+                .respond_with(Scripted::json(reads.into_iter().map(page)))
+                .with_priority(3),
+        );
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path(route))
+                .and(query_param("workspace_id", workspace))
+                .respond_with(json_response(200, &empty_page()))
+                .with_priority(4),
+        );
     }
 
     /// Answers those three listings differently each time they are read.
@@ -108,14 +174,11 @@ impl Project {
         assignments: Vec<Vec<Value>>,
     ) {
         self.observe_defaults();
-        for (route, reads) in [
-            ("/api/v1/keys", keys),
-            ("/api/v1/guardrails", guardrails),
-            ("/api/v1/guardrails/assignments/keys", assignments),
-        ] {
+        for (route, reads) in [("/api/v1/keys", keys), ("/api/v1/guardrails", guardrails)] {
             self.server.mount(
                 Mock::given(method("GET"))
                     .and(path(route))
+                    .and(query_param_is_missing("workspace_id"))
                     .and(query_param("offset", "0"))
                     .respond_with(Scripted::json(reads.into_iter().map(page)))
                     .with_priority(1),
@@ -123,10 +186,25 @@ impl Project {
             self.server.mount(
                 Mock::given(method("GET"))
                     .and(path(route))
+                    .and(query_param_is_missing("workspace_id"))
                     .respond_with(json_response(200, &empty_page()))
                     .with_priority(2),
             );
         }
+        let route = "/api/v1/guardrails/assignments/keys";
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path(route))
+                .and(query_param("offset", "0"))
+                .respond_with(Scripted::json(assignments.into_iter().map(page)))
+                .with_priority(1),
+        );
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(json_response(200, &empty_page()))
+                .with_priority(2),
+        );
     }
 
     /// The fallback every snapshot needs: an organization with no workspaces,
@@ -154,6 +232,37 @@ impl Project {
                 .and(path("/api/v1/observability/destinations"))
                 .respond_with(json_response(200, &empty_page()))
                 .with_priority(9),
+        );
+        // A workspace holds nothing unless the case says otherwise. Every
+        // snapshot reads the key and guardrail listings once per workspace it
+        // found, because an unscoped listing answers for the default workspace
+        // alone.
+        for route in ["/api/v1/keys", "/api/v1/guardrails"] {
+            self.server.mount(
+                Mock::given(method("GET"))
+                    .and(path(route))
+                    // Any workspace at all: every value contains the empty
+                    // string, so this is "asked about some workspace".
+                    .and(query_param_contains("workspace_id", ""))
+                    .respond_with(json_response(200, &empty_page()))
+                    .with_priority(9),
+            );
+        }
+    }
+
+    /// Answers `GET /guardrails/{id}` with this guardrail.
+    ///
+    /// What a materialized default guardrail needs: it is reachable only by its
+    /// identity, and it never appears in the listing.
+    pub fn observe_guardrail_by_id(&self, id: &str, guardrail: &Value) {
+        self.server.mount(
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/guardrails/{id}")))
+                .respond_with(json_response(
+                    200,
+                    &serde_json::json!({ "data": guardrail }),
+                ))
+                .with_priority(3),
         );
     }
 

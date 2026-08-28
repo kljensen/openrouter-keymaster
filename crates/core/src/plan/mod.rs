@@ -663,9 +663,10 @@ pub enum Reason {
         dependency: ResourceAddress,
     },
     /// This guardrail is the default of a workspace that exists or that this
-    /// plan creates, and OpenRouter has not materialized it yet — it appears in
-    /// no listing until its configuration is first written. The one exception
-    /// to "bound but absent means missing" (ADR-0004, item 3).
+    /// plan creates, and OpenRouter has not materialized it yet — it is in no
+    /// listing until its configuration is first written, and in its own
+    /// workspace's from then on. The one exception to "bound but absent means
+    /// missing" (ADR-0004, item 3).
     DefaultGuardrailUnmaterialized {
         /// The workspace whose default guardrail this is.
         workspace: ResourceAddress,
@@ -876,7 +877,7 @@ pub fn plan(config: &Config, state: &State, observed: &Snapshot, workspace: Opti
     plan_orphans(&index, &mut actions);
     plan_unmanaged(&index, &mut actions);
 
-    mark_blocked(&mut actions);
+    mark_blocked(&index, &mut actions);
     hold_back_unbudgeted(&index, &mut actions);
     actions.sort_by(|left, right| ordering_key(left).cmp(&ordering_key(right)));
     Plan { actions }
@@ -944,7 +945,7 @@ fn is_budget_field(change: &FieldChange) -> bool {
 /// key at a time, so while one is unfinished `begin_create` refuses every
 /// other create — and a plan that offered one would be promising a write the
 /// state API would decline.
-fn mark_blocked(actions: &mut [Action]) {
+fn mark_blocked(index: &Index<'_>, actions: &mut [Action]) {
     if let Some(pending) = issuance_blocker(actions) {
         for action in actions.iter_mut() {
             if action.address != pending && issues_credential(action.kind, &action.address) {
@@ -969,6 +970,9 @@ fn mark_blocked(actions: &mut [Action]) {
         .map(|action| action.address.clone())
         .collect();
 
+    let unplaceable = unresolved_placements(index, actions);
+    unresolved.extend(unplaceable.keys().cloned());
+
     // A fixpoint, so the block reaches a dependent's dependents.
     loop {
         let widened: Vec<ResourceAddress> = actions
@@ -992,18 +996,83 @@ fn mark_blocked(actions: &mut [Action]) {
         if action.kind.blocks_dependents() {
             continue;
         }
-        let blockers: Vec<ResourceAddress> = action
+        let mut blockers: Vec<ResourceAddress> = action
             .depends_on
             .iter()
             .filter(|dependency| unresolved.contains(*dependency))
             .cloned()
             .collect();
+        if let Some(workspace) = unplaceable.get(&action.address)
+            && !blockers.contains(workspace)
+        {
+            blockers.push(workspace.clone());
+        }
         action.rationale.extend(
             blockers
                 .into_iter()
                 .map(|dependency| Reason::BlockedBy { dependency }),
         );
     }
+}
+
+/// Whether this action brings its resource into existence, which is what makes
+/// the workspace it is placed in a binding apply records rather than a
+/// difference nothing can converge. A key's `replace` creates one too.
+const fn creates_its_resource(kind: ActionKind) -> bool {
+    matches!(kind, ActionKind::Create | ActionKind::Replace)
+}
+
+/// Every resource that already exists and whose block names a workspace nothing
+/// binds yet, with the workspace each one waits on.
+///
+/// The same-run exception is for creates, and for creates only. A guardrail,
+/// key, or destination this plan creates takes its placement from the binding
+/// apply records a phase earlier; one that already exists cannot be moved at
+/// all, because OpenRouter fixes a workspace when the resource is created. So
+/// until that workspace has an identity there is nothing to judge the placement
+/// against, and the honest answer is to write nothing and say what is missing.
+/// The run after reports `workspace_fixed_at_creation` if the resource really
+/// is somewhere else (ADR-0004, item 2).
+///
+/// Read from the configuration rather than from the plan's dependency edges,
+/// because the edges are not where the problem shows. A resource whose fields
+/// already match has no edges at all and a `no_op` action, and a key's update
+/// carries no workspace dependency either — yet both would report a converged
+/// resource sitting in a workspace the configuration no longer names, and the
+/// key's update could widen it there.
+fn unresolved_placements(
+    index: &Index<'_>,
+    actions: &[Action],
+) -> BTreeMap<ResourceAddress, ResourceAddress> {
+    // The assignment beside a key this plan creates or replaces belongs to the
+    // successor, which is created in the workspace the binding will name — so
+    // it is exempt exactly as the key's own action is. Without this the
+    // predecessor's binding is what the placement lookup finds, and a
+    // converged first apply would report held-back work.
+    let issuing_keys: BTreeSet<&Address> = actions
+        .iter()
+        .filter(|action| creates_its_resource(action.kind))
+        .filter_map(|action| match &action.address {
+            ResourceAddress::Key(address) => Some(address),
+            _ => None,
+        })
+        .collect();
+
+    actions
+        .iter()
+        .filter(|action| !creates_its_resource(action.kind))
+        .filter(|action| match &action.address {
+            ResourceAddress::Assignment(address) => !issuing_keys.contains(address),
+            _ => true,
+        })
+        .filter_map(|action| {
+            let workspace = index.unbound_placement(&action.address)?;
+            Some((
+                action.address.clone(),
+                ResourceAddress::Workspace(workspace),
+            ))
+        })
+        .collect()
 }
 
 /// The address of an operation that stops other keys from being created
@@ -1244,19 +1313,19 @@ impl<'a> Index<'a> {
             .collect()
     }
 
-    /// The workspace whose default guardrail `id` is, when that workspace is
-    /// bound and OpenRouter has it.
-    ///
-    /// The whole of ADR-0004 item 3's exception: a guardrail bound to this
-    /// identity is never `missing`, because the guardrail does not appear in
-    /// any listing until its configuration is first written, and the only way
-    /// to write it is to `PATCH` this identity.
     /// The configured workspace that names this guardrail block as its default,
     /// if one does. Validation allows at most one.
     fn workspace_defaulting_to_block(&self, guardrail: &Address) -> Option<&'a Address> {
         workspace_defaulting_to(self.config, guardrail)
     }
 
+    /// The workspace whose default guardrail `id` is, when that workspace is
+    /// bound and OpenRouter has it.
+    ///
+    /// The whole of ADR-0004 item 3's exception: a guardrail bound to this
+    /// identity is never `missing`, because until its configuration is first
+    /// written no listing carries it — and the only way to write it is to
+    /// `PATCH` this identity.
     fn workspace_defaulting_to(&self, id: &Uuid) -> Option<&'a Address> {
         self.state
             .workspaces()
@@ -1312,13 +1381,26 @@ impl<'a> Index<'a> {
     /// address owns and someone renamed still collides, and creating a second
     /// one under the same name is exactly the confusion a display name cannot
     /// be trusted to resolve.
+    ///
+    /// A workspace's default guardrail is never a candidate. Its name is
+    /// OpenRouter's — `Workspace <uuid> Default` — so it is not a name any
+    /// configuration can ask for, and it is not a guardrail any create could
+    /// be confused with (ADR-0004, item 3).
     fn guardrails_named(&self, name: &RemoteName) -> Vec<Identity> {
         self.guardrails
             .values()
             .filter(|guardrail| self.in_scope(guardrail.workspace_id.as_ref()))
+            .filter(|guardrail| !self.is_workspace_default(&guardrail.id))
             .filter(|guardrail| guardrail.name.trim() == name.as_str())
             .map(|guardrail| Identity::Guardrail(guardrail.id.clone()))
             .collect()
+    }
+
+    /// Whether some observed workspace names this guardrail as its default.
+    fn is_workspace_default(&self, id: &Uuid) -> bool {
+        self.workspaces
+            .values()
+            .any(|workspace| workspace.default_guardrail_id.as_ref() == Some(id))
     }
 
     /// The workspace this run places a guardrail in, when anything says which.
@@ -1331,31 +1413,26 @@ impl<'a> Index<'a> {
         )
     }
 
-    /// The workspace an action's resource is placed in, when the configuration
-    /// says which.
+    /// The workspace block a resource that already exists is placed in, when
+    /// nothing binds that workspace yet.
     ///
-    /// Read from the configuration rather than from the snapshot: the rule it
-    /// serves is about what this run would write into a workspace, and a key
-    /// this run is about to create is not in any snapshot yet.
-    fn placed_in(&self, address: &ResourceAddress) -> Option<Uuid> {
+    /// Only for a resource state binds: one that does not exist has no
+    /// placement to be wrong about, and its create is what gives it one.
+    fn unbound_placement(&self, address: &ResourceAddress) -> Option<Address> {
         let placement = match address {
+            // An assignment is placed where its key is: assigning or removing a
+            // guardrail while the key's own workspace is unresolved would
+            // change what a credential may do without knowing where it lives.
             ResourceAddress::Key(address) | ResourceAddress::Assignment(address) => {
+                self.state.key(address)?;
                 key_placement(self.state, self.config.keys.get(address)?)
             }
             ResourceAddress::Guardrail(address) => {
-                let placement =
-                    guardrail_placement(self.state, self.config.guardrails.get(address)?);
-                // A default guardrail names no workspace because it *is* one
-                // workspace's, and validation makes sure the two agree.
-                if matches!(placement, Placement::Unspecified)
-                    && let Some(workspace) = self.workspace_defaulting_to_block(address)
-                    && let Some(binding) = self.state.workspace(workspace)
-                {
-                    return Some(binding.id.clone());
-                }
-                placement
+                self.state.guardrail(address)?;
+                guardrail_placement(self.state, self.config.guardrails.get(address)?)
             }
             ResourceAddress::LogDestination(address) => {
+                self.state.log_destination(address)?;
                 destination_placement(self.state, self.config.log_destinations.get(address)?)
             }
             ResourceAddress::Workspace(_)
@@ -1365,15 +1442,15 @@ impl<'a> Index<'a> {
             | ResourceAddress::RemoteLogDestination(_) => return None,
         };
         match placement {
-            Placement::In(id) => Some(id),
-            // A block that names no workspace is created wherever this run is
-            // scoped, so a scoped run's budget rule reaches it too.
-            Placement::Unspecified => self.workspace.cloned(),
-            // Unbound: the workspace has no identity to compare a budget
-            // against yet, and a workspace this run creates has no budget to
-            // have failed.
-            Placement::Unbound(_) => None,
+            Placement::Unbound(workspace) => Some(workspace),
+            Placement::In(_) | Placement::Unspecified => None,
         }
+    }
+
+    /// The workspace an action's resource is placed in, when the configuration
+    /// says which.
+    fn placed_in(&self, address: &ResourceAddress) -> Option<Uuid> {
+        placed_in(self.config, self.state, self.workspace, address)
     }
 
     /// Whether the guardrail bound at this local address will enforce zero
@@ -1760,10 +1837,10 @@ fn guardrail_identity(
 ///
 /// Two answers, and the difference is whether the identity means anything on
 /// its own. A workspace's default guardrail exists as an identity from the
-/// moment the workspace does and appears in no listing until its configuration
-/// is first written, so it is written rather than reported — the one exception
-/// to "bound but absent means missing" (ADR-0004, item 3). Anything else is
-/// recreated only when nothing already answers to the name.
+/// moment the workspace does and is absent from the observation until its
+/// configuration is first written, so it is written rather than reported — the
+/// one exception to "bound but absent means missing" (ADR-0004, item 3).
+/// Anything else is recreated only when nothing already answers to the name.
 fn plan_absent_guardrail(
     desired: &Guardrail,
     index: &Index<'_>,
@@ -1774,8 +1851,8 @@ fn plan_absent_guardrail(
 ) -> Action {
     // The one exception to "bound but absent means missing": a workspace's
     // own default guardrail exists as an identity from the moment the
-    // workspace does, and appears in no listing until its configuration is
-    // first written (ADR-0004, item 3).
+    // workspace does, and is in no listing — not even its own workspace's —
+    // until its configuration is first written (ADR-0004, item 3).
     if let Some(workspace) = index.workspace_defaulting_to(id) {
         let owner = index
             .state
@@ -1814,8 +1891,20 @@ fn plan_absent_guardrail(
 
     // Bound to a guardrail that is not there. Recreating is safe only if
     // nothing else already answers to the name, whoever owns it.
-    let holders = index.guardrails_named(&desired.name);
     let identity = Some(Identity::Guardrail(id.clone()));
+    let Some(name) = &desired.name else {
+        // A block with no name of its own is some workspace's default, and the
+        // exception above did not apply: the workspace it belongs to is not
+        // one this run can see. Such a guardrail is never `POST`ed and has no
+        // name to recreate it under, so an operator resolves it.
+        return Proposal {
+            identity,
+            rationale: vec![Reason::AbsentRemotely],
+            ..Proposal::default()
+        }
+        .into_action(ActionKind::Missing, at);
+    };
+    let holders = index.guardrails_named(name);
     if !holders.is_empty() {
         return Proposal {
             identity,
@@ -1833,6 +1922,59 @@ fn plan_absent_guardrail(
     .into_action(ActionKind::Create, at)
 }
 
+/// The workspace an action's resource is placed in, when the configuration says
+/// which.
+///
+/// Read from the configuration rather than from the snapshot: the rule it
+/// serves is about what this run would write into a workspace, and a key this
+/// run is about to create is not in any snapshot yet. `scope` is the run's
+/// workspace, which is where a block that names none is created.
+///
+/// Public because apply asks the same question at execution time, about a
+/// workspace whose budget writes this run has just made (ADR-0004, item 4).
+#[must_use]
+pub fn placed_in(
+    config: &Config,
+    state: &State,
+    scope: Option<&Uuid>,
+    address: &ResourceAddress,
+) -> Option<Uuid> {
+    let placement = match address {
+        ResourceAddress::Key(address) | ResourceAddress::Assignment(address) => {
+            key_placement(state, config.keys.get(address)?)
+        }
+        ResourceAddress::Guardrail(address) => {
+            let placement = guardrail_placement(state, config.guardrails.get(address)?);
+            // A default guardrail names no workspace because it *is* one
+            // workspace's, and validation makes sure the two agree.
+            if matches!(placement, Placement::Unspecified)
+                && let Some(workspace) = workspace_defaulting_to(config, address)
+                && let Some(binding) = state.workspace(workspace)
+            {
+                return Some(binding.id.clone());
+            }
+            placement
+        }
+        ResourceAddress::LogDestination(address) => {
+            destination_placement(state, config.log_destinations.get(address)?)
+        }
+        ResourceAddress::Workspace(_)
+        | ResourceAddress::RemoteKey(_)
+        | ResourceAddress::RemoteGuardrail(_)
+        | ResourceAddress::RemoteWorkspace(_)
+        | ResourceAddress::RemoteLogDestination(_) => return None,
+    };
+    match placement {
+        Placement::In(id) => Some(id),
+        // A block that names no workspace is created wherever this run is
+        // scoped, so a scoped run's budget rule reaches it too.
+        Placement::Unspecified => scope.cloned(),
+        // Unbound: the workspace has no identity to compare a budget against
+        // yet, and a workspace this run creates has no budget to have failed.
+        Placement::Unbound(_) => None,
+    }
+}
+
 /// A configured guardrail that state does not bind.
 fn plan_unbound_guardrail(
     desired: &Guardrail,
@@ -1840,7 +1982,17 @@ fn plan_unbound_guardrail(
     depends_on: Vec<ResourceAddress>,
     at: ResourceAddress,
 ) -> Action {
-    let candidates = index.unowned_guardrails_named(&desired.name);
+    let Some(name) = &desired.name else {
+        // A block with no name of its own is some workspace's default, and
+        // `plan_guardrail` answers those before it reaches here: such a
+        // guardrail is never `POST`ed, and there is no name to match one by.
+        return Proposal {
+            rationale: vec![Reason::AbsentRemotely],
+            ..Proposal::default()
+        }
+        .into_action(ActionKind::Missing, at);
+    };
+    let candidates = index.unowned_guardrails_named(name);
     if !candidates.is_empty() {
         // A name is mutable and not unique, so a match is a candidate for
         // `import`, never an adoption (ADR-0001).

@@ -71,6 +71,14 @@ pub(super) fn validate(document: wire::Document) -> Result<Config, Vec<Problem>>
 
     let declared_workspaces: BTreeSet<String> = document.workspaces.keys().cloned().collect();
     let declared_guardrails: BTreeSet<String> = document.guardrails.keys().cloned().collect();
+    // Which guardrail blocks are a workspace's default, read before the
+    // workspaces are validated: a default guardrail's name is OpenRouter's, so
+    // the rule its own block is held to depends on this.
+    let default_guardrails: BTreeSet<String> = document
+        .workspaces
+        .values()
+        .filter_map(|workspace| workspace.default_guardrail.clone())
+        .collect();
     let declared_receivers: BTreeSet<String> = document.receivers.keys().cloned().collect();
 
     let defaults = Defaults {
@@ -85,7 +93,12 @@ pub(super) fn validate(document: wire::Document) -> Result<Config, Vec<Problem>>
 
     let receivers = validator.receivers(document.receivers);
     let workspaces = validator.workspaces(document.workspaces, &declared_guardrails);
-    let guardrails = validator.guardrails(document.guardrails, defaults, &declared_workspaces);
+    let guardrails = validator.guardrails(
+        document.guardrails,
+        defaults,
+        &declared_workspaces,
+        &default_guardrails,
+    );
     let keys = validator.keys(
         document.keys,
         defaults,
@@ -97,7 +110,13 @@ pub(super) fn validate(document: wire::Document) -> Result<Config, Vec<Problem>>
         validator.log_destinations(document.log_destinations, &declared_workspaces);
 
     validator.duplicate_names("workspaces", workspaces.iter().map(|(a, w)| (a, &w.name)));
-    validator.duplicate_names("guardrails", guardrails.iter().map(|(a, g)| (a, &g.name)));
+    // A default guardrail has no configured name to duplicate.
+    validator.duplicate_names(
+        "guardrails",
+        guardrails
+            .iter()
+            .filter_map(|(a, g)| g.name.as_ref().map(|name| (a, name))),
+    );
     validator.duplicate_names("keys", keys.iter().map(|(a, k)| (a, &k.name)));
     validator.duplicate_names(
         "log_destinations",
@@ -228,11 +247,13 @@ impl Validator {
         wire: BTreeMap<String, wire::Guardrail>,
         defaults: Defaults,
         workspaces: &BTreeSet<String>,
+        default_guardrails: &BTreeSet<String>,
     ) -> BTreeMap<Address, Guardrail> {
         wire.into_iter()
             .filter_map(|(raw, block)| {
                 let address = self.address("guardrails", &raw)?;
-                let guardrail = self.guardrail(&raw, block, defaults, workspaces)?;
+                let is_default = default_guardrails.contains(&raw);
+                let guardrail = self.guardrail(&raw, block, defaults, workspaces, is_default)?;
                 Some((address, guardrail))
             })
             .collect()
@@ -639,12 +660,13 @@ impl Validator {
         block: wire::Guardrail,
         defaults: Defaults,
         workspaces: &BTreeSet<String>,
+        is_default: bool,
     ) -> Option<Guardrail> {
         let path = format!("guardrails.{}", safe_segment(raw));
         let before = self.count();
         let cleared = self.clears(&path, &block.clear, GUARDRAIL_CLEARABLE);
 
-        let name = self.name(&format!("{path}.name"), block.name);
+        let name = self.guardrail_name(&path, block.name, is_default);
         let description_path = format!("{path}.description");
         let described = block.description.is_some();
         let description = block
@@ -688,7 +710,7 @@ impl Validator {
             self.placement(&path, block.workspace, block.workspace_id, workspaces);
 
         let guardrail = Guardrail {
-            name: name?,
+            name,
             description,
             allowed_models,
             denied_models,
@@ -921,6 +943,31 @@ impl Validator {
             }
         }
         cleared
+    }
+
+    /// A guardrail's `name`, which a workspace's default guardrail does not
+    /// have.
+    ///
+    /// OpenRouter assigns that one — `Workspace <uuid> Default` — and answers a
+    /// `PATCH` of its `name` with "A workspace default guardrail's name is not
+    /// editable", so a block that set one would describe a resource no write
+    /// could reach (ADR-0004, item 3). Every other guardrail still needs one.
+    fn guardrail_name(
+        &mut self,
+        path: &str,
+        value: Option<String>,
+        is_default: bool,
+    ) -> Option<RemoteName> {
+        if !is_default {
+            return self.name(&format!("{path}.name"), value);
+        }
+        if value.is_some() {
+            self.problem(
+                format!("{path}.name"),
+                "a workspace's default guardrail has a fixed name; omit `name`",
+            );
+        }
+        None
     }
 
     fn name(&mut self, path: &str, value: Option<String>) -> Option<RemoteName> {

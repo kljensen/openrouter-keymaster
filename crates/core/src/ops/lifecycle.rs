@@ -456,13 +456,13 @@ fn observed_children(
     default_guardrail: Option<&Uuid>,
 ) -> Result<Vec<String>, ApiError> {
     let mut children: Vec<String> = reader
-        .list_keys(Some(id))?
+        .list_keys_in(Some(id))?
         .into_iter()
         .map(|key| format!("key {hash}", hash = key.hash))
         .collect();
     children.extend(
         reader
-            .list_guardrails(Some(id))?
+            .list_guardrails_in(Some(id))?
             .into_iter()
             .filter(|guardrail| Some(&guardrail.id) != default_guardrail)
             .map(|guardrail| format!("guardrail {id}", id = guardrail.id)),

@@ -194,6 +194,21 @@ pub struct ObservedAssignment {
     pub created_at: Option<OffsetDateTime>,
 }
 
+/// One workspace's listing, where a workspace that is no longer there holds
+/// nothing.
+///
+/// Only a `404`, and only for a listing filtered to one workspace: every
+/// workspace asked about came from this run's own workspace listing, so a
+/// `404` is one deleted between the two reads, and an empty answer is then the
+/// true one. Everything else fails the snapshot — a partial picture is what
+/// makes the planner propose a second copy of something that already exists.
+fn in_workspace<T>(listing: Result<Vec<T>, ApiError>) -> Result<Vec<T>, ApiError> {
+    match listing {
+        Err(error) if error.status() == Some(404) => Ok(Vec::new()),
+        other => other,
+    }
+}
+
 /// Read-only access to the OpenRouter resources Keymaster manages.
 #[derive(Debug)]
 pub struct Reader<'client> {
@@ -217,7 +232,40 @@ impl<'client> Reader<'client> {
         Self { client, limits }
     }
 
-    /// Every API key, disabled ones included.
+    /// Every API key in the organization Keymaster can reach, disabled ones
+    /// included.
+    ///
+    /// `GET /keys` answers for one workspace at a time — the credential's
+    /// default workspace unless `workspace_id` names another — so a complete
+    /// picture is that listing once with no workspace and once per workspace
+    /// the snapshot found, deduplicated by hash. Verified against the live API
+    /// on 2026-08-28: an unscoped listing returns the default workspace's keys
+    /// and nothing else, `include_disabled` or not.
+    ///
+    /// A key this run cannot see is a key the planner would call missing and
+    /// create a second time, so this is what every snapshot reads.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reader::list_keys_in`], except that a workspace that answers `404`
+    /// is skipped: it was in this run's own workspace listing a moment ago, so
+    /// a `404` is a workspace deleted underneath the snapshot, and a workspace
+    /// that is gone holds nothing.
+    pub fn list_keys(&self, workspaces: &[Uuid]) -> Result<Vec<ObservedKey>, ApiError> {
+        let mut found: BTreeMap<KeyHash, ObservedKey> = BTreeMap::new();
+        for key in self.list_keys_in(None)? {
+            found.insert(key.hash.clone(), key);
+        }
+        for workspace in workspaces {
+            for key in in_workspace(self.list_keys_in(Some(workspace)))? {
+                found.insert(key.hash.clone(), key);
+            }
+        }
+        Ok(found.into_values().collect())
+    }
+
+    /// Every API key in one workspace, or in the credential's default
+    /// workspace when none is named. Disabled ones included.
     ///
     /// Disabled keys are still Keymaster's to manage — a key it disabled during
     /// retirement is one it must keep seeing — so leaving them out would make a
@@ -230,7 +278,7 @@ impl<'client> Reader<'client> {
     ///
     /// Returns the client's errors, or [`ApiError::InvalidResponse`] when a
     /// record has no usable identity or pagination does not terminate.
-    pub fn list_keys(&self, workspace: Option<&Uuid>) -> Result<Vec<ObservedKey>, ApiError> {
+    pub fn list_keys_in(&self, workspace: Option<&Uuid>) -> Result<Vec<ObservedKey>, ApiError> {
         pagination::collect(
             self.limits,
             "API keys",
@@ -264,12 +312,38 @@ impl<'client> Reader<'client> {
         ObservedKey::from_wire(one.data)
     }
 
-    /// Every guardrail.
+    /// Every guardrail in the organization Keymaster can reach.
+    ///
+    /// One listing per workspace and one without, exactly as [`Reader::
+    /// list_keys`] reads keys and for the same reason: an unscoped
+    /// `GET /guardrails` returns the default workspace's guardrails and nothing
+    /// else. A workspace's listing includes its own materialized default
+    /// guardrail, which is the only listing that ever carries one (ADR-0004,
+    /// item 3).
     ///
     /// # Errors
     ///
     /// As [`Reader::list_keys`].
-    pub fn list_guardrails(
+    pub fn list_guardrails(&self, workspaces: &[Uuid]) -> Result<Vec<ObservedGuardrail>, ApiError> {
+        let mut found: BTreeMap<Uuid, ObservedGuardrail> = BTreeMap::new();
+        for guardrail in self.list_guardrails_in(None)? {
+            found.insert(guardrail.id.clone(), guardrail);
+        }
+        for workspace in workspaces {
+            for guardrail in in_workspace(self.list_guardrails_in(Some(workspace)))? {
+                found.insert(guardrail.id.clone(), guardrail);
+            }
+        }
+        Ok(found.into_values().collect())
+    }
+
+    /// Every guardrail in one workspace, or in the credential's default
+    /// workspace when none is named.
+    ///
+    /// # Errors
+    ///
+    /// As [`Reader::list_keys_in`].
+    pub fn list_guardrails_in(
         &self,
         workspace: Option<&Uuid>,
     ) -> Result<Vec<ObservedGuardrail>, ApiError> {
@@ -588,6 +662,26 @@ impl<'client> Writer<'client> {
     pub fn update_workspace(&self, id: &Uuid, body: &WorkspaceBody) -> Result<(), ApiError> {
         self.client
             .patch_once_discarding_body(&["workspaces", id.as_str()], body)
+    }
+
+    /// Deletes one guardrail, for this repository's own live acceptance suite
+    /// and for nothing else.
+    ///
+    /// Keymaster deletes no guardrail: a guardrail spends nothing, and removing
+    /// a block from a configuration is deliberately not authority to destroy
+    /// one (ADR-0001). A workspace's default guardrail has no deletion in the
+    /// model at all — it is part of its workspace and goes with it — and
+    /// whether the API agrees is a question only a live run can ask. So this
+    /// exists behind `test-support`, which promises nothing to anyone
+    /// (`docs/compatibility.md`), and no operation calls it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Writer::create_guardrail`].
+    #[cfg(feature = "test-support")]
+    pub fn delete_guardrail_for_tests(&self, id: &Uuid) -> Result<(), ApiError> {
+        self.client
+            .delete_once_discarding_body(&["guardrails", id.as_str()])
     }
 
     /// Permanently deletes one workspace.

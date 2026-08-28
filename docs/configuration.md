@@ -122,14 +122,24 @@ budget to be written at all.
 
 **A `default_guardrail` is that workspace's own guardrail.** Every workspace has
 a `default_guardrail_id`, derived from the workspace's UUID, which governs all
-traffic in the workspace; it appears in no listing until its configuration is
-first written. Naming a guardrail block here binds the block to that identity —
-including when the block is added after the workspace was already imported,
-since the workspace binding records the identity and the address takes it. Such
-a guardrail is never created by `POST`, never imported by name, and never
-deleted on its own: it is created by the first `PATCH` to the identity its
+traffic in the workspace. It appears in no unscoped listing, before or after —
+`GET /guardrails` answers for the credential's default workspace — and once its
+configuration is first written it appears in its own workspace's listing, which
+is one of the listings every snapshot reads. Naming a guardrail block here binds the block to that
+identity — including when the block is added after the workspace was already
+imported, since the workspace binding records the identity and the address takes
+it. Such a guardrail is never created by `POST`, never imported by name, and
+never deleted on its own: it is created by the first `PATCH` to the identity its
 workspace names, and `delete workspace` releases its binding along with the
 workspace's.
+
+**A default guardrail block omits `name`.** OpenRouter names that guardrail
+itself — `Workspace <workspace-uuid> Default` — and answers a `PATCH` that
+carries a `name` with `A workspace default guardrail's name is not editable`. So
+the field is refused on such a block ("a workspace's default guardrail has a
+fixed name; omit `name`"), it is never sent, and it is never a difference the
+plan reports. Every other guardrail still requires `name`. The name OpenRouter
+gave it is shown, read-only, by `openrouter-keymaster status`.
 
 A guardrail address may be the default of at most one workspace, that block must
 omit `workspace` or name the same one, and it may not set `workspace_id` at all:
@@ -181,7 +191,7 @@ require_zdr = true
 
 | Field | Type | Required | Clearable | Notes |
 | --- | --- | --- | --- | --- |
-| `name` | string | yes | no | Remote display name. Mutable remotely and never an identifier. |
+| `name` | string | yes, except on a workspace's `default_guardrail`, which must omit it | no | Remote display name. Mutable remotely and never an identifier. OpenRouter names a default guardrail itself and refuses to change it. |
 | `description` | string | no | yes | At most 1000 characters. |
 | `allowed_models` | array of string | no | no (use `[]`) | Model slugs permitted. |
 | `denied_models` | array of string | no | no (use `[]`) | Model slugs refused. Sent as `ignored_models`. |

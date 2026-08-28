@@ -104,8 +104,11 @@ impl BudgetBody {
 /// named, since OpenRouter fixes one when the guardrail is created.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GuardrailBody {
-    /// Display name. Always managed, so always sent.
-    name: String,
+    /// Display name. Sent whenever the configuration has one — which is every
+    /// guardrail but a workspace's default, whose name OpenRouter assigns and
+    /// refuses to change (ADR-0004, item 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     #[serde(skip_serializing_if = "Patch::is_omitted")]
     description: Patch<String>,
     #[serde(skip_serializing_if = "Patch::is_omitted")]
@@ -157,7 +160,7 @@ impl GuardrailBody {
     #[must_use]
     pub fn update(desired: &Guardrail) -> Self {
         Self {
-            name: name(&desired.name),
+            name: desired.name.as_ref().map(name),
             description: Patch::from_managed(&desired.description, Clone::clone),
             allowed_models: slugs(desired.allowed_models.as_ref()),
             ignored_models: slugs(desired.denied_models.as_ref()),

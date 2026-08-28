@@ -9,6 +9,68 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Fixed
 
+- A workspace's default guardrail no longer sends a `name`, and no longer looks
+  missing once it exists. OpenRouter names that guardrail itself — `Workspace
+  <workspace-uuid> Default` — and answers a `PATCH` carrying a `name` with
+  `400 A workspace default guardrail's name is not editable`, which failed the
+  first apply of every workspace configuration. `name` is now refused on a
+  guardrail block that is a workspace's `default_guardrail` ("a workspace's
+  default guardrail has a fixed name; omit `name`"), still required on every
+  other guardrail, never sent for a default one, and never reported as drift;
+  `status` shows the name OpenRouter gave it. A materialized default guardrail
+  is also absent from an unscoped `GET /guardrails` and present in its own
+  workspace's listing, which the snapshot now reads (below), so it converges to
+  a no-op like anything else instead of being proposed for creation on every
+  run. Both facts were verified against a real organization (#36).
+
+  `config::Guardrail::name` is now `Option<RemoteName>`, which is a breaking
+  change to the read-only configuration surface
+  ([`docs/compatibility.md`](docs/compatibility.md)), as is a configuration that
+  named its default guardrail.
+
+- A snapshot reads every workspace, so `plan`, `status`, and `apply` see keys
+  and guardrails outside the credential's default workspace. `GET /keys` and
+  `GET /guardrails` answer for one workspace at a time — the default workspace
+  unless `workspace_id` names another, and `include_disabled` does not change
+  that — so an unscoped listing was the default workspace and nothing else.
+  A key created in another workspace was therefore invisible: the read that
+  verifies an apply could not find the key it had just made and reported it as
+  accepted but unconfirmed, and the next plan would have offered to create a
+  second one. Both listings are now read once without a workspace and once per
+  workspace the run found, deduplicated by identity, as the log destination
+  listing already was; a per-workspace listing that answers `404` is a workspace
+  deleted underneath the snapshot and holds nothing, and any other failure fails
+  the snapshot rather than truncating it. `recover inspect` searches the same
+  union. Found by a live run against a real organization (#36).
+
+- A resource that already exists is no longer converged, or widened, while the
+  workspace its block names is still unbound. The same-run exception that lets a
+  workspace's contents be created in the run that creates the workspace was
+  reaching every dependent, including a guardrail, key, or log destination that
+  already exists somewhere else. OpenRouter fixes a workspace at creation, so
+  the run would have converged the fields, left the resource where it was, and
+  reported success — including for a resource whose fields already matched,
+  which is reported as a no-op, and for a key's update, which carries no
+  workspace dependency at all and can widen a limit. Every bound resource whose
+  configured workspace has no binding is now held back, naming the workspace it
+  waits on — an assignment with the key it belongs to, since assigning a
+  guardrail or removing one changes what a credential may do. Creates still
+  run — a key's `replace` among them, along with the assignment beside it,
+  which belongs to the successor (#36).
+
+- Apply enforces ADR-0004 item 4 on a workspace it creates in the same run. The
+  planner cannot judge the budget of a workspace that has no binding yet, so a
+  refused or unsettled budget `PUT` left the keys inside that workspace to be
+  issued with no cap in force. Apply now records such a workspace and holds back
+  every issuing or expanding write placed in it for the rest of the run, naming
+  it; routine writes proceed as before (#36).
+
+- A write apply holds back at execution time now holds back what depends on it.
+  When a workspace create's response carries no `default_guardrail_id` there is
+  no identity to `PATCH`, and the key naming that guardrail used to reach
+  issuance anyway and fail. It is held back with the same reason, and the next
+  run — which reads the identity from the workspace itself — writes both (#36).
+
 - A configuration that creates a workspace and puts a guardrail or a key inside
   it now converges in one `apply` rather than two. The planner treated every
   unbound workspace as something only an operator could resolve, so a fresh

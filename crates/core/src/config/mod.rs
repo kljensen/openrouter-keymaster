@@ -304,7 +304,12 @@ pub struct LogDestination {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Guardrail {
     /// Remote display name. Mutable remotely, never an identifier.
-    pub name: RemoteName,
+    ///
+    /// Absent on a workspace's default guardrail, and absent only there:
+    /// OpenRouter names that one itself and answers a `PATCH` of its `name`
+    /// with "A workspace default guardrail's name is not editable", so the
+    /// configuration has no say in it (ADR-0004, item 3).
+    pub name: Option<RemoteName>,
     /// Remote description.
     pub description: Managed<String>,
     /// Models this guardrail permits, as normalized slugs.

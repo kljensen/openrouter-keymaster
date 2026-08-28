@@ -1754,7 +1754,6 @@ budgets = { monthly = 50, lifetime = 500 }
 default_guardrail = "house"
 
 [guardrails.house]
-name = "house-rail"
 
 [keys.jobfeed]
 name = "golf-jobfeed"
@@ -1947,7 +1946,7 @@ fn nothing_is_issued_or_widened_in_a_workspace_whose_budget_has_not_converged() 
 }
 
 #[test]
-fn a_default_guardrail_absent_from_the_listing_is_created_rather_than_missing() {
+fn a_default_guardrail_absent_from_the_observation_is_created_rather_than_missing() {
     let mut world = World::new();
     world.bind_workspace("club", CLUB_ID);
     world.bind_guardrail("house", DEFAULT_RAIL_ID);
@@ -1979,6 +1978,213 @@ fn a_default_guardrail_absent_from_the_listing_is_created_rather_than_missing() 
         guardrail.rationale
     );
     assert!(guardrail.is_executable(false));
+}
+
+#[test]
+fn a_materialized_default_guardrail_converges_without_ever_diffing_its_name() {
+    // Observed by identity, because no listing carries it — and carrying the
+    // name OpenRouter gave it, which is not the block's to change and is
+    // therefore never a difference (ADR-0004, item 3).
+    let mut world = World::new();
+    world.bind_workspace("club", CLUB_ID);
+    world.bind_guardrail("house", DEFAULT_RAIL_ID);
+    world
+        .observe_workspace(CLUB_ID, "Golf Club", "golf-club")
+        .budgets = BTreeMap::from([
+        (BudgetInterval::Monthly, usd(50.0)),
+        (BudgetInterval::Lifetime, usd(500.0)),
+    ]);
+    world
+        .observe_guardrail(DEFAULT_RAIL_ID, &format!("Workspace {CLUB_ID} Default"))
+        .workspace_id = Some(uuid(CLUB_ID));
+
+    let plan = world.plan(CLUB);
+    let guardrail = action_at(&plan, "guardrails.house");
+    assert_eq!(guardrail.kind, ActionKind::NoOp, "{:?}", guardrail.changes);
+    assert!(guardrail.changes.is_empty(), "{:?}", guardrail.changes);
+}
+
+/// A club with a guardrail that already exists and a key that does not, both
+/// placed in a workspace this plan has to create.
+const CLUB_MOVED: &str = r#"
+version = 1
+
+[receivers.vault]
+type = "file"
+path = "/var/lib/keymaster/vault.key"
+
+[workspaces.club]
+name = "Golf Club"
+slug = "golf-club"
+
+[guardrails.house]
+name = "house-rail"
+description = "the drifted one"
+workspace = "club"
+
+[keys.jobfeed]
+name = "golf-jobfeed"
+receiver = "vault"
+workspace = "club"
+"#;
+
+#[test]
+fn a_bound_resource_moved_into_a_workspace_this_plan_creates_is_held_back() {
+    // The same-run exception is for creates: they take their placement from
+    // the binding apply records a phase earlier. A guardrail that already
+    // exists cannot be moved at all, so patching it would converge its fields
+    // while leaving it in a workspace the configuration no longer names, and
+    // report success for it (ADR-0004, item 2).
+    let mut world = World::new();
+    world.bind_guardrail("house", OTHER_RAIL_ID);
+    world.observe_guardrail(OTHER_RAIL_ID, "house-rail");
+
+    let plan = world.plan(CLUB_MOVED);
+    let guardrail = action_at(&plan, "guardrails.house");
+    assert_eq!(
+        guardrail.kind,
+        ActionKind::Update,
+        "{:?}",
+        guardrail.changes
+    );
+    assert!(!guardrail.is_executable(false), "{:?}", guardrail.rationale);
+    assert!(
+        waits_on_the_club(guardrail),
+        "it waits on the workspace whose binding would settle its placement: {:?}",
+        guardrail.rationale
+    );
+
+    // And a create in that same workspace still runs in this plan.
+    let key = action_at(&plan, "keys.jobfeed");
+    assert_eq!(key.kind, ActionKind::Create);
+    assert!(key.is_executable(false), "{:?}", key.rationale);
+}
+
+#[test]
+fn a_converged_resource_in_a_workspace_this_plan_creates_is_held_back_too() {
+    // Neither of these carries a dependency on the workspace: a guardrail whose
+    // fields already match has no edges and a `no_op` action, and a key's
+    // update has no workspace dependency either. The rule is read from the
+    // configured placement for exactly that reason — otherwise this run would
+    // report a converged guardrail, and widen a key, while both sit in a
+    // workspace the configuration no longer names.
+    let mut world = World::new();
+    world.bind_guardrail("house", OTHER_RAIL_ID);
+    world
+        .observe_guardrail(OTHER_RAIL_ID, "house-rail")
+        .description = Some("the drifted one".to_owned());
+    world.bind_key("jobfeed", "hash-jobfeed", 1);
+    world.observe_key("hash-jobfeed", "renamed-by-hand");
+
+    let plan = world.plan(CLUB_MOVED);
+    let guardrail = action_at(&plan, "guardrails.house");
+    assert_eq!(guardrail.kind, ActionKind::NoOp, "{:?}", guardrail.changes);
+    assert!(waits_on_the_club(guardrail), "{:?}", guardrail.rationale);
+
+    let key = action_at(&plan, "keys.jobfeed");
+    assert_eq!(key.kind, ActionKind::Update, "{:?}", key.changes);
+    assert!(!key.is_executable(false), "{:?}", key.rationale);
+    assert!(waits_on_the_club(key), "{:?}", key.rationale);
+}
+
+/// Whether this action says it is waiting on the `club` workspace.
+fn waits_on_the_club(action: &Action) -> bool {
+    action.rationale.iter().any(|reason| {
+        matches!(
+            reason,
+            Reason::BlockedBy { dependency }
+                if *dependency == ResourceAddress::Workspace(address("club"))
+        )
+    })
+}
+
+/// The club's key, already created and already assigned to a guardrail, in a
+/// workspace this plan has to create. `guardrail` is what its block says about
+/// the guardrail it wants.
+fn club_key_assigned(guardrail: &str) -> String {
+    format!(
+        "version = 1\n\n\
+         [receivers.vault]\ntype = \"file\"\npath = \"/var/lib/keymaster/vault.key\"\n\n\
+         [workspaces.club]\nname = \"Golf Club\"\nslug = \"golf-club\"\n\n\
+         [guardrails.house]\nname = \"house-rail\"\n\n\
+         [keys.jobfeed]\nname = \"golf-jobfeed\"\nreceiver = \"vault\"\n\
+         workspace = \"club\"\n{guardrail}"
+    )
+}
+
+/// That key as OpenRouter has it: assigned to a guardrail the configuration
+/// does not ask for.
+fn club_with_an_assigned_key() -> World {
+    let mut world = World::new();
+    world.bind_key("jobfeed", KEY_HASH, 1);
+    world.observe_key(KEY_HASH, "golf-jobfeed");
+    world.bind_guardrail("house", RAIL_ID);
+    world.observe_guardrail(RAIL_ID, "house-rail");
+    world.observe_assignment(ASSIGNMENT_ID, KEY_HASH, OTHER_RAIL_ID);
+    world
+}
+
+#[test]
+fn an_assignment_is_held_back_with_the_key_whose_workspace_is_unresolved() {
+    // An assignment is what a key may spend under, and it is planned at its own
+    // address: removing one has no dependency on the key at all, and making one
+    // depends only on the guardrail. Both would otherwise run against a key
+    // this run cannot place (ADR-0004, item 2).
+    let cleared = club_with_an_assigned_key().plan(&club_key_assigned("clear = [\"guardrail\"]\n"));
+    let removal = action_at(&cleared, "keys.jobfeed.guardrail");
+    assert_eq!(
+        removal.kind,
+        ActionKind::Unassign,
+        "{:?}",
+        removal.rationale
+    );
+    assert!(!removal.is_executable(false), "{:?}", removal.rationale);
+    assert!(waits_on_the_club(removal), "{:?}", removal.rationale);
+
+    let moved = club_with_an_assigned_key().plan(&club_key_assigned("guardrail = \"house\"\n"));
+    let assignment = action_at(&moved, "keys.jobfeed.guardrail");
+    assert_eq!(
+        assignment.kind,
+        ActionKind::Assign,
+        "{:?}",
+        assignment.rationale
+    );
+    assert!(
+        !assignment.is_executable(false),
+        "{:?}",
+        assignment.rationale
+    );
+    assert!(waits_on_the_club(assignment), "{:?}", assignment.rationale);
+}
+
+#[test]
+fn a_replaced_key_and_its_assignment_run_in_the_workspace_this_plan_creates() {
+    // A replacement creates a key, in the workspace apply resolves from the
+    // binding it records a phase earlier — and the assignment beside it is the
+    // successor's, not the predecessor's. Neither is held back, so a
+    // configuration that only raises a generation converges in one run.
+    let mut world = club_with_an_assigned_key();
+    world.observe_assignment(OTHER_ASSIGNMENT_ID, KEY_HASH, RAIL_ID);
+
+    let plan = world.plan(&club_key_assigned(
+        "guardrail = \"house\"\ngeneration = 2\n",
+    ));
+    let key = action_at(&plan, "keys.jobfeed");
+    assert_eq!(key.kind, ActionKind::Replace, "{:?}", key.rationale);
+    assert!(key.is_executable(false), "{:?}", key.rationale);
+
+    let assignment = action_at(&plan, "keys.jobfeed.guardrail");
+    assert_eq!(
+        assignment.kind,
+        ActionKind::Assign,
+        "{:?}",
+        assignment.rationale
+    );
+    assert!(
+        assignment.is_executable(false),
+        "the successor's assignment is the successor's placement: {:?}",
+        assignment.rationale
+    );
 }
 
 #[test]
@@ -2047,7 +2253,6 @@ budgets = { monthly = 50 }
 default_guardrail = "house"
 
 [guardrails.house]
-name = "house-rail"
 limit_usd = 20
 reset_interval = "monthly"
 "#;

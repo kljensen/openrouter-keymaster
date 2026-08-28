@@ -114,11 +114,12 @@ pub fn guardrail_changes(
     observed: Option<&ObservedGuardrail>,
 ) -> Vec<FieldChange> {
     let mut diff = Diff::new(observed.is_some());
-    diff.name(
-        "name",
-        observed.map(|rail| rail.name.as_str()),
-        &desired.name,
-    );
+    // A workspace's default guardrail has no configured name and its remote one
+    // cannot be written, so there is nothing here to converge (ADR-0004,
+    // item 3). `status` reports the name OpenRouter gave it.
+    if let Some(name) = &desired.name {
+        diff.name("name", observed.map(|rail| rail.name.as_str()), name);
+    }
     diff.text(
         "description",
         observed.and_then(|rail| rail.description.as_deref()),

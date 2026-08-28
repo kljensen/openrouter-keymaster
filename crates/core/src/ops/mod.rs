@@ -487,10 +487,19 @@ fn observe(context: &Context) -> Result<Observation, Error> {
 ///
 /// Shared with apply, which reads one under its lock before planning and a
 /// second one afterwards to verify what it wrote.
-/// The destination listing is the one read that needs an earlier answer:
-/// `GET /observability/destinations` reports one workspace at a time, so the
-/// workspaces are read first and their identities are what make the destination
-/// picture complete (ADR-0006, item 1).
+/// Every listing needs the workspaces before it can run, so the workspaces come
+/// first.
+///
+/// `GET /keys`, `GET /guardrails`, and `GET /observability/destinations` all
+/// answer for one workspace at a time — the credential's default workspace
+/// unless `workspace_id` names another — so each is read once without a
+/// workspace and once per workspace this run found, and the union, deduplicated
+/// by identity, is the organization (ADR-0004, items 3 and 5, and ADR-0006,
+/// item 1).
+///
+/// That is a handful of requests more than a single listing, and it is what
+/// makes the snapshot complete: a key or a guardrail this run cannot see is one
+/// the planner reports as missing and offers to create a second time.
 fn snapshot(reader: &Reader<'_>) -> Result<Snapshot, ApiError> {
     let workspaces = reader.list_workspaces()?;
     let workspace_ids: Vec<Uuid> = workspaces
@@ -498,8 +507,8 @@ fn snapshot(reader: &Reader<'_>) -> Result<Snapshot, ApiError> {
         .map(|workspace| workspace.id.clone())
         .collect();
     Ok(Snapshot {
-        keys: reader.list_keys(None)?,
-        guardrails: reader.list_guardrails(None)?,
+        keys: reader.list_keys(&workspace_ids)?,
+        guardrails: reader.list_guardrails(&workspace_ids)?,
         assignments: reader.list_assignments()?,
         log_destinations: reader.list_log_destinations(&workspace_ids)?,
         workspaces,

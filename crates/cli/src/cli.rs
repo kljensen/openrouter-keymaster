@@ -446,8 +446,9 @@ Like every import, this makes no remote write: it reads that one workspace and \
 records a binding. It also records the workspace's `default_guardrail_id`, and \
 binds the guardrail block the configuration names as `default_guardrail` to \
 that identity — the default guardrail appears in no listing until its \
-configuration is first written, so the identity the workspace carries is the \
-only handle on it, and it can never be imported by name.")]
+configuration is first written, and in its own workspace's from then on, so the \
+identity the workspace carries is the only handle on it and it can never be \
+imported by name.")]
     Workspace {
         /// Local workspace address, as written in the configuration.
         name: String,

@@ -133,8 +133,8 @@ are created, and OpenRouter fixes that placement for good.
    slug = "golf-club"
    default_guardrail = "club_house"
 
+   # A workspace's default guardrail omits `name`: OpenRouter names that one.
    [guardrails.club_house]
-   name = "club-house"
    limit_usd = 10
    reset_interval = "monthly"
    ```
@@ -144,9 +144,10 @@ are created, and OpenRouter fixes that placement for good.
    ```
 
    The workspace is created first and its UUID is recorded before anything else
-   happens. Anything that names it — a key, a guardrail, a destination — is held
-   back until that binding exists, so the first apply creates the container and
-   the next one fills it.
+   happens. Everything that names it — a key, a guardrail, a destination —
+   depends on that create and runs after it in the same apply, resolving its
+   placement from the binding. A workspace only an operator can bind holds its
+   contents back instead.
 
 2. **Or bind one that already exists.**
 
@@ -159,11 +160,17 @@ are created, and OpenRouter fixes that placement for good.
 
 3. **Materialize the default guardrail** by describing that block and applying.
    Every workspace has one, derived from its UUID, and it governs all traffic in
-   the workspace — but it appears in no listing until its configuration is first
-   written. So the plan reports it as a create carrying the reason
+   the workspace — but until its configuration is first written it is in no
+   listing at all, and after that only in its own workspace's. So the plan
+   reports it as a create carrying the reason
    `default_guardrail_unmaterialized`, and the apply performs that create as the
    first `PATCH` to the identity the workspace names. There is no `POST` for it,
    it can never be imported by name, and it is never deleted on its own.
+
+   Its block omits `name`. OpenRouter names it `Workspace <workspace-uuid>
+   Default` and refuses to change that, so the configuration has no say in it
+   and the plan never reports it as drift; `openrouter-keymaster status` shows
+   the name OpenRouter gave it.
 
 4. **Set a pooled budget, if your plan has them.**
 

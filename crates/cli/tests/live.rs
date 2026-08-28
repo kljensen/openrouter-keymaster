@@ -515,9 +515,12 @@ fn retire_then_delete(live: &Live, project: &Project, predecessor: &KeyHash) {
 
 /// Proves the workspace's default guardrail was materialized.
 ///
-/// It has no `POST`: OpenRouter derives the identity from the workspace and the
-/// guardrail appears in no listing until its configuration is first written, so
-/// finding it in one is the proof that the first `PATCH` created it.
+/// It has no `POST`: OpenRouter derives the identity from the workspace, and
+/// the first `PATCH` to it is what creates the guardrail — until then reading
+/// that identity is a 404. Once written it is in exactly one listing, its own
+/// workspace's, and in no other: an unscoped `GET /guardrails` answers for the
+/// credential's default workspace alone. Its name is OpenRouter's own and the
+/// block never sends one (all verified against the live API on 2026-08-28).
 fn assert_default_guardrail_materialized(live: &Live, workspace: &Uuid) {
     let id = live
         .workspace(workspace)
@@ -525,17 +528,36 @@ fn assert_default_guardrail_materialized(live: &Live, workspace: &Uuid) {
         .expect("every workspace carries a default guardrail identity");
 
     let guardrail = live.guardrail(&id);
-    assert!(
-        live.owns(&guardrail.name),
-        "the default guardrail should carry the name its block configures"
+    assert_eq!(
+        guardrail.workspace_id.as_ref(),
+        Some(workspace),
+        "the default guardrail belongs to the workspace that names it"
     );
-    let listed = live
-        .reader()
-        .list_guardrails(None)
-        .expect("listing guardrails");
     assert!(
-        listed.iter().any(|item| item.id == id),
-        "a materialized default guardrail is an ordinary guardrail from then on"
+        guardrail.limit.is_some(),
+        "the budget the block configures is what the first `PATCH` wrote: {guardrail:?}"
+    );
+    assert!(
+        !live.owns(&guardrail.name),
+        "a default guardrail's name is OpenRouter's, not this run's: {name}",
+        name = guardrail.name
+    );
+    assert!(
+        live.reader()
+            .list_guardrails_in(Some(workspace))
+            .expect("listing the workspace's guardrails")
+            .iter()
+            .any(|item| item.id == id),
+        "a materialized default guardrail is in its own workspace's listing"
+    );
+    assert!(
+        !live
+            .reader()
+            .list_guardrails_in(None)
+            .expect("listing guardrails")
+            .iter()
+            .any(|item| item.id == id),
+        "and in no unscoped listing, which answers for the default workspace"
     );
 }
 
@@ -909,9 +931,12 @@ impl Live {
     /// Journals every guardrail this run owns that it has not recorded yet,
     /// and returns the new ones.
     fn adopt_guardrails(&self) -> Vec<Uuid> {
+        // Every workspace this run knows of, not just the default one: an
+        // unscoped listing answers for the credential's default workspace, and
+        // a guardrail this run created elsewhere still has to be swept.
         let observed = self
             .reader()
-            .list_guardrails(None)
+            .list_guardrails(&self.workspace_ids())
             .expect("listing guardrails");
         let mut adopted = Vec::new();
         for guardrail in observed.iter().filter(|item| self.owns(&item.name)) {
@@ -1118,7 +1143,12 @@ impl Live {
     /// Two keys at one address share a remote name during a rotation, so
     /// identity — never the name — decides which one is new.
     fn adopt_new_keys(&self) -> Vec<KeyHash> {
-        let observed = self.reader().list_keys(None).expect("listing keys");
+        // As in `adopt_guardrails`: a key created in a workspace this run made
+        // is in that workspace's listing and in no other.
+        let observed = self
+            .reader()
+            .list_keys(&self.workspace_ids())
+            .expect("listing keys");
         let mut adopted = Vec::new();
         for key in observed.iter().filter(|item| self.owns(&item.name)) {
             if self.keys.borrow().contains(&key.hash) {
@@ -1185,7 +1215,7 @@ impl Live {
     fn guardrail_named(&self, name: &str) -> Uuid {
         let observed = self
             .reader()
-            .list_guardrails(None)
+            .list_guardrails_in(None)
             .expect("listing guardrails");
         observed
             .into_iter()
@@ -1208,7 +1238,7 @@ impl Live {
     fn assert_guardrail_listing_is_complete(&self, expected: &[Uuid]) {
         let observed = self
             .paging_reader()
-            .list_guardrails(None)
+            .list_guardrails_in(None)
             .expect("paginating guardrails");
         let mine: Vec<&Uuid> = observed
             .iter()
@@ -1224,7 +1254,7 @@ impl Live {
     fn assert_key_listing_is_complete(&self, expected: &[KeyHash]) {
         let observed = self
             .paging_reader()
-            .list_keys(None)
+            .list_keys_in(None)
             .expect("paginating keys");
         let mine: Vec<&KeyHash> = observed
             .iter()
@@ -1334,7 +1364,7 @@ impl Live {
         let mut failures = self.delete_destinations();
 
         let mut hashes = self.keys.borrow().clone();
-        match self.reader().list_keys(None) {
+        match self.reader().list_keys(&self.workspace_ids()) {
             Ok(observed) => {
                 for key in observed.iter().filter(|key| self.owns(&key.name)) {
                     if !hashes.contains(&key.hash) {
@@ -1353,6 +1383,9 @@ impl Live {
                 failures.push(reason);
             }
         }
+        // Then each workspace's own default guardrail, which is the one thing
+        // left inside a workspace this run created.
+        failures.extend(self.delete_default_guardrails());
         // Workspaces last, because OpenRouter refuses to delete one that still
         // holds anything, and everything above may have been placed in one.
         failures.extend(self.delete_workspaces());
@@ -1413,6 +1446,45 @@ impl Live {
                 None => failures.push(format!(
                     "log destination {id} (\"{name}\") still exists after a successful delete; \
                      delete it by ID"
+                )),
+            }
+        }
+        failures
+    }
+
+    /// Asks whether a workspace's own default guardrail can be deleted at all,
+    /// once per run, and tolerates the answer either way.
+    ///
+    /// Keymaster deletes no guardrail and has no deletion for this one in its
+    /// model: it is part of its workspace, and `delete workspace` treats it as
+    /// such. Whether the API agrees is a question only a live run can ask, and
+    /// the sweep is where asking it costs nothing — a refusal is the expected
+    /// answer, and the workspace deletion that follows is what removes the
+    /// guardrail either way. What is journaled is the answer, so a later run
+    /// of this suite can be read for what OpenRouter actually does.
+    fn delete_default_guardrails(&self) -> Vec<String> {
+        let writer = Writer::new(&self.client);
+        let mut failures = Vec::new();
+        for id in self.default_guardrails.borrow().iter() {
+            match writer.delete_guardrail_for_tests(id) {
+                Ok(()) => self.record(
+                    "default-guardrail-deleted",
+                    id.as_str(),
+                    "the API accepted a DELETE on a workspace's own default guardrail",
+                ),
+                // A refusal is the documented shape of this resource: it
+                // cannot be removed on its own.
+                Err(error) if matches!(error.status(), Some(400 | 403 | 404 | 405)) => self.record(
+                    "default-guardrail-kept",
+                    id.as_str(),
+                    &format!(
+                        "the API refused a DELETE with HTTP {status}; it goes with its workspace",
+                        status = error.status().unwrap_or_default()
+                    ),
+                ),
+                Err(error) => failures.push(format!(
+                    "default guardrail {id} could not be deleted or refused ({kind}); the                      workspace deletion that follows should still take it",
+                    kind = error.kind()
                 )),
             }
         }
@@ -1537,7 +1609,7 @@ impl Live {
     fn report_guardrails(&self) -> Swept {
         let mut failures = Vec::new();
         let mut named: Vec<(Uuid, String)> = self.guardrails.borrow().clone();
-        match self.reader().list_guardrails(None) {
+        match self.reader().list_guardrails(&self.workspace_ids()) {
             Ok(observed) => {
                 for guardrail in observed.iter().filter(|item| self.owns(&item.name)) {
                     if !named.iter().any(|(id, _)| id == &guardrail.id) {
@@ -1814,7 +1886,6 @@ impl Club {
              {budgets}\
              default_guardrail = \"house\"\n\
              \n[guardrails.house]\n\
-             name = \"{run}-house\"\n\
              limit_usd = {GUARDRAIL_LIMIT_USD}\n\
              reset_interval = \"daily\"\n\
              {key}",

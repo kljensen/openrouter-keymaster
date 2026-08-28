@@ -45,7 +45,6 @@ budgets = { monthly = 50, lifetime = 500 }
 default_guardrail = "house"
 
 [guardrails.house]
-name = "house-rail"
 
 [keys.jobfeed]
 name = "golf-jobfeed"
@@ -63,6 +62,15 @@ slug = "golf-club"
 budgets = { monthly = 50, lifetime = 500 }
 "#;
 
+/// The club's default guardrail as OpenRouter has it once materialized.
+///
+/// Its name is the server's — `Workspace <uuid> Default` — and no
+/// configuration can ask for another one: `PATCH` answers a `name` with "A
+/// workspace default guardrail's name is not editable".
+fn default_rail() -> Value {
+    guardrail(DEFAULT_RAIL, &format!("Workspace {CLUB} Default"), &[])
+}
+
 /// The one action at `address`, whatever kind it is.
 fn action<'a>(document: &'a Value, address: &str) -> &'a Value {
     document["actions"]
@@ -71,6 +79,17 @@ fn action<'a>(document: &'a Value, address: &str) -> &'a Value {
         .iter()
         .find(|action| action["address"] == address)
         .unwrap_or_else(|| panic!("no action at {address} in {document}"))
+}
+
+/// Whether any request read `route` with `key=value` in its query.
+fn read_with_query(project: &Project, route: &str, key: &str, value: &str) -> bool {
+    project.server.requests().iter().any(|request| {
+        request.url.path() == route
+            && request
+                .url
+                .query_pairs()
+                .any(|(name, held)| name == key && held == value)
+    })
 }
 
 /// The body of the one request matching `verb` and `route`.
@@ -388,19 +407,14 @@ fn a_refused_budget_interval_fails_alone_and_holds_back_everything_it_would_have
 fn a_default_guardrail_is_materialized_by_patching_the_identity_its_workspace_names() {
     let project = Project::new(
         "version = 1\n\n[workspaces.club]\nname = \"Golf Club\"\nslug = \"golf-club\"\n\
-         default_guardrail = \"house\"\n\n[guardrails.house]\nname = \"house-rail\"\n",
+         default_guardrail = \"house\"\n\n[guardrails.house]\n",
     );
-    project.observe_sequence(
-        vec![Vec::new()],
-        // Absent from the listing until its configuration is first written.
-        vec![
-            Vec::new(),
-            Vec::new(),
-            vec![guardrail(DEFAULT_RAIL, "house-rail", &[])],
-        ],
-        vec![Vec::new()],
-    );
+    // In no listing until its configuration is first written, and then in its
+    // own workspace's listing only — never the unscoped one.
+    project.observe_sequence(vec![Vec::new()], vec![Vec::new()], vec![Vec::new()]);
     project.observe_workspaces(vec![workspace(CLUB, "Golf Club", "golf-club")]);
+    project
+        .observe_guardrails_in_sequence(CLUB, vec![Vec::new(), Vec::new(), vec![default_rail()]]);
     project.write_state(bind_club_and_default);
     project.server.mount(
         Mock::given(method("PATCH"))
@@ -428,12 +442,27 @@ fn a_default_guardrail_is_materialized_by_patching_the_identity_its_workspace_na
         "{planned}"
     );
 
+    assert!(
+        read_with_query(&project, "/api/v1/guardrails", "workspace_id", CLUB),
+        "the snapshot reads the workspace's own guardrail listing: {:?}",
+        project.request_trace()
+    );
+
     let applied = project.succeed(&["--json", "apply"]).document();
     assert_eq!(applied["outcome"], "applied", "{applied}");
     assert_eq!(
         project.write_trace(),
         vec![format!("PATCH /api/v1/guardrails/{DEFAULT_RAIL}")],
         "a default guardrail is never `POST`ed"
+    );
+    assert_eq!(
+        sent_body(
+            &project,
+            "PATCH",
+            &format!("/api/v1/guardrails/{DEFAULT_RAIL}")
+        ),
+        json!({ "include_byok_in_budgets": false }),
+        "and its write carries no `name`: OpenRouter refuses to change that one"
     );
 }
 
@@ -526,35 +555,83 @@ fn a_key_naming_a_workspace_no_run_can_bind_is_held_back() {
 /// A whole club from nothing: the workspace, the default guardrail it names,
 /// and one key placed in it and secured by that guardrail.
 fn whole_club(vault: &TempDir) -> Project {
+    whole_club_with(
+        vault,
+        json!({ "data": workspace(CLUB, "Golf Club", "golf-club") }),
+        200,
+        FirstApply::WritesEverything,
+    )
+}
+
+/// What the first apply is expected to leave behind, which is what every read
+/// after it answers with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstApply {
+    /// The workspace, its default guardrail, and the key inside it.
+    WritesEverything,
+    /// Only the workspace: something held its contents back, so the reads keep
+    /// answering "nothing else is there" until the run after it writes them.
+    WritesOnlyTheWorkspace,
+}
+
+/// The same club, with the workspace create's response, the answer its budget
+/// `PUT` gets, and what the first apply achieves under the case's control.
+fn whole_club_with(
+    vault: &TempDir,
+    created: Value,
+    budget_status: u16,
+    first: FirstApply,
+) -> Project {
     let project = Project::new(&format!(
         "version = 1\n\n[receivers.vault]\ntype = \"file\"\npath = \"{vault}/member.key\"\n\n\
          [workspaces.club]\nname = \"Golf Club\"\nslug = \"golf-club\"\n\
          budgets = {{ monthly = 1 }}\ndefault_guardrail = \"house\"\n\n\
-         [guardrails.house]\nname = \"house-rail\"\n\n\
+         [guardrails.house]\n\n\
          [keys.member]\nname = \"club-member\"\nlimit_usd = 5\nlimit_reset = \"monthly\"\n\
          receiver = \"vault\"\nworkspace = \"club\"\nguardrail = \"house\"\n",
         vault = vault.path().display()
     ));
-    let rail = guardrail(DEFAULT_RAIL, "house-rail", &[]);
-    let attached = assignment(ASSIGNMENT_ID, MEMBER_HASH, DEFAULT_RAIL);
+    observe_whole_club(&project, first);
+    mount_whole_club_writes(&project, created, budget_status);
+    project
+}
 
-    // Nothing exists on the first read; everything the run wrote is there on
-    // the next, which is what the verification and the second apply see.
-    project.observe_sequence(
-        vec![Vec::new(), vec![api_key(MEMBER_HASH, "club-member")]],
-        vec![Vec::new(), vec![rail.clone()]],
-        vec![Vec::new(), vec![attached.clone()]],
-    );
+/// What the club looks like from the outside, read by read.
+///
+/// Nothing exists on the first read; what the run wrote is there on the next,
+/// which is what the verification and the second apply see — and a run that
+/// writes nothing but the workspace leaves two more reads answering as the
+/// first did, which is what makes the run after it the one that finishes the
+/// job.
+///
+/// Everything this club holds is in the workspace's own listings. The unscoped
+/// ones answer for the credential's default workspace, which is empty
+/// throughout, and the workspace's own are not read at all until the run that
+/// creates it has.
+fn observe_whole_club(project: &Project, first: FirstApply) {
+    let rail = default_rail();
+    let attached = assignment(ASSIGNMENT_ID, MEMBER_HASH, DEFAULT_RAIL);
+    let held = usize::from(first == FirstApply::WritesOnlyTheWorkspace);
+
+    let mut assignment_reads = vec![Vec::new(); 1 + 2 * held];
+    assignment_reads.push(vec![attached.clone()]);
+    project.observe_sequence(vec![Vec::new()], vec![Vec::new()], assignment_reads);
     project.observe_workspace_sequence(vec![
         Vec::new(),
         vec![workspace(CLUB, "Golf Club", "golf-club")],
     ]);
     project.observe_budgets(CLUB, &budgets(&[("monthly", 1.0)]));
-    project.server.mount(
-        Mock::given(method("GET"))
-            .and(path(format!("/api/v1/guardrails/{DEFAULT_RAIL}")))
-            .respond_with(json_response(200, &json!({ "data": rail }))),
-    );
+
+    let mut inside_reads = vec![Vec::new(); 2 * held];
+    project.observe_guardrails_in_sequence(CLUB, {
+        let mut reads = inside_reads.clone();
+        reads.push(vec![rail.clone()]);
+        reads
+    });
+    inside_reads.push(vec![api_key(MEMBER_HASH, "club-member")]);
+    project.observe_keys_in_sequence(CLUB, inside_reads);
+    // The issuance preflight reads the key's guardrail by its identity.
+    project.observe_guardrail_by_id(DEFAULT_RAIL, &rail);
     project.server.mount(
         Mock::given(method("GET"))
             .and(path(format!("/api/v1/keys/{MEMBER_HASH}")))
@@ -577,18 +654,24 @@ fn whole_club(vault: &TempDir) -> Project {
             .respond_with(json_response(200, &json!({ "data": [] })))
             .with_priority(2),
     );
+}
 
+/// The answer to every write the club's first apply makes.
+fn mount_whole_club_writes(project: &Project, created: Value, budget_status: u16) {
+    project.server.mount(
+        Mock::given(method("PUT"))
+            .and(path(format!("/api/v1/workspaces/{CLUB}/budgets/monthly")))
+            .respond_with(json_response(
+                budget_status,
+                &if budget_status == 200 {
+                    json!({})
+                } else {
+                    json!({ "error": { "code": budget_status, "message": "no budgets here" } })
+                },
+            )),
+    );
     for (verb, route, answer) in [
-        (
-            "POST",
-            "/api/v1/workspaces".to_owned(),
-            json!({ "data": workspace(CLUB, "Golf Club", "golf-club") }),
-        ),
-        (
-            "PUT",
-            format!("/api/v1/workspaces/{CLUB}/budgets/monthly"),
-            json!({}),
-        ),
+        ("POST", "/api/v1/workspaces".to_owned(), created),
         (
             "PATCH",
             format!("/api/v1/guardrails/{DEFAULT_RAIL}"),
@@ -608,7 +691,6 @@ fn whole_club(vault: &TempDir) -> Project {
                 .respond_with(json_response(200, &answer)),
         );
     }
-    project
 }
 
 /// The route the default guardrail's assignments live under.
@@ -675,6 +757,101 @@ fn a_workspace_its_default_guardrail_and_a_key_all_converge_in_one_apply() {
 }
 
 #[test]
+fn a_refused_budget_on_a_workspace_this_run_creates_holds_back_the_key_inside_it() {
+    // The planner applies ADR-0004 item 4 to every workspace it can evaluate,
+    // and a workspace this run creates is the one it cannot: there is no
+    // binding to compare a budget against when the plan is computed. So the
+    // rule is applied again here, from what the budget `PUT` actually did.
+    let vault = TempDir::new().expect("a temporary vault directory");
+    let project = whole_club_with(
+        &vault,
+        json!({ "data": workspace(CLUB, "Golf Club", "golf-club") }),
+        403,
+        FirstApply::WritesOnlyTheWorkspace,
+    );
+
+    let document = project.fail(&["--json", "apply"]).document();
+    assert_ne!(document["outcome"], "converged", "{document}");
+    let created = action(&document, "workspaces.club");
+    assert_eq!(created["status"], "failed", "{document}");
+    let detail = created["detail"].as_str().expect("a detail sentence");
+    assert!(
+        detail.contains("monthly"),
+        "the refusal names the interval it belongs to: {detail}"
+    );
+
+    let key = action(&document, "keys.member");
+    assert_eq!(key["status"], "held_back", "{document}");
+    let held = key["detail"].as_str().expect("a detail sentence");
+    assert!(
+        held.contains("workspaces.club") || held.contains("`club`"),
+        "the holdback names the workspace whose budget is not in force: {held}"
+    );
+    assert!(
+        !project
+            .write_trace()
+            .iter()
+            .any(|write| write == "POST /api/v1/keys"),
+        "nothing is issued in a workspace whose cap is not in force: {:?}",
+        project.write_trace()
+    );
+}
+
+#[test]
+fn a_workspace_create_that_discloses_no_default_guardrail_holds_back_what_waits_on_it() {
+    // The workspace's default guardrail is reachable only through the identity
+    // the workspace carries, and a create response without one leaves this run
+    // with nothing to `PATCH`. The guardrail is held back — and so is the key
+    // that names it, which would otherwise be issued unsecured (ADR-0004,
+    // item 3).
+    let vault = TempDir::new().expect("a temporary vault directory");
+    let mut created = workspace(CLUB, "Golf Club", "golf-club");
+    created["default_guardrail_id"] = Value::Null;
+    let project = whole_club_with(
+        &vault,
+        json!({ "data": created }),
+        200,
+        FirstApply::WritesOnlyTheWorkspace,
+    );
+
+    let document = project.succeed(&["--json", "apply"]).document();
+    assert_eq!(document["outcome"], "held_back", "{document}");
+    assert_eq!(
+        action(&document, "guardrails.house")["status"],
+        "held_back",
+        "{document}"
+    );
+    let key = action(&document, "keys.member");
+    assert_eq!(key["status"], "held_back", "{document}");
+    assert!(
+        key["detail"]
+            .as_str()
+            .expect("a detail sentence")
+            .contains("guardrails.house"),
+        "the key says which held-back write it was waiting on: {key}"
+    );
+    assert!(
+        !project
+            .write_trace()
+            .iter()
+            .any(|write| write == "POST /api/v1/keys"),
+        "no key is issued without the guardrail that secures it: {:?}",
+        project.write_trace()
+    );
+
+    // The next run reads the identity off the workspace itself and finishes.
+    let again = project.succeed(&["--json", "apply"]).document();
+    assert_eq!(again["outcome"], "applied", "{again}");
+    for at in ["guardrails.house", "keys.member"] {
+        assert_eq!(
+            action(&again, at)["status"],
+            "applied",
+            "{at} is written by the run after the holdback: {again}"
+        );
+    }
+}
+
+#[test]
 fn a_scoped_run_refuses_a_workspace_block_it_does_not_already_own() {
     let project = Project::new(ONLY_WORKSPACE);
     project.observe(Vec::new(), Vec::new(), Vec::new());
@@ -710,10 +887,13 @@ fn a_scoped_run_refuses_a_workspace_block_it_does_not_already_own() {
 #[test]
 fn deleting_a_workspace_is_refused_while_it_still_holds_anything() {
     let project = Project::new(PROJECT);
-    project.observe(
-        vec![api_key(JOBFEED_HASH, "someone-elses-key")],
+    // The occupants are in the workspace's own listings, which is where
+    // `delete workspace` looks for them.
+    project.observe(Vec::new(), Vec::new(), Vec::new());
+    project.observe_keys_in(CLUB, vec![api_key(JOBFEED_HASH, "someone-elses-key")]);
+    project.observe_guardrails_in(
+        CLUB,
         vec![guardrail(FAKE_GUARDRAIL_ID, "someone-elses-rail", &[])],
-        Vec::new(),
     );
     project.write_state(bind_club);
     let before = fs::read(project.state_path()).expect("the state fixture");
@@ -747,11 +927,8 @@ fn deleting_a_workspace_releases_it_and_the_default_guardrail_that_cannot_outliv
     let project = Project::new(PROJECT);
     // The only thing in the workspace is its own default guardrail, which is
     // part of the workspace rather than an occupant of it.
-    project.observe(
-        Vec::new(),
-        vec![guardrail(DEFAULT_RAIL, "house-rail", &[])],
-        Vec::new(),
-    );
+    project.observe(Vec::new(), Vec::new(), Vec::new());
+    project.observe_guardrails_in(CLUB, vec![default_rail()]);
     project.server.mount(
         Mock::given(method("DELETE"))
             .and(path(format!("/api/v1/workspaces/{CLUB}")))
@@ -945,21 +1122,21 @@ fn a_bound_workspace_that_vanished_is_reported_and_never_recreated() {
 #[test]
 fn a_default_guardrail_added_after_the_workspace_was_imported_takes_the_identity_it_names() {
     // The workspace binding already carries `default_guardrail_id`; the
-    // guardrail address does not exist in state at all.
+    // guardrail address does not exist in state at all. The drift is the
+    // description: a default guardrail's name is the server's, so `name` is
+    // the one managed field that is never diffed.
     let project = Project::new(
         "version = 1\n\n[workspaces.club]\nname = \"Golf Club\"\nslug = \"golf-club\"\n\
-         default_guardrail = \"house\"\n\n[guardrails.house]\nname = \"house-rail\"\n",
+         default_guardrail = \"house\"\n\n[guardrails.house]\ndescription = \"house rules\"\n",
     );
-    project.observe_sequence(
-        vec![Vec::new()],
-        vec![
-            vec![guardrail(DEFAULT_RAIL, "named-by-hand", &[])],
-            vec![guardrail(DEFAULT_RAIL, "named-by-hand", &[])],
-            vec![guardrail(DEFAULT_RAIL, "house-rail", &[])],
-        ],
-        vec![Vec::new()],
-    );
+    project.observe_sequence(vec![Vec::new()], vec![Vec::new()], vec![Vec::new()]);
     project.observe_workspaces(vec![workspace(CLUB, "Golf Club", "golf-club")]);
+    let mut described = default_rail();
+    described["description"] = json!("house rules");
+    project.observe_guardrails_in_sequence(
+        CLUB,
+        vec![vec![default_rail()], vec![default_rail()], vec![described]],
+    );
     project.write_state(bind_club);
     project.server.mount(
         Mock::given(method("PATCH"))
@@ -975,6 +1152,17 @@ fn a_default_guardrail_added_after_the_workspace_was_imported_takes_the_identity
         format!("guardrail {DEFAULT_RAIL}"),
         "an unbound address a workspace names as its default is bound in effect: {planned}"
     );
+    let changed: Vec<&str> = update["changes"]
+        .as_array()
+        .expect("a change list")
+        .iter()
+        .map(|change| change["field"].as_str().expect("a field name"))
+        .collect();
+    assert_eq!(
+        changed,
+        vec!["description"],
+        "the server's name for a default guardrail is never a difference: {planned}"
+    );
 
     let applied = project.succeed(&["--json", "apply"]).document();
     assert_eq!(applied["outcome"], "applied", "{applied}");
@@ -982,6 +1170,15 @@ fn a_default_guardrail_added_after_the_workspace_was_imported_takes_the_identity
         project.write_trace(),
         vec![format!("PATCH /api/v1/guardrails/{DEFAULT_RAIL}")],
         "no second guardrail is created under the same name"
+    );
+    assert_eq!(
+        sent_body(
+            &project,
+            "PATCH",
+            &format!("/api/v1/guardrails/{DEFAULT_RAIL}")
+        ),
+        json!({ "description": "house rules", "include_byok_in_budgets": false }),
+        "a default guardrail's write carries no `name`"
     );
     assert_eq!(
         project
@@ -998,7 +1195,7 @@ fn a_default_guardrail_added_after_the_workspace_was_imported_takes_the_identity
 fn a_default_guardrail_address_that_owns_another_guardrail_is_held_back_naming_both() {
     let project = Project::new(
         "version = 1\n\n[workspaces.club]\nname = \"Golf Club\"\nslug = \"golf-club\"\n\
-         default_guardrail = \"house\"\n\n[guardrails.house]\nname = \"house-rail\"\n",
+         default_guardrail = \"house\"\n\n[guardrails.house]\n",
     );
     project.observe(
         Vec::new(),
@@ -1260,23 +1457,17 @@ fn a_workspace_binding_that_never_learned_its_default_guardrail_learns_it_from_t
     // unrecorded, and the guardrail held back for good.
     let project = Project::new(
         "version = 1\n\n[workspaces.club]\nname = \"Golf Club\"\nslug = \"golf-club\"\n\
-         default_guardrail = \"house\"\n\n[guardrails.house]\nname = \"house-rail\"\n",
+         default_guardrail = \"house\"\n\n[guardrails.house]\n",
     );
     let mut without = workspace(CLUB, "Golf Club", "golf-club");
     without["default_guardrail_id"] = Value::Null;
-    // Four reads of each listing: each run plans from one and verifies with the
-    // next. The workspace does not exist until this run creates it, and the
-    // guardrail not until the second run materializes it.
-    project.observe_sequence(
-        vec![Vec::new()],
-        vec![
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            vec![guardrail(DEFAULT_RAIL, "house-rail", &[])],
-        ],
-        vec![Vec::new()],
-    );
+    // The workspace does not exist until this run creates it, and its default
+    // guardrail — read by identity, never listed — not until the second run
+    // materializes it. Three reads of that identity: the first run's
+    // verification, the second run's plan, and the second run's verification.
+    project.observe_sequence(vec![Vec::new()], vec![Vec::new()], vec![Vec::new()]);
+    project
+        .observe_guardrails_in_sequence(CLUB, vec![Vec::new(), Vec::new(), vec![default_rail()]]);
     project.observe_workspace_sequence(vec![
         Vec::new(),
         vec![workspace(CLUB, "Golf Club", "golf-club")],

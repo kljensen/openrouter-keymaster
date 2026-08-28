@@ -1062,7 +1062,6 @@ include_byok_in_budgets = true
 default_guardrail = "house"
 
 [guardrails.house]
-name = "house-rail"
 "#;
 
 fn workspace<'a>(config: &'a Config, name: &str) -> &'a Workspace {
@@ -1235,7 +1234,7 @@ fn a_guardrail_is_the_default_of_at_most_one_workspace() {
                   default_guardrail = \"house\"\n\n\
                   [workspaces.two]\nname = \"Two\"\nslug = \"two\"\n\
                   default_guardrail = \"house\"\n\n\
-                  [guardrails.house]\nname = \"house-rail\"\n";
+                  [guardrails.house]\n";
     assert_eq!(paths(source), vec!["workspaces.two.default_guardrail"]);
 }
 
@@ -1244,17 +1243,45 @@ fn a_default_guardrail_belongs_to_its_own_workspace() {
     let elsewhere = "version = 1\n\n[workspaces.one]\nname = \"One\"\nslug = \"one\"\n\
                      default_guardrail = \"house\"\n\n\
                      [workspaces.two]\nname = \"Two\"\nslug = \"two\"\n\n\
-                     [guardrails.house]\nname = \"house-rail\"\nworkspace = \"two\"\n";
+                     [guardrails.house]\nworkspace = \"two\"\n";
     assert_eq!(paths(elsewhere), vec!["guardrails.house.workspace"]);
 
     // Omitted and equal are both fine.
     for placement in ["", "workspace = \"one\"\n"] {
         let source = format!(
             "version = 1\n\n[workspaces.one]\nname = \"One\"\nslug = \"one\"\n\
-             default_guardrail = \"house\"\n\n[guardrails.house]\nname = \"house-rail\"\n{placement}"
+             default_guardrail = \"house\"\n\n[guardrails.house]\n{placement}"
         );
         assert!(Config::parse(&source).is_ok(), "{source}");
     }
+}
+
+#[test]
+fn a_default_guardrail_has_no_name_of_its_own_and_every_other_guardrail_needs_one() {
+    // OpenRouter names a workspace's default guardrail itself and answers a
+    // `PATCH` of that name with "A workspace default guardrail's name is not
+    // editable", so a block that set one describes a resource no write could
+    // reach (ADR-0004, item 3).
+    let named = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+                 default_guardrail = \"house\"\n\n[guardrails.house]\nname = \"house-rail\"\n";
+    let problems = problems(named);
+    assert_eq!(
+        problems
+            .iter()
+            .map(|problem| problem.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["guardrails.house.name"]
+    );
+    assert!(
+        problems[0].message.contains("omit `name`"),
+        "{message}",
+        message = problems[0].message
+    );
+
+    // And a guardrail that is nobody's default still has to have one.
+    let ordinary = "version = 1\n\n[guardrails.house]\nlimit_usd = 10\n\
+                    reset_interval = \"monthly\"\n";
+    assert_eq!(paths(ordinary), vec!["guardrails.house.name"]);
 }
 
 #[test]
@@ -1323,7 +1350,7 @@ fn a_default_guardrail_takes_its_placement_from_the_relationship_and_not_a_uuid(
     // it can only disagree — and nothing offline can check a raw UUID against a
     // workspace whose identity is whatever its binding says.
     let source = "version = 1\n\n[workspaces.one]\nname = \"One\"\nslug = \"one\"\n\
-                  default_guardrail = \"house\"\n\n[guardrails.house]\nname = \"house-rail\"\n\
+                  default_guardrail = \"house\"\n\n[guardrails.house]\n\
                   workspace_id = \"00000000-0000-4000-8000-000000000001\"\n";
     assert_eq!(paths(source), vec!["guardrails.house.workspace_id"]);
 

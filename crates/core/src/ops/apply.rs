@@ -77,7 +77,7 @@
 //! reported as having happened: a response is not evidence either way.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use time::OffsetDateTime;
 
@@ -86,7 +86,9 @@ use crate::client::Client;
 use crate::config::{BUDGET_INTERVALS, BudgetInterval, Config, Receiver, Usd};
 use crate::error::Error;
 use crate::ids::{Address, KeyHash, Uuid};
-use crate::plan::{self, Action, ActionKind, Identity, Plan, Reason, ResourceAddress, Snapshot};
+use crate::plan::{
+    self, Action, ActionKind, Identity, Plan, Reason, ResourceAddress, SafetyClass, Snapshot,
+};
 use crate::receiver::Deliver;
 use crate::report::{ActionOutcome, ApplyReport, PlanReport};
 use crate::state::{KeyBinding, Origin, Phase as JournalPhase, State, StateFile, StateLock};
@@ -212,6 +214,8 @@ pub fn apply(
         deliver: deliver.as_ref(),
         stopped: false,
         issued: BTreeSet::new(),
+        unbudgeted: BTreeMap::new(),
+        held_back: BTreeMap::new(),
     };
     let mut outcomes = apply.execute(&plan, &mut state);
     let failure = verify(
@@ -541,6 +545,23 @@ struct Apply<'a> {
     /// the plaintext was delivered, so the assignment action beside the create
     /// has nothing left to send.
     issued: BTreeSet<Address>,
+    /// The workspaces whose budget writes this run did not settle, by identity,
+    /// and the address each one is configured at.
+    ///
+    /// The planner applies ADR-0004 item 4 to every workspace it can evaluate,
+    /// which is every workspace that is already bound. A workspace this run
+    /// creates has no binding when the plan is computed, so its budget can only
+    /// be judged here — and a `PUT` the account refuses leaves a workspace with
+    /// no cap in force. From that moment this run issues and widens nothing
+    /// inside it, exactly as the plan would have.
+    unbudgeted: BTreeMap<Uuid, Address>,
+    /// The addresses this run held back while executing, and the sentence each
+    /// one's dependents inherit.
+    ///
+    /// A held-back write did not happen, so a dependent that ran anyway would
+    /// be writing against a resource that is not there — a key naming a
+    /// guardrail this run could not materialize, say (ADR-0004, item 3).
+    held_back: BTreeMap<ResourceAddress, String>,
 }
 
 impl Apply<'_> {
@@ -568,10 +589,61 @@ impl Apply<'_> {
                 if !action.is_executable(false) || phase_of(&action.address) != Some(phase) {
                     continue;
                 }
-                outcomes[index] = self.perform(action, state);
+                outcomes[index] = match self.runtime_holdback(action, state) {
+                    Some(reason) => ActionOutcome::held_back(reason),
+                    None => self.perform(action, state),
+                };
+                // Held back here rather than by the planner, so what waits on
+                // this address waits on this run's answer too.
+                if let Some(detail) = outcomes[index].held_back_detail() {
+                    let detail = detail.to_owned();
+                    self.held_back.insert(action.address.clone(), detail);
+                }
             }
         }
         outcomes
+    }
+
+    /// Why this action is not attempted, decided from what this run has already
+    /// done rather than from the plan.
+    ///
+    /// Two things the planner could not know. A workspace this run created may
+    /// have had its budget refused, and ADR-0004 item 4 holds back every
+    /// issuing and expanding write inside a workspace whose cap is not in
+    /// force. And an action this run held back — a default guardrail whose
+    /// identity the workspace create never disclosed — did not happen, so its
+    /// dependents have nothing to write against.
+    fn runtime_holdback(&self, action: &Action, state: &State) -> Option<String> {
+        if let Some((dependency, detail)) = action
+            .depends_on
+            .iter()
+            .find_map(|dependency| Some((dependency, self.held_back.get(dependency)?)))
+        {
+            return Some(format!(
+                "held back: {dependency} was held back by this run, so nothing was written here \
+                 either. {detail}"
+            ));
+        }
+
+        let workspace = self.unbudgeted_workspace(action, state)?;
+        Some(format!(
+            "held back: the configured budget of workspace `{workspace}` is not in force — this \
+             run's budget writes did not all settle — so nothing is issued or widened inside it \
+             (ADR-0004, item 4)"
+        ))
+    }
+
+    /// The workspace this action would issue or widen inside, when this run
+    /// left that workspace's budget unconverged.
+    fn unbudgeted_workspace(&self, action: &Action, state: &State) -> Option<&Address> {
+        if !matches!(
+            action.safety.class(),
+            SafetyClass::Issuing | SafetyClass::Expanding
+        ) {
+            return None;
+        }
+        let placed = plan::placed_in(self.config, state, self.workspace, &action.address)?;
+        self.unbudgeted.get(&placed)
     }
 
     /// Performs one action, unless an earlier one already failed.
@@ -758,7 +830,7 @@ impl Apply<'_> {
     /// is its default is bound to it here, so the guardrail phase that follows
     /// can materialize it (ADR-0004, item 3).
     fn create_workspace(
-        &self,
+        &mut self,
         address: &Address,
         action: &Action,
         state: &mut State,
@@ -803,6 +875,7 @@ impl Apply<'_> {
             .map_err(|error| untracked_workspace(&id, &error.to_string()))?;
 
         let budgets = self.write_budgets(&id, desired, action);
+        self.note_unbudgeted(&id, address, &budgets);
         Ok(budgets.outcome(format!(
             "created workspace {id}, and recorded its identity before anything else ran"
         )))
@@ -810,7 +883,7 @@ impl Apply<'_> {
 
     /// Brings an existing workspace's managed fields to the configured values.
     fn update_workspace(
-        &self,
+        &mut self,
         address: &Address,
         action: &Action,
     ) -> Result<ActionOutcome, String> {
@@ -839,11 +912,25 @@ impl Apply<'_> {
         }
 
         let budgets = self.write_budgets(id, desired, action);
+        self.note_unbudgeted(id, address, &budgets);
         Ok(budgets.outcome(if patched {
             format!("patched workspace {id}")
         } else {
             format!("workspace {id} needed no patch of its own")
         }))
+    }
+
+    /// Records a workspace whose budget this run did not settle, so nothing is
+    /// issued or widened inside it for the rest of the run.
+    ///
+    /// The planner already holds those writes back for a workspace it could
+    /// evaluate; this is the same rule for the one it could not, which is any
+    /// workspace whose budget is written in the run that creates it (ADR-0004,
+    /// item 4).
+    fn note_unbudgeted(&mut self, id: &Uuid, address: &Address, budgets: &Budgets) {
+        if !budgets.converged() {
+            self.unbudgeted.insert(id.clone(), address.clone());
+        }
     }
 
     /// Writes every budget interval this action changes, in an order the server
@@ -857,9 +944,11 @@ impl Apply<'_> {
     ///
     /// A refusal is definite and names its interval, and the intervals that
     /// follow are still attempted: the writes are independent, and a plan the
-    /// account cannot buy should not hide the ones it can. Because the planner
-    /// already held back every issuing and expanding write in this workspace
-    /// (ADR-0004, item 4), a refused budget leaves nothing widened behind it.
+    /// account cannot buy should not hide the ones it can. A refused budget
+    /// leaves nothing widened behind it either: the planner held back every
+    /// issuing and expanding write in a workspace it could evaluate, and
+    /// [`Apply::note_unbudgeted`] does the same here for one it could not
+    /// (ADR-0004, item 4).
     fn write_budgets(
         &self,
         id: &Uuid,
@@ -1386,19 +1475,25 @@ struct Budgets {
 }
 
 impl Budgets {
+    /// Whether every budget write this action made settled as asked.
+    const fn converged(&self) -> bool {
+        self.refused.is_empty() && self.ambiguous.is_empty()
+    }
+
     /// The action's outcome, given what the rest of the action achieved.
     ///
     /// A refused budget is a failed action rather than an error, so the run
-    /// carries on: the refusal is definite and belongs to one interval, and the
-    /// planner has already held back everything that would have spent under the
-    /// cap it could not set (ADR-0004, item 4).
+    /// carries on: the refusal is definite and belongs to one interval, and
+    /// everything that would have spent under the cap it could not set is held
+    /// back — by the planner where it could judge the budget, and by
+    /// [`Apply::note_unbudgeted`] where only this run can (ADR-0004, item 4).
     fn outcome(self, detail: String) -> ActionOutcome {
         let written = if self.done.is_empty() {
             String::new()
         } else {
             format!(" Budgets written: {}.", self.done.join(", "))
         };
-        if self.refused.is_empty() && self.ambiguous.is_empty() {
+        if self.converged() {
             return ActionOutcome::applied(format!("{detail}.{written}"));
         }
 

@@ -25,7 +25,7 @@ use support::fixtures::{
 use support::http::{Scripted, TestServer, json_response};
 use support::sentinel::SECRET_SENTINEL_KEY;
 use time::OffsetDateTime;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, ResponseTemplate};
 use zeroize::Zeroizing;
 
@@ -78,7 +78,7 @@ fn one_page_is_read_and_the_listing_ends() {
     mount_key_pages(&server, key_pages(&[&["a", "b"], &[]]));
 
     let keys = Reader::new(&client(&server))
-        .list_keys(None)
+        .list_keys_in(None)
         .expect("a snapshot");
 
     assert_eq!(hashes(&keys), vec!["a", "b"]);
@@ -94,7 +94,7 @@ fn several_pages_are_joined_and_the_offset_follows_what_arrived() {
     );
 
     let keys = Reader::new(&client(&server))
-        .list_keys(None)
+        .list_keys_in(None)
         .expect("a snapshot");
 
     assert_eq!(hashes(&keys), vec!["a", "b", "c", "d", "e", "f"]);
@@ -111,7 +111,7 @@ fn an_empty_page_ends_the_listing_without_another_request() {
     );
 
     let keys = Reader::new(&client(&server))
-        .list_keys(None)
+        .list_keys_in(None)
         .expect("an empty snapshot");
 
     assert!(keys.is_empty());
@@ -127,7 +127,7 @@ fn overlapping_pages_are_deduplicated_by_hash() {
     );
 
     let keys = Reader::new(&client(&server))
-        .list_keys(None)
+        .list_keys_in(None)
         .expect("a snapshot");
 
     assert_eq!(hashes(&keys), vec!["a", "b", "c", "d", "e"]);
@@ -139,7 +139,7 @@ fn duplicate_identities_within_one_page_are_collapsed() {
     mount_key_pages(&server, key_pages(&[&["a", "a", "b"], &[]]));
 
     let keys = Reader::new(&client(&server))
-        .list_keys(None)
+        .list_keys_in(None)
         .expect("a snapshot");
 
     assert_eq!(hashes(&keys), vec!["a", "b"]);
@@ -156,7 +156,7 @@ fn a_page_that_repeats_itself_forever_is_an_error_not_a_loop() {
     );
 
     let failure = Reader::new(&client(&server))
-        .list_keys(None)
+        .list_keys_in(None)
         .expect_err("a stalled listing is not a snapshot");
 
     assert_eq!(failure.kind(), "invalid_response");
@@ -193,7 +193,7 @@ fn a_total_count_that_disagrees_with_the_records_does_not_truncate_the_snapshot(
     );
 
     let guardrails = Reader::new(&client(&server))
-        .list_guardrails(None)
+        .list_guardrails_in(None)
         .expect("a snapshot");
 
     assert_eq!(guardrails.len(), 3, "a wrong total must not drop records");
@@ -219,7 +219,7 @@ fn a_listing_that_never_ends_stops_at_the_sanity_cap() {
         max_items: 1_000,
     };
     let failure = Reader::with_limits(&client(&server), limits)
-        .list_keys(None)
+        .list_keys_in(None)
         .expect_err("an endless listing is not a snapshot");
 
     assert_eq!(failure.kind(), "invalid_response");
@@ -236,7 +236,7 @@ fn a_record_with_no_identity_is_a_typed_invalid_response() {
     );
 
     let failure = Reader::new(&client(&server))
-        .list_keys(None)
+        .list_keys_in(None)
         .expect_err("a key without a hash is not a key");
 
     assert_eq!(failure.kind(), "invalid_response");
@@ -252,7 +252,7 @@ fn a_hash_that_is_key_plaintext_is_refused() {
     );
 
     let failure = Reader::new(&client(&server))
-        .list_keys(None)
+        .list_keys_in(None)
         .expect_err("plaintext is not an identity");
 
     assert_eq!(failure.kind(), "invalid_response");
@@ -268,7 +268,7 @@ fn fields_this_build_does_not_know_do_not_break_a_read() {
     mount_key_pages(&server, vec![page(vec![key]), empty_page()]);
 
     let keys = Reader::new(&client(&server))
-        .list_keys(None)
+        .list_keys_in(None)
         .expect("an unknown field is not a failure");
 
     assert_eq!(hashes(&keys), vec!["a"]);
@@ -285,7 +285,7 @@ fn a_key_is_read_into_managed_fields_and_read_only_observations() {
     mount_key_pages(&server, key_pages(&[&["a"], &[]]));
 
     let keys = Reader::new(&client(&server))
-        .list_keys(None)
+        .list_keys_in(None)
         .expect("a snapshot");
     let key = &keys[0];
 
@@ -362,7 +362,7 @@ fn guardrails_are_read_with_their_collections_normalized() {
     );
 
     let guardrails = Reader::new(&client(&server))
-        .list_guardrails(None)
+        .list_guardrails_in(None)
         .expect("a snapshot");
     let observed = &guardrails[0];
 
@@ -479,7 +479,7 @@ fn a_workspace_filter_is_passed_through_without_disturbing_pagination() {
     mount_key_pages(&server, key_pages(&[&["a"], &[]]));
 
     let _ = Reader::new(&client(&server))
-        .list_keys(Some(&uuid(FAKE_WORKSPACE_ID)))
+        .list_keys_in(Some(&uuid(FAKE_WORKSPACE_ID)))
         .expect("a snapshot");
 
     for request in server.requests() {
@@ -501,6 +501,67 @@ fn a_workspace_filter_is_passed_through_without_disturbing_pagination() {
 }
 
 #[test]
+fn every_workspace_is_listed_and_the_union_is_deduplicated() {
+    // `GET /keys` and `GET /guardrails` answer for one workspace at a time —
+    // the credential's default workspace unless `workspace_id` names another —
+    // so the organization is the union of one unscoped listing and one per
+    // workspace. A record two of them carry is one record (ADR-0004, item 5).
+    let server = TestServer::start();
+    let workspace = uuid(FAKE_WORKSPACE_ID);
+    for (matcher, first) in [
+        (
+            Mock::given(method("GET"))
+                .and(path("/api/v1/keys"))
+                .and(query_param("workspace_id", FAKE_WORKSPACE_ID)),
+            vec![api_key("inside", "the club's key")],
+        ),
+        (
+            Mock::given(method("GET"))
+                .and(path("/api/v1/keys"))
+                .and(query_param_is_missing("workspace_id")),
+            vec![api_key("default", "the default workspace's key")],
+        ),
+    ] {
+        server.mount(matcher.respond_with(Scripted::json(vec![page(first), empty_page()])));
+    }
+
+    let keys = Reader::new(&client(&server))
+        .list_keys(std::slice::from_ref(&workspace))
+        .expect("a snapshot");
+
+    assert_eq!(hashes(&keys), vec!["default", "inside"]);
+}
+
+#[test]
+fn a_workspace_that_is_gone_by_the_time_its_listing_runs_holds_nothing() {
+    // The workspace came from this run's own listing, so a 404 is one deleted
+    // underneath the snapshot. Anything else fails the snapshot rather than
+    // truncating it.
+    let server = TestServer::start();
+    server.mount(
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .and(query_param("workspace_id", FAKE_WORKSPACE_ID))
+            .respond_with(json_response(404, &api_error(404, "no such workspace"))),
+    );
+    server.mount(
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .and(query_param_is_missing("workspace_id"))
+            .respond_with(Scripted::json(vec![
+                page(vec![api_key("default", "still here")]),
+                empty_page(),
+            ])),
+    );
+
+    let keys = Reader::new(&client(&server))
+        .list_keys(&[uuid(FAKE_WORKSPACE_ID)])
+        .expect("a snapshot");
+
+    assert_eq!(hashes(&keys), vec!["default"]);
+}
+
+#[test]
 fn reading_never_writes() {
     let server = TestServer::start();
     server.mount(Mock::given(method("GET")).respond_with(
@@ -515,8 +576,8 @@ fn reading_never_writes() {
     // question does not fit a query string; it changes nothing either.
     let client = client(&server);
     let reader = Reader::new(&client);
-    let _ = reader.list_keys(None).expect("a snapshot");
-    let _ = reader.list_guardrails(None).expect("a snapshot");
+    let _ = reader.list_keys_in(None).expect("a snapshot");
+    let _ = reader.list_guardrails_in(None).expect("a snapshot");
     let _ = reader.list_assignments().expect("a snapshot");
 
     for request in server.requests() {

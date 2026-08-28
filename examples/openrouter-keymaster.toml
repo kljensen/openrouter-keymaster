@@ -44,7 +44,9 @@ default_guardrail = "cheap_summarization"
 # A guardrail holds the model, provider, and budget policy. A key is assigned
 # at most one guardrail.
 [guardrails.cheap_summarization]
-name = "cheap-summarization"
+# No `name`: this block is `golf_club`'s default guardrail, and OpenRouter names
+# that one itself — `Workspace <uuid> Default` — and refuses to change it.
+# `openrouter-keymaster status` shows the name it gave.
 description = "Small, cheap models for background summarization."
 allowed_models = ["google/gemini-2.5-flash", "openai/gpt-4o-mini"]
 denied_providers = ["example-untrusted-provider"]
