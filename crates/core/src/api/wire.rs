@@ -272,3 +272,53 @@ pub(super) struct Assignment {
     #[serde(default)]
     pub created_at: Option<String>,
 }
+
+/// The balance `GET /credits` reports.
+#[derive(Debug, Deserialize)]
+pub(super) struct Credits {
+    #[serde(default)]
+    pub total_credits: f64,
+    #[serde(default)]
+    pub total_usage: f64,
+}
+
+/// The vocabulary `GET /analytics/meta` reports.
+///
+/// Only the names are read. Each list defaults to empty, so a build that meets
+/// an organization with no analytics at all reports the missing metric by name
+/// rather than failing to parse the answer.
+#[derive(Debug, Deserialize)]
+pub(super) struct AnalyticsMeta {
+    #[serde(default)]
+    pub metrics: Vec<Named>,
+    #[serde(default)]
+    pub dimensions: Vec<Named>,
+}
+
+/// One entry of a `/analytics/meta` list. Its display label is not read.
+#[derive(Debug, Deserialize)]
+pub(super) struct Named {
+    pub name: String,
+}
+
+/// What `POST /analytics/query` answers.
+///
+/// The rows are `Value` because the API documents them as untyped objects: the
+/// field names are the metrics and dimensions that were asked for, which only
+/// the caller knows.
+#[derive(Debug, Deserialize)]
+pub(super) struct Analytics {
+    #[serde(default)]
+    pub data: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub metadata: Option<AnalyticsMetadata>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// What a query answered about itself. Only truncation is read.
+#[derive(Debug, Deserialize)]
+pub(super) struct AnalyticsMetadata {
+    #[serde(default)]
+    pub truncated: bool,
+}

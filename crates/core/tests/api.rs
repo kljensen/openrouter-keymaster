@@ -10,7 +10,9 @@ use openrouter_keymaster_core::test_support as support;
 use std::time::Duration;
 
 use openrouter_keymaster_core::api::pagination::PageLimits;
-use openrouter_keymaster_core::api::{ObservedKey, Reader, ResetPolicy, Writer};
+use openrouter_keymaster_core::api::{
+    AnalyticsFilter, AnalyticsQuery, ObservedKey, Reader, ResetPolicy, Writer,
+};
 use openrouter_keymaster_core::client::{Client, ManagementKey, Options, RetryPolicy};
 use openrouter_keymaster_core::config::{ResetInterval, Usd};
 use openrouter_keymaster_core::ids::{KeyHash, Uuid};
@@ -22,6 +24,7 @@ use support::fixtures::{
 };
 use support::http::{Scripted, TestServer, json_response};
 use support::sentinel::SECRET_SENTINEL_KEY;
+use time::OffsetDateTime;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
 use zeroize::Zeroizing;
@@ -507,6 +510,9 @@ fn reading_never_writes() {
         })),
     ));
 
+    // Every listing here is a `GET`. The one request `Reader` makes that is
+    // not is `analytics_query`, which reads through a `POST` because the
+    // question does not fit a query string; it changes nothing either.
     let client = client(&server);
     let reader = Reader::new(&client);
     let _ = reader.list_keys(None).expect("a snapshot");
@@ -682,4 +688,117 @@ fn a_destination_whose_identity_or_sampling_rate_cannot_be_read_fails_the_snapsh
             .expect_err(description);
         assert_eq!(error.kind(), "invalid_response", "{description}");
     }
+}
+
+// --- the three reads a spend report is made of ------------------------------
+
+#[test]
+fn credits_and_meta_are_read_from_their_own_endpoints() {
+    let server = TestServer::start();
+    server.mount(
+        Mock::given(method("GET"))
+            .and(path("/api/v1/credits"))
+            .respond_with(json_response(
+                200,
+                // The extra field is what a future release adds; an unknown one
+                // must never stop a read.
+                &json!({ "data": { "total_credits": 100.5, "total_usage": 25.75, "plan": "team" } }),
+            )),
+    );
+    server.mount(
+        Mock::given(method("GET"))
+            .and(path("/api/v1/analytics/meta"))
+            .respond_with(json_response(
+                200,
+                &json!({
+                    "data": {
+                        "metrics": [
+                            { "name": "total_usage", "display_label": "Total usage" },
+                            { "name": "tokens_total", "display_label": "Tokens" },
+                        ],
+                        "dimensions": [{ "name": "api_key_id", "display_label": "API key" }],
+                        "operators": [{ "name": "eq", "value_type": "scalar" }],
+                        "granularities": [{ "name": "day", "display_label": "Day" }],
+                    }
+                }),
+            )),
+    );
+
+    let client = client(&server);
+    let reader = Reader::new(&client);
+
+    let credits = reader.credits().expect("the balance");
+    assert!((credits.total_credits - 100.5).abs() < f64::EPSILON);
+    assert!((credits.total_usage - 25.75).abs() < f64::EPSILON);
+
+    let meta = reader.analytics_meta().expect("the vocabulary");
+    assert_eq!(
+        meta.first_metric(&["total_usage", "credits_usage"]),
+        Some("total_usage")
+    );
+    assert_eq!(meta.first_dimension(&["api_key_id"]), Some("api_key_id"));
+    assert!(!meta.has_dimension("workspace"));
+}
+
+#[test]
+fn an_analytics_query_is_one_post_whose_body_says_what_was_asked() {
+    let server = TestServer::start();
+    server.mount(
+        Mock::given(method("POST"))
+            .and(path("/api/v1/analytics/query"))
+            .respond_with(json_response(
+                200,
+                &json!({
+                    "data": {
+                        "data": [{
+                            "date__day": "2026-08-01T00:00:00.000Z",
+                            "api_key_id": "golf-jobfeed",
+                            "total_usage": 1.5,
+                            "tokens_total": "1200",
+                        }],
+                        "metadata": { "query_time_ms": 42, "row_count": 1, "truncated": true },
+                        "warnings": ["one filter value could not be resolved"],
+                    }
+                }),
+            )),
+    );
+
+    let client = client(&server);
+    let answered = Reader::new(&client)
+        .analytics_query(&AnalyticsQuery {
+            metrics: vec!["total_usage".to_owned(), "tokens_total".to_owned()],
+            dimensions: vec!["api_key_id".to_owned()],
+            filters: vec![AnalyticsFilter {
+                field: "workspace".to_owned(),
+                operator: "eq".to_owned(),
+                value: FAKE_WORKSPACE_ID.to_owned(),
+            }],
+            granularity: "day".to_owned(),
+            start: OffsetDateTime::from_unix_timestamp(1_785_542_400).expect("a start"),
+            end: OffsetDateTime::from_unix_timestamp(1_785_628_800).expect("an end"),
+        })
+        .expect("an answer");
+
+    server.assert_request_count(1);
+    let sent: Value = serde_json::from_slice(&server.request(0).body).expect("a JSON request body");
+    assert_eq!(sent["metrics"], json!(["total_usage", "tokens_total"]));
+    assert_eq!(sent["dimensions"], json!(["api_key_id"]));
+    assert_eq!(sent["granularity"], "day");
+    assert_eq!(
+        sent["filters"],
+        json!([{ "field": "workspace", "operator": "eq", "value": FAKE_WORKSPACE_ID }])
+    );
+    assert_eq!(sent["time_range"]["start"], "2026-08-01T00:00:00Z");
+    assert_eq!(sent["time_range"]["end"], "2026-08-02T00:00:00Z");
+
+    assert!(answered.truncated);
+    assert_eq!(answered.warnings.len(), 1);
+    let row = answered.rows.first().expect("one row");
+    assert_eq!(row.dimension("api_key_id"), Some("golf-jobfeed"));
+    assert_eq!(row.period(), Some("2026-08-01T00:00:00.000Z"));
+    assert!((row.metric("total_usage") - 1.5).abs() < f64::EPSILON);
+    assert!(
+        (row.metric("tokens_total") - 1200.0).abs() < f64::EPSILON,
+        "an integral metric arrives quoted and is still a number"
+    );
 }

@@ -33,6 +33,7 @@ fn help_lists_the_whole_command_tree_and_exits_zero() {
         .stdout(predicate::str::contains("plan"))
         .stdout(predicate::str::contains("apply"))
         .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("spend"))
         .stdout(predicate::str::contains("import"))
         .stdout(predicate::str::contains("rotate"))
         .stdout(predicate::str::contains("recover"))

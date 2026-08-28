@@ -23,6 +23,7 @@ mod import;
 mod lifecycle;
 mod plan;
 mod recover;
+mod spend;
 mod status;
 
 #[cfg(test)]
@@ -47,6 +48,8 @@ pub use recover::{
     CandidateReport, InspectReport, ReplaceReport, ResolveReport, RetainedReport, Retired,
     Successor,
 };
+pub(crate) use spend::SpendObservation;
+pub use spend::SpendReport;
 pub use status::StatusReport;
 
 /// An unfinished create-or-deliver operation, and what to do about it.

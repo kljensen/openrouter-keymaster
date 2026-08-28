@@ -194,6 +194,7 @@ This README is the reference for what each command does and why. The pages under
 ```text
 openrouter-keymaster plan                          show the changes an apply would make
 openrouter-keymaster status                        report bindings and incomplete operations
+openrouter-keymaster spend                         report credit balance and per-key cost
 openrouter-keymaster apply                         converge OpenRouter with the configuration
 openrouter-keymaster import key NAME --hash HASH   bind an existing key by its hash
 openrouter-keymaster import guardrail NAME --id ID bind an existing guardrail by its UUID
@@ -304,6 +305,76 @@ There is no Terraform-style detailed exit code. A failure exits 1 with an
 actionable category — `config_invalid`, `config_read`, `config_syntax`,
 `missing_credential`, `authentication`, `transport`, `timeout`, `http_status`,
 `state_parse`, and the rest — in the diagnostic's `kind` field.
+
+## Spend
+
+`spend` answers a question the other read-only commands cannot: what has this
+organization actually spent, and on which key. It reads three endpoints and
+writes nothing at all — no state, no lock, no remote change.
+
+```console
+$ openrouter-keymaster spend --since 2026-07-01T00:00:00Z --granularity month
+credits: purchased 100.500000, used 25.750000, remaining 74.750000
+range: 2026-07-01T00:00:00Z to 2026-08-27T00:00:00Z by month
+grouped by `api_key_id`, cost from `total_usage`, tokens from `tokens_total`
+
+keys (2)  — `key` is OpenRouter's own label for the key, not its hash:
+  club-dashboard  (no local address)  cost 0.750000  tokens 991
+      2026-08-01  cost 0.750000  tokens 991
+  mac-secrets  (no local address)  cost 15.784044  tokens 18997032
+      2026-07-01  cost 12.284044  tokens 18993032
+      2026-08-01  cost 3.500000  tokens 4000
+```
+
+`--since` and `--until` are RFC 3339 and default to the last thirty days ending
+now; `--granularity` is `day`, `week`, or `month`.
+
+**The metric and dimension names are discovered, not assumed.** OpenRouter's
+specification describes the shape of an analytics query and names no metric or
+dimension at all, so every run reads `GET /analytics/meta` first and asks its
+question in names that endpoint lists. What it asks for, in order of preference:
+
+| Quantity | Names tried | What it means |
+| -------- | ----------- | ------------- |
+| Cost | `total_usage`, then `credits_usage`, `openrouter_usage` | `total_usage` is the whole cost of the traffic — credit-paid inference plus the credit-equivalent of BYOK usage and its fees. `credits_usage` is only what came out of the credit balance and `openrouter_usage` only OpenRouter's own share, so each is a narrower answer and a fallback, not a preference. |
+| Tokens | `tokens_total` | Prompt plus completion. The breakdown beside it — `tokens_prompt`, `tokens_completion`, `reasoning_tokens`, `cached_tokens` — is deliberately not asked for. |
+| Key | `api_key_id` | The dimension every row is grouped by. It answers with the key's **display name**, not its hash. |
+
+Each row of that table is a list Keymaster tries in order, and the names in it
+were read from a real organization's meta rather than inferred.
+
+The `columns` field of the report names the three it settled on, so a report
+always says what it measured. An organization whose analytics lists none of the
+names for one of them fails the run with `invalid_response` naming what was
+looked for, rather than reporting a silent zero.
+
+**`key` is OpenRouter's own label for the key, not its hash.** The API documents
+the api-key dimension as *enriched*, and a live organization confirms it: a
+grouped query answers with the key's display name, while a *filter* on the same
+dimension takes the numeric id or the 64-character hash. Keymaster prints the
+label exactly as it arrived and never treats it as an identity.
+
+A local `address` is therefore attached only in the rare case where the returned
+value happens to be a hash some address already tracks — the mapping stays
+because it costs one lookup, but **most rows will have no address, and that is
+not evidence of an unmanaged key**. Use `status` for what Keymaster owns; this
+report is about what was spent.
+
+**A metric arrives as a number or as a quoted one.** OpenRouter sends a
+fractional metric as a JSON number and an integral one as a string
+(`"tokens_total": "18993032"`), so both are read as the number they hold. A
+metric that is neither fails the run naming the field: a token count that
+silently became zero beside a real dollar cost would be a wrong answer that
+looks like a right one.
+
+**A scope is a filter, or a warning.** `--workspace UUID` adds a `workspace`
+filter when the meta lists that dimension. When it does not, the report covers
+the whole organization and says so on stderr, because silently answering a
+different question would be worse than answering loudly.
+
+State is read without the writer lock and never written; text OpenRouter wrote —
+a row identifier, a warning it returned — is scrubbed on its way into the report
+like every other snapshot string.
 
 ## Workspaces
 
@@ -1127,6 +1198,13 @@ caps stop a listing that would otherwise never end.
 Unknown response fields are ignored, so a field OpenRouter adds tomorrow does
 not stop a plan today; a record with no usable identity is a typed
 invalid-response error instead.
+
+`api::analytics` is the one part of the reader that is not about a managed
+resource: `GET /credits`, `GET /analytics/meta`, and `POST /analytics/query`,
+which `spend` reports from. Rows come back untyped — the API documents a row as
+an object of metric and dimension values and nothing more — so a row is read as
+the metrics that were asked for, as numbers, and everything else as text, and
+what the values mean is decided where the report is built.
 
 Write bodies live in `api::write`. `Patch` gives every managed field three
 states — omitted, set, and explicitly `null` — so a field Keymaster does not

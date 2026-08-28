@@ -37,6 +37,7 @@ mod issuance;
 pub mod lifecycle;
 pub mod recover;
 pub mod rotate;
+pub mod spend;
 
 use std::path::PathBuf;
 
@@ -71,6 +72,7 @@ pub use lifecycle::{
 };
 pub use recover::{Finding, recover_inspect, recover_replace, recover_resolve};
 pub use rotate::rotate;
+pub use spend::{Granularity, SpendQuery, spend};
 
 /// The two files an operation reads.
 #[derive(Debug, Clone)]

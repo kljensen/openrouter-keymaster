@@ -16,15 +16,21 @@ use std::io::Write;
 use serde::Serialize;
 
 use crate::cli::StateAction;
-use crate::cli::{Cli, Command, DeleteResource, ImportResource, RecoverAction, ResolveFinding};
+use crate::cli::{
+    Cli, Command, DeleteResource, GranularityArg, ImportResource, RecoverAction, ResolveFinding,
+};
 use crate::output::Renderer;
 use openrouter_keymaster_core::error::ApiError;
 use openrouter_keymaster_core::error::Error;
 use openrouter_keymaster_core::ids::Uuid;
 use openrouter_keymaster_core::ops::recover::RecoverError;
 use openrouter_keymaster_core::ops::{
-    self, Context, Finding, ManagementKey, Options, Outcome, Paths,
+    self, Context, Finding, Granularity, ManagementKey, Options, Outcome, Paths, SpendQuery,
 };
+use time::{Duration, OffsetDateTime};
+
+/// How much of the past a `spend` run reports when it is given no `--since`.
+const DEFAULT_SPEND_DAYS: i64 = 30;
 
 /// Calls one operation and renders what it returned.
 ///
@@ -50,6 +56,14 @@ pub fn run<O: Write, E: Write>(cli: &Cli, renderer: &mut Renderer<O, E>) -> Resu
     match &cli.command {
         Command::Plan => rendered!(renderer, ops::plan(context)),
         Command::Status => rendered!(renderer, ops::status(context)),
+        Command::Spend {
+            since,
+            until,
+            granularity,
+        } => rendered!(
+            renderer,
+            ops::spend(context, range(*since, *until, *granularity))
+        ),
         Command::Import {
             resource: ImportResource::Key { name, hash },
         } => rendered!(renderer, ops::import_key(context, name, hash)),
@@ -95,6 +109,28 @@ pub fn run<O: Write, E: Write>(cli: &Cli, renderer: &mut Renderer<O, E>) -> Resu
         Command::State {
             action: StateAction::Forget { address },
         } => rendered!(renderer, ops::forget(context, address)),
+    }
+}
+
+/// The range and bucket a `spend` run reports over.
+///
+/// The clock is read here rather than in `ops` because "the last thirty days"
+/// is a command-line default: a host calling [`ops::spend`] states the range it
+/// wants, and nothing about the operation depends on what today is.
+fn range(
+    since: Option<OffsetDateTime>,
+    until: Option<OffsetDateTime>,
+    granularity: GranularityArg,
+) -> SpendQuery {
+    let end = until.unwrap_or_else(OffsetDateTime::now_utc);
+    SpendQuery {
+        start: since.unwrap_or_else(|| end - Duration::days(DEFAULT_SPEND_DAYS)),
+        end,
+        granularity: match granularity {
+            GranularityArg::Day => Granularity::Day,
+            GranularityArg::Week => Granularity::Week,
+            GranularityArg::Month => Granularity::Month,
+        },
     }
 }
 

@@ -8,8 +8,10 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use openrouter_keymaster_core::ids::Uuid;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 /// Where local state lives unless `--state` says otherwise. The command line
 /// is the only place this default lives: core's
@@ -118,6 +120,48 @@ unfinished. Like plan, it makes no write of any kind.
 Exit code 0 means the report was produced, whatever it says. Exit code 1 means \
 it could not be — a configuration, credential, state, or API error.")]
     Status,
+
+    /// Report the organization's credit balance and what each key cost.
+    #[command(long_about = "\
+Report the organization's credit balance and what each key cost.
+
+Spend reads `GET /credits` for the balance, `GET /analytics/meta` for the \
+metric and dimension names this organization's analytics accepts, and \
+`POST /analytics/query` for cost and tokens grouped by API key over the range. \
+It writes nothing: no state file, no remote resource, and no local lock. State \
+is read for one purpose only — to attach the local address of a key when the \
+identifier the analytics API returns is a hash some address already tracks.
+
+The `key` in each row is OpenRouter's own display name for the key, not its \
+hash: the api-key dimension is enriched, so a grouped query answers with the \
+label and promises the underlying id only for a filter value. A local address \
+is attached only in the rare case where the returned value happens to be a hash \
+some address already tracks, so most rows carry none — which is not evidence of \
+an untracked key. Use `openrouter-keymaster status` for what Keymaster owns.
+
+`--since` and `--until` are RFC 3339 timestamps and default to the last thirty \
+days ending now. `--granularity` is the bucket each row is broken into. A \
+scoped run — `--workspace UUID` — filters the query to that workspace when the \
+analytics API offers a workspace dimension, and warns and reports the whole \
+organization when it does not.
+
+Exit code 0 means the report was produced, whatever it says. Exit code 1 means \
+it could not be — a credential, state, or API error, including an analytics \
+API that lists none of the metric or dimension names a spend report is made \
+of.")]
+    Spend {
+        /// Start of the range, RFC 3339. Defaults to thirty days ago.
+        #[arg(long, value_name = "RFC3339", value_parser = timestamp)]
+        since: Option<OffsetDateTime>,
+
+        /// End of the range, RFC 3339. Defaults to now.
+        #[arg(long, value_name = "RFC3339", value_parser = timestamp)]
+        until: Option<OffsetDateTime>,
+
+        /// Size of each reported time bucket.
+        #[arg(long, value_enum, default_value_t = GranularityArg::Day)]
+        granularity: GranularityArg,
+    },
 
     /// Bind an existing remote resource to a local address.
     Import {
@@ -351,6 +395,24 @@ state, so repeating the command is safe.")]
         #[command(subcommand)]
         action: StateAction,
     },
+}
+
+/// The time bucket a `spend` report breaks each key's cost into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GranularityArg {
+    Day,
+    Week,
+    Month,
+}
+
+/// Parses one RFC 3339 timestamp, for clap.
+///
+/// A bad value is a usage error clap reports itself, before anything reads the
+/// environment or builds a client.
+fn timestamp(value: &str) -> Result<OffsetDateTime, String> {
+    OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
+        format!("expected an RFC 3339 timestamp such as 2026-08-01T00:00:00Z: {error}")
+    })
 }
 
 /// The resource kind an `import` binds.

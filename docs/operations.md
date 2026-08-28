@@ -405,6 +405,78 @@ defines no such contract. So a `delivery_ambiguous` costs a replacement even
 when the original delivery in fact succeeded. Replace the key, then clean up
 whatever the receiver's destination now holds.
 
+## Reading spend
+
+`openrouter-keymaster spend` is read-only in the strictest sense: three
+requests, no lock, no state write, nothing changed remotely.
+
+```sh
+# The default: the last thirty days, one row per key, one bucket per day.
+openrouter-keymaster spend
+
+# A named range and coarser buckets, as JSON for a dashboard.
+openrouter-keymaster spend \
+  --since 2026-08-01T00:00:00Z --until 2026-09-01T00:00:00Z \
+  --granularity week --json
+```
+
+What to check in the output:
+
+1. **`credits`** is the organization's lifetime balance — purchased, used, and
+   what is left. It comes from `GET /credits` and has nothing to do with the
+   range.
+2. **`columns`** names the metric and dimension the numbers came from. They are
+   discovered per organization from `GET /analytics/meta` — OpenRouter's
+   specification names none of them — so quoting them is how a report says what
+   it measured. Ordinarily they are:
+
+   - `total_usage` for cost: the whole cost of the traffic in dollars, which is
+     credit-paid inference plus the credit-equivalent of BYOK usage and its
+     fees. It is **not** the same as the credit balance moving: `credits_usage`
+     is that narrower number, and is used only when an organization does not
+     offer `total_usage`.
+   - `tokens_total` for tokens: prompt plus completion. The per-direction
+     metrics (`tokens_prompt`, `tokens_completion`, `reasoning_tokens`,
+     `cached_tokens`) are not read.
+   - `api_key_id` for the grouping.
+3. **`rows`** is one entry per key, with a total and one period per bucket. The
+   `key` field is **OpenRouter's own display name for the key, not its hash** —
+   the api-key dimension is enriched, so a grouped query answers with the label.
+
+   An entry therefore usually carries no `address`, and that is **not** evidence
+   of an unmanaged key: an address is attached only in the rare case where the
+   returned value happens to be a hash some local address tracks. Match a row to
+   a local address by the display name you gave the key, and use
+   `openrouter-keymaster status` for the question "what does Keymaster own".
+4. **`warnings`** — on stderr in a human run — carry a truncated answer, a
+   scope that could not be filtered on, and anything OpenRouter said about the
+   query itself. A truncated answer means the rows are incomplete: narrow the
+   range or use a coarser granularity and run it again.
+
+Three failures are worth recognising:
+
+- `invalid_response` naming a cost metric, a token metric, or an api-key
+  dimension means this organization's analytics lists none of the spellings
+  Keymaster knows. Nothing was queried. Read the vocabulary yourself and compare
+  it with the names in the error, then open an issue; there is no flag that
+  forces a name.
+
+  ```sh
+  curl -s https://openrouter.ai/api/v1/analytics/meta \
+    -H "Authorization: Bearer $OPENROUTER_MANAGEMENT_KEY" | jq '.data.metrics[].name'
+  ```
+- `invalid_response` naming a metric field — `tokens_total`, say — means a row
+  carried that metric as something Keymaster cannot read as a number. Integral
+  metrics arrive quoted and fractional ones do not, and both are accepted; a
+  value that is neither fails the run rather than reporting a zero beside a real
+  cost. Capture the row and open an issue.
+- A scoped run (`--workspace UUID`) whose warning says the report covers the
+  whole organization means the analytics API offered no `workspace` dimension to
+  filter on. The numbers are real, but they are the organization's.
+
+Spend needs no configuration file and reads state only to attach addresses, so
+it is safe to run against a directory whose configuration is mid-edit.
+
 ## Looking after state
 
 State lives in `.openrouter-keymaster/state.json` unless `--state` says

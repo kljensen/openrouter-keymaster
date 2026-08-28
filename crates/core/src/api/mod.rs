@@ -14,6 +14,7 @@
 //! [`RemoteTimestamps`] rather than beside the managed fields, where a diff
 //! could pick them up by accident.
 
+mod analytics;
 pub mod pagination;
 mod wire;
 mod write;
@@ -28,6 +29,7 @@ use crate::config::{BudgetInterval, ResetInterval, SamplingRate, Usd};
 use crate::ids::{KeyHash, UserId, Uuid};
 use pagination::{Page, PageLimits};
 
+pub use analytics::{AnalyticsFilter, AnalyticsMeta, AnalyticsQuery, AnalyticsResult, Credits};
 pub use write::{
     AssignKeys, BudgetBody, DisableKey, GuardrailBody, UpdateKey, WorkspaceBody,
     create_destination_body, update_destination_body,

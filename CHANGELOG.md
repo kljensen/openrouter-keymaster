@@ -9,6 +9,37 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Added
 
+- `openrouter-keymaster spend`, a read-only report of what OpenRouter has
+  recorded as spent: the organization's credit balance from `GET /credits`, and
+  cost and tokens per API key per period from `POST /analytics/query`, over
+  `--since`/`--until` (RFC 3339, defaulting to the last thirty days) at
+  `--granularity day|week|month`. It takes no lock, writes no state, and makes
+  no request that changes anything; the analytics query is a `POST` only because
+  the question does not fit a query string.
+
+  The analytics vocabulary is discovered rather than assumed. OpenRouter's
+  specification describes the shape of a query and names no metric or dimension,
+  so every run reads `GET /analytics/meta` first and asks its question in names
+  that endpoint lists: `total_usage` for cost (the whole cost of the traffic,
+  including the credit-equivalent of BYOK usage and its fees), falling back to
+  `credits_usage` or `openrouter_usage`; `tokens_total` for tokens; and
+  `api_key_id` for the grouping. The report's `columns` field names the three it
+  settled on. An organization listing none of the spellings Keymaster knows for
+  one of them fails the run with `invalid_response` naming what was looked for,
+  before any query is sent.
+  A row's `key` is OpenRouter's own display name for the key, not its hash: the
+  api-key dimension is enriched, so a grouped query answers with the label and
+  promises the underlying id only for a filter *value*. It is printed exactly as
+  it arrived, and a local address is attached only in the rare case where the
+  returned value happens to be a hash some address already tracks. Metrics arrive
+  as JSON numbers or as quoted ones — OpenRouter quotes the integral ones — and
+  both are read as the number they hold, while a metric that is neither fails the
+  run naming the field rather than reporting zero beside a real cost. `--workspace` adds a
+  `workspace` filter when the meta lists that dimension, and warns that the
+  report covers the whole organization when it does not. State is read without
+  the writer lock and only to map hashes to addresses; every string OpenRouter
+  wrote is scrubbed on its way into the report.
+
 - Observability log destinations as a managed resource. A
   `[log_destinations.NAME]` block carries `type` (one of the seventeen types
   OpenRouter documents), `name`, `config`, `enabled`, `privacy_mode`,
