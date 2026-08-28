@@ -7,6 +7,14 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.0] - 2026-08-28
+
+A minor bump, not a patch: `config::Guardrail::name` became optional, which
+the 0.x policy in `docs/compatibility.md` treats as a breaking change to the
+core crate's public API.
+
 ### Fixed
 
 - The live acceptance suite deletes the guardrails its own runs create, so a
@@ -558,6 +566,7 @@ assignments between them from a checked-in description of what should exist.
   `retire` or `delete key`; clean it up in the OpenRouter dashboard.
 - No license is chosen and the crate is `publish = false`.
 
-[Unreleased]: https://github.com/kljensen/openrouter-keymaster/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kljensen/openrouter-keymaster/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/kljensen/openrouter-keymaster/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kljensen/openrouter-keymaster/compare/f0bd125...v0.3.0
 [0.1.0]: https://github.com/kljensen/openrouter-keymaster/commit/f0bd125
