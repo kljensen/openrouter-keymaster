@@ -1,5 +1,8 @@
 # Keymaster
 
+[![CI](https://github.com/kljensen/openrouter-keymaster/actions/workflows/ci.yml/badge.svg)](https://github.com/kljensen/openrouter-keymaster/actions/workflows/ci.yml)
+[![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
+
 Keymaster manages OpenRouter inference keys, guardrails, workspaces, and log
 destinations declaratively. One TOML file says what should exist, `plan` shows
 the difference, and `apply` converges it; `spend` reads what the organization
