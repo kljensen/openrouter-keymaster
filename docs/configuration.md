@@ -222,7 +222,7 @@ generation = 1
 | `disabled` | bool | no (default `false`) | no | Always managed. |
 | `workspace` | local address | no | no | Names a `[workspaces.*]` block, resolved through its binding at plan time. |
 | `workspace_id` | UUID string | no | no | A workspace Keymaster does not manage. Never alongside `workspace`. |
-| `creator_user_id` | string | no | no | The organization member the key is created for. |
+| `creator_user_id` | string | no | no | The organization member the key is created for. Trimmed, 1 to 128 characters, no whitespace. |
 | `guardrail` | local address | no | yes | Names a `[guardrails.*]` block. Clearing unassigns. |
 | `receiver` | local address | no | no | Names a `[receivers.*]` block. |
 | `generation` | integer ≥ 1 | no (default `1`) | no | Raise it to ask for a replacement. |
@@ -269,9 +269,13 @@ config = { site = "datadoghq.com", apiKey = "REPLACE-ME" }
 | `config` | table | yes | no | Provider-specific, validated server-side. **May hold a credential.** |
 | `enabled` | bool | no (default `true`) | no | Whether the destination forwards anything. |
 | `privacy_mode` | bool | no (default `false`) | no | When true, request and response bodies are withheld and only metadata is forwarded. |
-| `sampling_rate` | number | no | no | The fraction of requests forwarded, between 0.0001 and 1. Omitted leaves the remote value alone. |
+| `sampling_rate` | number | no | no | The fraction of requests forwarded, between 0.0001 and 1 and no finer than a millionth. Omitted leaves the remote value alone. |
 | `workspace` | local address | no | no | Names a `[workspaces.*]` block. Fixed at creation. |
 | `workspace_id` | UUID | no | no | A workspace Keymaster does not manage. Never alongside `workspace`. |
+
+A log destination block has no `clear` list: every field it has is either
+required or has a default, so there is nothing to set back to nothing. Writing
+`clear` here is an unknown field and a hard error.
 
 The accepted `type` values are `arize`, `braintrust`, `clickhouse`, `datadog`,
 `grafana`, `langfuse`, `langsmith`, `newrelic`, `opik`, `otel-collector`,
@@ -370,7 +374,8 @@ destination = "vault/jobfeed"
 
 `path` and `program` must be absolute, at most 4096 bytes, free of control
 characters and `..` components, and not credential-shaped. Spaces and non-ASCII
-characters are fine. `destination` is trimmed, must not be empty, and carries no
+characters are fine. Each `args` element is held to the same length, control
+character, and credential rules, minus the ones about being a path. `destination` is trimmed, must not be empty, and carries no
 control characters and nothing credential-shaped; Keymaster never interprets it.
 
 **A `caller` receiver only works inside a library host.** It hands the plaintext
@@ -408,16 +413,23 @@ written as `[]` is managed and empty, which is sent as an explicit clear and
 means "restricts nothing".
 
 **Remote names** (`name`) are trimmed, 1 to 200 characters, and carry no control
-characters. Two guardrails may not share a remote name, and neither may two
-keys; the check is per kind, so a key and a guardrail may.
+characters. Two blocks of the same kind may not share one: two workspaces, two
+guardrails, two keys, or two log destinations. The check is per kind, so a key
+and a guardrail may.
+
+**Descriptions** are trimmed, must not be empty, carry no control characters,
+and are at most 1000 characters. `description = ""` is an error rather than a
+way to remove one — name it in `clear` instead.
 
 **Timestamps** are RFC 3339 with an offset — `2027-01-01T00:00:00Z` — and are
 converted to UTC, so two spellings of the same instant compare equal.
 
 **UUIDs** are the canonical 8-4-4-4-12 hexadecimal form, lowercased on parse.
 
-**References** (`guardrail`, `receiver`) must match a declared table key exactly,
-including letter case. A dangling reference is an error naming the block to add.
+**References** — `guardrail` and `receiver` on a key, `workspace` on a key, a
+guardrail, or a log destination, and `default_guardrail` on a workspace — must
+match a declared table key exactly, including letter case. A dangling reference
+is an error naming the block to add.
 
 **Setting a field and listing it in `clear`** is an error rather than a
 precedence rule. Pick one, or omit the field to leave the remote value alone.

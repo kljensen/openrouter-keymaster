@@ -1094,6 +1094,30 @@ fn a_slug_must_be_lowercase_segments_separated_by_single_hyphens() {
 }
 
 #[test]
+fn a_slug_that_looks_like_a_credential_is_refused_without_echoing_it() {
+    // A credential is already shaped like a slug — `sk-or-v1-…` is lowercase
+    // alphanumeric segments separated by single hyphens — so the pattern check
+    // cannot be what catches one.
+    let source = "version = 1\n\n[workspaces.club]\nname = \"Club\"\n\
+                  slug = \"sk-or-v1-deadbeef\"\n";
+    let problems = problems(source);
+    let [problem] = problems.as_slice() else {
+        panic!("expected exactly one problem, not {problems:?}");
+    };
+    assert_eq!(problem.path, "workspaces.club.slug");
+    assert!(
+        problem.message.contains("credential"),
+        "the answer is about the secret, not the pattern: {problem}"
+    );
+
+    let rendered = Config::parse(source).expect_err("a rejection").to_string();
+    assert!(
+        !rendered.contains("sk-or-"),
+        "the rejection echoed a credential: {rendered}"
+    );
+}
+
+#[test]
 fn a_workspace_needs_a_name_and_a_slug() {
     assert_eq!(
         paths("version = 1\n\n[workspaces.club]\n"),
@@ -1144,6 +1168,19 @@ fn byok_in_budgets_needs_a_budget_to_travel_with() {
             "{source}"
         );
     }
+}
+
+#[test]
+fn a_budget_that_does_not_validate_is_the_only_thing_reported() {
+    // The block has a budget; it is wrong. Saying it "needs at least one"
+    // beside that would be false, and would bury the problem there is to fix.
+    let source = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+                  budgets = { monthly = 0 }\ninclude_byok_in_budgets = true\n";
+    assert_eq!(paths(source), vec!["workspaces.club.budgets.monthly"]);
+
+    let ordering = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+                    budgets = { daily = 50, monthly = 20 }\ninclude_byok_in_budgets = true\n";
+    assert_eq!(paths(ordering), vec!["workspaces.club.budgets.monthly"]);
 }
 
 #[test]

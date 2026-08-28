@@ -9,6 +9,39 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Added
 
+- Live acceptance scenarios for everything below, and the operator
+  documentation that goes with them. `crates/cli/tests/live.rs` gained a
+  workspace scenario — create, the `PATCH` that materializes the default
+  guardrail, one budget `PUT` whose answer must be definite either way, an
+  update, a key placed inside the workspace by a `--workspace` run, and an
+  import that must report what OpenRouter holds — a `caller` receiver driven
+  through `ops` with a real callback, a `webhook` log destination created,
+  updated through its write-only `config`, and deleted, and a `spend` report
+  over the run's own keys. The sweep now deletes the log destinations and
+  workspaces a run created, in that order and after the keys, verifies each by
+  reading the identity back until OpenRouter answers 404, and reports by UUID
+  anything it could not remove; a workspace's own default guardrail goes with
+  its workspace and is no longer reported as something to remove by hand. The
+  suite stays opt-in, out of `just check` and CI, and **has still never been run
+  against a real organization**.
+
+  `docs/operations.md` gained runbooks for workspaces, log destinations, and
+  scoped runs; `docs/configuration.md` and `docs/live-tests.md` were brought up
+  to date; the README's core-crate section shows a web host issuing a key for
+  one club — a scoped `Context`, a delivery callback, `spawn_blocking`, and the
+  reason a club's spending policy belongs to the application rather than to
+  Keymaster. `docs/compatibility.md` no longer lists workspaces or analytics
+  among the things Keymaster does not do, names the new `ops` functions, report
+  fields, and the workspace scope as 0.x contracts, and states the new non-goal
+  plainly: Keymaster writes the caps OpenRouter enforces and reports what was
+  spent, and decides nothing about who may spend what.
+
+  [ADR-0004](docs/adr/0004-workspaces.md),
+  [ADR-0005](docs/adr/0005-caller-receiver.md), and
+  [ADR-0006](docs/adr/0006-log-destinations.md) are Accepted, each with an
+  implementation-checks section naming the modules and tests that enforce it
+  and what remains unverified against the live API.
+
 - `openrouter-keymaster spend`, a read-only report of what OpenRouter has
   recorded as spent: the organization's credit balance from `GET /credits`, and
   cost and tokens per API key per period from `POST /analytics/query`, over
@@ -276,6 +309,17 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Fixed
 
+- A workspace `slug` is now refused when it looks like a credential, which the
+  configuration reference already promised of every value in the file. A
+  credential is shaped like an ordinary slug — `sk-or-v1-…` is lowercase
+  alphanumeric segments separated by single hyphens — so the pattern check could
+  never have been what caught one. The refusal names the field and echoes
+  nothing.
+- A workspace whose `budgets` table does not validate no longer also reports
+  `include_byok_in_budgets` as needing "at least one budget". It has one; it is
+  wrong, and that was the only problem to fix. The message still stands for a
+  block that configures the setting with no budget table at all, or with an
+  empty one.
 - A 404 from either request of a disable — the `PATCH` or the read that
   confirms it — is now treated as proof the key is gone rather than as a failure
   to disable it. `retire`, `decommission`, and both `recover` paths share that

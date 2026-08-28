@@ -11,12 +11,16 @@ organization you mean to change. See
 - [First run](#first-run)
 - [Adopting resources that already exist](#adopting-resources-that-already-exist)
 - [Making a change](#making-a-change)
+- [Running a workspace](#running-a-workspace)
+- [Forwarding logs to a destination](#forwarding-logs-to-a-destination)
+- [Scoping a run to one workspace](#scoping-a-run-to-one-workspace)
 - [Creating a key](#creating-a-key)
 - [Rotating a key](#rotating-a-key)
 - [Ending a key's life](#ending-a-keys-life)
 - [Ending a key that is not being replaced](#ending-a-key-that-is-not-being-replaced)
 - [Giving up ownership](#giving-up-ownership)
 - [Recovering an interrupted operation](#recovering-an-interrupted-operation)
+- [Reading spend](#reading-spend)
 - [Looking after state](#looking-after-state)
 
 ## First run
@@ -114,6 +118,212 @@ to hold. To put a Keymaster-delivered key at that address, raise the key's
 The plan you read in step 2 is never the plan that runs. Apply takes the lock,
 reloads, refreshes OpenRouter, and computes the plan again — so nothing goes
 stale between the two commands, and there is no plan file to save.
+
+## Running a workspace
+
+A workspace is the unit that carries a pooled spending cap and a default
+guardrail. Keys, guardrails, and log destinations are placed in one when they
+are created, and OpenRouter fixes that placement for good.
+
+1. **Describe it, and apply once without a scope.**
+
+   ```toml
+   [workspaces.golf_club]
+   name = "Golf Club"
+   slug = "golf-club"
+   default_guardrail = "club_house"
+
+   [guardrails.club_house]
+   name = "club-house"
+   limit_usd = 10
+   reset_interval = "monthly"
+   ```
+
+   ```sh
+   openrouter-keymaster apply
+   ```
+
+   The workspace is created first and its UUID is recorded before anything else
+   happens. Anything that names it — a key, a guardrail, a destination — is held
+   back until that binding exists, so the first apply creates the container and
+   the next one fills it.
+
+2. **Or bind one that already exists.**
+
+   ```sh
+   openrouter-keymaster import workspace golf_club --id <UUID>
+   ```
+
+   That also records the workspace's `default_guardrail_id` and binds whichever
+   guardrail block the configuration names as `default_guardrail` to it.
+
+3. **Materialize the default guardrail** by describing that block and applying.
+   Every workspace has one, derived from its UUID, and it governs all traffic in
+   the workspace — but it appears in no listing until its configuration is first
+   written. So the plan reports it as a create carrying the reason
+   `default_guardrail_unmaterialized`, and the apply performs that create as the
+   first `PATCH` to the identity the workspace names. There is no `POST` for it,
+   it can never be imported by name, and it is never deleted on its own.
+
+4. **Set a pooled budget, if your plan has them.**
+
+   ```toml
+   budgets = { monthly = 50, lifetime = 500 }
+   ```
+
+   The table is the complete desired set: an interval OpenRouter has and the
+   table does not is removed. Apply writes one request per interval, ordered so
+   that no intermediate state violates OpenRouter's lifetime > monthly > weekly
+   > daily rule.
+
+   **Workspace budgets are documented as an Enterprise feature.** If your plan
+   refuses them, the refusal is definite and names the interval, and every apply
+   reports it again. While a configured budget has not converged, every write in
+   that workspace the plan classifies `issuing` or `expanding` is held back — no
+   new key, no enable, no raised limit — because spend under a cap that is not
+   in force is exactly what the cap was for. Routine writes carry on. Removing
+   the `budgets` table is the only way that configuration converges.
+
+5. **Delete it when it is empty.**
+
+   ```sh
+   openrouter-keymaster delete workspace --id <UUID>
+   ```
+
+   Refused while OpenRouter shows the workspace holding any key, guardrail, or
+   log destination — tracked or not, because Keymaster does not destroy what it
+   does not manage — and the refusal lists what it found. Empty it first. The
+   one exception is the workspace's own default guardrail, which is part of the
+   workspace: it cannot outlive it, so its binding is released along with the
+   workspace's.
+
+   `openrouter-keymaster state forget workspaces.golf_club` gives up ownership
+   without deleting anything, and releases that default guardrail's binding for
+   the same reason.
+
+**A workspace that is bound and absent is reported, never recreated.** A
+guardrail may be recreated, because a guardrail is policy. A workspace is a
+container: a new one would have a new UUID, and every key, guardrail, and budget
+the old one held would be somewhere Keymaster can no longer reach. It is
+reported as `missing`, like a missing key, and what to do about it is yours.
+
+## Forwarding logs to a destination
+
+A log destination is where OpenRouter forwards a workspace's request logs.
+
+**A configuration file with one in it is a secret.** A destination's `config`
+holds the sink's own credential — a Datadog API key, a webhook token — because
+there is no other channel through which OpenRouter can be told what to send logs
+to. Keep such a file out of version control, or encrypt it the way you would any
+other secret. Keymaster protects the value inside its own process and nothing
+beyond that.
+
+1. **Describe it, naming the workspace it belongs to.**
+
+   ```toml
+   [log_destinations.club_audit]
+   type = "datadog"
+   name = "Golf Club audit log"
+   workspace = "golf_club"
+   config = { site = "datadoghq.com", apiKey = "…" }
+   ```
+
+2. **Apply.** The destination is created, its UUID is recorded, `config` is
+   written once, and a digest of what was written is recorded with it. A
+   destination whose `workspace` block is not bound yet is held back until it
+   is, exactly as a key would be.
+
+3. **Change it.** Everything except `type` and the workspace is an ordinary
+   patch. `config` travels only when its digest changed, because OpenRouter
+   masks it on read and there is nothing to compare against; the plan then says
+   `config` and nothing else — never what changed, and never either value. Apply
+   does not read `config` back. It verifies every other field as usual and takes
+   the `2xx` as the configuration having landed, which is the only evidence the
+   API offers, so an out-of-band edit in the dashboard stays invisible until the
+   configured value changes.
+
+4. **Bind one that already exists.**
+
+   ```sh
+   openrouter-keymaster import log-destination club_audit --id <UUID>
+   ```
+
+   No digest is recorded, because a read cannot see `config`. Whatever
+   configuration the destination already has stays in force until the next apply
+   writes the configured one and records its digest from then on.
+
+5. **Delete it.**
+
+   ```sh
+   openrouter-keymaster delete log-destination --id <UUID>
+   ```
+
+   One `DELETE`, sent once, confirmed by a 404. Nothing is forwarded through
+   that destination from then on. `state forget log_destinations.club_audit`
+   gives up ownership instead, leaving the destination forwarding.
+
+**The key allowlist is managed as always empty**, so a destination forwards
+every key in its workspace and an allowlist OpenRouter holds is drift the next
+apply clears. `filter_rules` and the `broadcast_*` flags are not modelled at
+all, so whatever you set in the dashboard is preserved.
+
+### Changing a destination's type or workspace
+
+Both are fixed when the destination is created — OpenRouter's `PATCH` accepts
+neither — and Keymaster never replaces a destination on its own, because that
+would stop and restart log forwarding without being asked. So a plan that finds
+either changed holds the drift back, names the field, and names this procedure.
+
+1. **Read the plan.** The action is a `no_op` carrying the reason
+   `destination_fixed_at_creation`, with the field and the destination's UUID.
+
+2. **Delete the destination:**
+
+   ```sh
+   openrouter-keymaster delete log-destination --id <UUID>
+   ```
+
+   One `DELETE`, sent once, confirmed by a 404 on the read that follows. Only
+   then does the binding stop being yours. Nothing is forwarded through that
+   destination from this point on.
+
+3. **Apply.** The next `openrouter-keymaster apply` creates the destination the
+   configuration now describes, writes its `config`, and records the digest.
+
+## Scoping a run to one workspace
+
+`--workspace UUID` names the one workspace a run places resources in and reports
+on. It is what a host running one club per operation sets, and it is a guard on
+placement and a filter on noise — not an isolation mechanism.
+
+**Apply unscoped once, or import; scope from then on.** A scoped run refuses a
+`[workspaces.NAME]` block that is not already bound to the scope, because the
+UUID `POST /workspaces` returns could never be the one the run was scoped to. So
+the order is fixed:
+
+```sh
+openrouter-keymaster apply                        # creates the workspace
+openrouter-keymaster --workspace <UUID> apply     # everything after that
+```
+
+or, for a workspace that already exists:
+
+```sh
+openrouter-keymaster import workspace golf_club --id <UUID>
+openrouter-keymaster --workspace <UUID> apply
+```
+
+A scoped run also refuses a key, guardrail, or log destination whose workspace
+resolves anywhere else, before it has built a client or sent a request. Reports
+leave out `unmanaged` resources in other workspaces, and matching by *name* —
+adoption candidates, the collision check before a recreation — considers only
+resources in the scope, so another club's identically named key cannot block
+this one.
+
+**It does not isolate.** The snapshot is still the whole organization, so a
+bound resource is judged present or missing exactly as it is without a scope,
+and two scopes pointed at one state file produce correct but mixed plans. One
+configuration and one state file per club is what keeps them apart.
 
 ## Creating a key
 
@@ -293,33 +503,6 @@ The result document lists each one before it stops being yours.
 
 Removing a `[keys.*]` block from the configuration does none of this. That
 becomes an `orphaned_binding`: reported, tracked, and otherwise left alone.
-
-## Changing a log destination's type or workspace
-
-Both are fixed when the destination is created — OpenRouter's `PATCH` accepts
-neither — and Keymaster never replaces a destination on its own, because that
-would stop and restart log forwarding without being asked. So a plan that finds
-either changed holds the drift back, names the field, and names this procedure.
-
-1. **Read the plan.** The action is a `no_op` carrying the reason
-   `destination_fixed_at_creation`, with the field and the destination's UUID.
-
-2. **Delete the destination:**
-
-   ```sh
-   openrouter-keymaster delete log-destination --id <UUID>
-   ```
-
-   One `DELETE`, sent once, confirmed by a 404 on the read that follows. Only
-   then does the binding stop being yours. Nothing is forwarded through that
-   destination from this point on.
-
-3. **Apply.** The next `openrouter-keymaster apply` creates the destination the
-   configuration now describes, writes its `config`, and records the digest.
-
-Everything else about a destination is an ordinary patch, `config` included —
-though `config` travels only when its digest changed, because OpenRouter masks
-it on read and there is nothing to compare against.
 
 ## Recovering an interrupted operation
 

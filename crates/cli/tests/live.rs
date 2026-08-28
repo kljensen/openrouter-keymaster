@@ -25,7 +25,10 @@
 //!   only kind worth leaving behind by accident.
 //! - **Cleanup runs from `Drop`**, so it happens on the panic path too, and it
 //!   verifies each deletion by reading the immutable identity back until
-//!   OpenRouter answers 404.
+//!   OpenRouter answers 404. Log destinations go first, so forwarding stops
+//!   before the keys it watched are deleted; then the keys; then the
+//!   workspaces, because a workspace that still holds either cannot be
+//!   deleted at all.
 //! - **Cleanup never logs a response body.** Bodies are drained by the client
 //!   and discarded; a failure is reported as an identity and an error kind.
 //!
@@ -41,6 +44,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{self, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use assert_cmd::Command;
@@ -48,7 +52,11 @@ use openrouter_keymaster::app::env;
 use openrouter_keymaster_core::api::pagination::PageLimits;
 use openrouter_keymaster_core::api::{Reader, Writer};
 use openrouter_keymaster_core::client::{ApiError, Client};
+use openrouter_keymaster_core::config::BudgetInterval;
 use openrouter_keymaster_core::ids::{KeyHash, Uuid};
+use openrouter_keymaster_core::ops::{
+    self, Context, DeliveryMetadata, DeliveryOutcome, KeyPlaintext, Paths,
+};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use support::project::Streams;
@@ -90,11 +98,11 @@ static RUNS: AtomicU64 = AtomicU64::new(0);
 #[ignore = "live: set KEYMASTER_LIVE_TESTS=1 and see docs/live-tests.md"]
 fn live_guardrail_create_read_import_update() {
     let Some(live) = gate() else { return };
-    let workspace = Workspace::new();
+    let project = Project::new();
     let original = format!("{run} original description", run = live.run);
 
-    workspace.write_config(&guardrail_config(&live.run, &original));
-    let applied = workspace.succeed(&["--json", "apply"]);
+    project.write_config(&guardrail_config(&live.run, &original));
+    let applied = project.succeed(&["--json", "apply"]);
     assert_eq!(applied.document()["outcome"], "applied");
 
     let found = live.adopt_guardrails();
@@ -104,7 +112,7 @@ fn live_guardrail_create_read_import_update() {
     live.assert_exact_guardrail_get(&found);
 
     let alpha = live.guardrail_named(&format!("{run}-alpha", run = live.run));
-    import_reports_the_remote_value(&live, &workspace, &alpha, &original);
+    import_reports_the_remote_value(&live, &project, &alpha, &original);
 }
 
 /// The full key lifecycle: create, deliver, enable, rotate, retire, delete.
@@ -116,11 +124,11 @@ fn live_guardrail_create_read_import_update() {
 #[ignore = "live: set KEYMASTER_LIVE_TESTS=1 and see docs/live-tests.md"]
 fn live_key_create_rotate_retire_delete() {
     let Some(live) = gate() else { return };
-    let workspace = Workspace::new();
-    let sink = workspace.secrets.path().join("jobfeed.key");
+    let project = Project::new();
+    let sink = project.secrets.path().join("jobfeed.key");
 
-    workspace.write_config(&key_config(&live.run, &sink, true));
-    let applied = workspace.succeed(&["--json", "apply"]);
+    project.write_config(&key_config(&live.run, &sink, true));
+    let applied = project.succeed(&["--json", "apply"]);
     assert_eq!(applied.document()["outcome"], "applied");
 
     let guardrail = live.adopt_one_guardrail();
@@ -130,21 +138,226 @@ fn live_key_create_rotate_retire_delete() {
     };
 
     live.assert_key_created_disabled_and_assigned(first, &guardrail);
-    workspace.assert_delivered_secret_stayed_put(&sink, &live);
+    project.assert_delivered_secret_stayed_put(&sink, &live);
 
     // Enabling is an ordinary update, and it is what makes the rotation step
     // meaningful: a predecessor that was already disabled could not show that
     // rotation leaves it alone.
-    workspace.write_config(&key_config(&live.run, &sink, false));
-    let enabled = workspace.succeed(&["--json", "apply"]);
+    project.write_config(&key_config(&live.run, &sink, false));
+    let enabled = project.succeed(&["--json", "apply"]);
     assert_eq!(enabled.document()["outcome"], "applied");
     assert!(!live.key(first).disabled, "the key should now be enabled");
 
-    let second = rotation_leaves_the_predecessor_alone(&live, &workspace, first);
+    let second = rotation_leaves_the_predecessor_alone(&live, &project, first);
     live.assert_key_listing_is_complete(&[first.clone(), second]);
-    workspace.assert_delivered_secret_stayed_put(&sink, &live);
+    project.assert_delivered_secret_stayed_put(&sink, &live);
 
-    retire_then_delete(&live, &workspace, first);
+    retire_then_delete(&live, &project, first);
+}
+
+/// One workspace, all the way through: create, default guardrail, budget,
+/// update, a key placed inside it by a scoped run, and an import.
+///
+/// One workspace carries the whole thing for the reason one address carries the
+/// key lifecycle — each step's precondition is the previous step's result. The
+/// scoped run in the middle is only reachable once the block is bound, which is
+/// the rule ADR-0004 item 5 states and this proves against the real API.
+#[test]
+#[ignore = "live: set KEYMASTER_LIVE_TESTS=1 and see docs/live-tests.md"]
+fn live_workspace_create_budget_default_guardrail_and_scoped_key() {
+    let Some(live) = gate() else { return };
+    let project = Project::new();
+    let mut club = Club::new(&live.run);
+
+    project.write_config(&club.toml());
+    let applied = project.succeed(&["--json", "apply"]);
+    assert_eq!(applied.document()["outcome"], "applied");
+
+    let id = live.adopt_one_workspace();
+    assert_default_guardrail_materialized(&live, &id);
+
+    budget_write_is_definite_and_the_rest_lands(&live, &project, &mut club, &id);
+    scoped_run_places_a_key_in_the_workspace(&live, &project, &mut club, &id);
+    workspace_import_reports_the_remote_value(&live, &project, &mut club, &id);
+}
+
+/// A `caller` receiver, end to end: the host's own code takes delivery of a
+/// real key's plaintext.
+///
+/// The command line cannot reach this path — it supplies no callback — so the
+/// test calls `ops` directly, which is what a web host does (ADR-0005). Nothing
+/// here records the plaintext: what is recorded is its shape, and the report is
+/// searched for the marker every OpenRouter credential carries.
+#[test]
+#[ignore = "live: set KEYMASTER_LIVE_TESTS=1 and see docs/live-tests.md"]
+fn live_caller_receiver_hands_a_key_to_host_code() {
+    let Some(live) = gate() else { return };
+    let project = Project::new();
+    project.write_config(&caller_config(&live.run));
+
+    let handed: Arc<Mutex<Vec<Handed>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&handed);
+    let context = Context {
+        paths: Paths {
+            config: project.config_path(),
+            state: project.state_path(),
+        },
+        options: env::options().expect("the endpoint this run is pointed at"),
+        key: Some(env::management_key().expect("the credential the gate already accepted")),
+        workspace: None,
+        deliver: Some(Box::new(move |metadata: &DeliveryMetadata, plaintext| {
+            recorded
+                .lock()
+                .expect("the recorder is not poisoned")
+                .push(Handed::of(metadata, plaintext));
+            DeliveryOutcome::delivered("the live test took delivery and kept nothing")
+        })),
+    };
+
+    let outcome = ops::apply(context, None).expect("an apply report");
+    // Journal whatever was created before judging the run: a failure after the
+    // create is exactly when the record matters most.
+    let created = live.adopt_new_keys();
+    if let Some(error) = &outcome.error {
+        panic!("the apply failed ({kind})", kind = error.kind());
+    }
+
+    let document = serde_json::to_value(&outcome.report).expect("the report serializes");
+    assert_eq!(document["outcome"], "applied", "{document}");
+    assert!(
+        !document.to_string().contains("sk-or-"),
+        "no part of a delivered key may reach a report"
+    );
+
+    let calls = handed.lock().expect("the recorder is not poisoned").clone();
+    let ([call], [key]) = (calls.as_slice(), created.as_slice()) else {
+        panic!("one call and one key were expected, not {calls:?} and {created:?}");
+    };
+    assert_eq!(call.address, "hostkey");
+    assert_eq!(
+        call.destination.as_deref(),
+        Some("live/caller"),
+        "the host routes on the destination its configuration names"
+    );
+    assert_eq!(
+        call.hash,
+        key.as_str(),
+        "the metadata names the key that was created"
+    );
+    assert!(
+        call.looks_like_a_key,
+        "the host is handed the real plaintext, not a placeholder"
+    );
+}
+
+/// A `webhook` log destination: create, a write-only `config` update, and the
+/// explicit delete.
+#[test]
+#[ignore = "live: set KEYMASTER_LIVE_TESTS=1 and see docs/live-tests.md"]
+fn live_log_destination_webhook_create_update_delete() {
+    let Some(live) = gate() else { return };
+    let project = Project::new();
+    let first = format!("https://example.invalid/{run}/one", run = live.run);
+
+    project.write_config(&destination_config(&live.run, &first));
+    let applied = project.succeed(&["--json", "apply"]);
+    assert_eq!(applied.document()["outcome"], "applied");
+
+    let id = live.adopt_one_destination();
+    let observed = live.destination(&id);
+    assert_eq!(observed.kind, "webhook");
+    assert!(observed.enabled, "a destination is created forwarding");
+    assert!(
+        observed.api_key_hashes.is_empty(),
+        "the allowlist is managed as empty, so a destination forwards its whole workspace"
+    );
+
+    config_update_travels_alone(&live, &project, &id);
+
+    project.succeed(&["--json", "delete", "log-destination", "--id", id.as_str()]);
+    assert_eq!(
+        live.destination_status(&id),
+        Some(404),
+        "a deleted destination must be gone, not merely reported gone"
+    );
+    live.forget_destination(&id);
+
+    // The `config` value is registered with the redactor by exact match
+    // (ADR-0006, item 4), and nothing prints it in the first place. Both would
+    // have to fail for it to be here.
+    for (index, captured) in project.transcript.borrow().iter().enumerate() {
+        assert!(
+            !captured.contains(&first),
+            "a destination's config reached stream {index}"
+        );
+    }
+}
+
+/// `spend`: the balance, the analytics vocabulary this organization offers, and
+/// numbers that are numbers.
+#[test]
+#[ignore = "live: set KEYMASTER_LIVE_TESTS=1 and see docs/live-tests.md"]
+fn live_spend_reports_credits_and_key_costs() {
+    let Some(live) = gate() else { return };
+    let project = Project::new();
+    let sink = project.secrets.path().join("spend.key");
+
+    project.write_config(&key_config(&live.run, &sink, true));
+    let applied = project.succeed(&["--json", "apply"]);
+    assert_eq!(applied.document()["outcome"], "applied");
+    live.adopt_one_guardrail();
+    live.adopt_new_keys();
+
+    let reported = project.succeed(&["--json", "spend", "--granularity", "day"]);
+    let document = reported.document();
+    assert_eq!(document["command"], "spend");
+    assert!(
+        document["credits"]["total_credits"].is_number()
+            && document["credits"]["remaining"].is_number(),
+        "the balance is read from `GET /credits`: {document}"
+    );
+
+    // The three names are discovered per organization, so what they turn out to
+    // be is the finding. They are asserted rather than printed because a report
+    // built from a different vocabulary answers a different question.
+    let columns = &document["columns"];
+    assert_eq!(columns["key_dimension"], "api_key_id", "{document}");
+    assert_eq!(columns["tokens_metric"], "tokens_total", "{document}");
+    assert!(
+        ["total_usage", "credits_usage", "openrouter_usage"]
+            .contains(&columns["cost_metric"].as_str().expect("a cost metric")),
+        "{document}"
+    );
+
+    let rows = document["rows"].as_array().expect("a row array");
+    for row in rows {
+        assert!(
+            row["cost_usd"].is_number() && row["tokens"].is_number(),
+            "OpenRouter quotes its integral metrics, and a report carries numbers: {row}"
+        );
+        for period in row["periods"].as_array().expect("a period array") {
+            assert!(
+                period["cost_usd"].is_number() && period["tokens"].is_number(),
+                "{period}"
+            );
+        }
+    }
+
+    // A key that has never been used has no spend, and a test organization with
+    // no credits produces none, so the run's own rows are checked when they are
+    // there and reported when they are not. Their absence is a fact about the
+    // organization rather than a failure of the report.
+    let mine: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["key"].as_str().is_some_and(|key| live.owns(key)))
+        .collect();
+    if mine.is_empty() {
+        eprintln!(
+            "live: analytics returned no row for {run}'s keys, which is what a key with no \
+             traffic looks like",
+            run = live.run
+        );
+    }
 }
 
 /// Sweeps a prefix left behind by a crashed run.
@@ -207,16 +420,16 @@ fn live_sweep_named_prefix() {
 /// proof the import read the remote object.
 fn import_reports_the_remote_value(
     live: &Live,
-    workspace: &Workspace,
+    project: &Project,
     guardrail: &Uuid,
     original: &str,
 ) {
-    workspace.succeed(&["--json", "state", "forget", "guardrails.alpha"]);
+    project.succeed(&["--json", "state", "forget", "guardrails.alpha"]);
 
     let edited = format!("{run} edited description", run = live.run);
-    workspace.write_config(&guardrail_config(&live.run, &edited));
+    project.write_config(&guardrail_config(&live.run, &edited));
 
-    let imported = workspace.succeed(&[
+    let imported = project.succeed(&[
         "--json",
         "import",
         "guardrail",
@@ -238,7 +451,7 @@ fn import_reports_the_remote_value(
     );
     assert_eq!(description["to"], edited);
 
-    let converged = workspace.succeed(&["--json", "apply"]);
+    let converged = project.succeed(&["--json", "apply"]);
     assert_eq!(converged.document()["outcome"], "applied");
     assert_eq!(
         live.guardrail(guardrail).description.as_deref(),
@@ -254,10 +467,10 @@ fn import_reports_the_remote_value(
 /// cannot know when whatever reads the receiver has picked the new key up.
 fn rotation_leaves_the_predecessor_alone(
     live: &Live,
-    workspace: &Workspace,
+    project: &Project,
     predecessor: &KeyHash,
 ) -> KeyHash {
-    let rotated = workspace.succeed(&["--json", "rotate", "jobfeed"]);
+    let rotated = project.succeed(&["--json", "rotate", "jobfeed"]);
     let successors = live.adopt_new_keys();
     let [successor] = successors.as_slice() else {
         panic!("rotate should have created exactly one key, not {successors:?}");
@@ -268,7 +481,7 @@ fn rotation_leaves_the_predecessor_alone(
         "rotation must not disable the predecessor"
     );
 
-    let status = workspace.succeed(&["--json", "status"]);
+    let status = project.succeed(&["--json", "status"]);
     assert!(
         status.out.contains(predecessor.as_str()),
         "the predecessor must stay tracked after rotation"
@@ -278,8 +491,8 @@ fn rotation_leaves_the_predecessor_alone(
 }
 
 /// Retires the predecessor, then deletes it and proves the 404.
-fn retire_then_delete(live: &Live, workspace: &Workspace, predecessor: &KeyHash) {
-    workspace.succeed(&[
+fn retire_then_delete(live: &Live, project: &Project, predecessor: &KeyHash) {
+    project.succeed(&[
         "--json",
         "retire",
         "jobfeed",
@@ -291,13 +504,271 @@ fn retire_then_delete(live: &Live, workspace: &Workspace, predecessor: &KeyHash)
         "retire must disable the predecessor and prove it by reading it back"
     );
 
-    workspace.succeed(&["--json", "delete", "key", "--hash", predecessor.as_str()]);
+    project.succeed(&["--json", "delete", "key", "--hash", predecessor.as_str()]);
     assert_eq!(
         live.status_of(predecessor),
         Some(404),
         "a deleted key must be gone, not merely reported gone"
     );
     live.forget_key(predecessor);
+}
+
+/// Proves the workspace's default guardrail was materialized.
+///
+/// It has no `POST`: OpenRouter derives the identity from the workspace and the
+/// guardrail appears in no listing until its configuration is first written, so
+/// finding it in one is the proof that the first `PATCH` created it.
+fn assert_default_guardrail_materialized(live: &Live, workspace: &Uuid) {
+    let id = live
+        .workspace(workspace)
+        .default_guardrail_id
+        .expect("every workspace carries a default guardrail identity");
+
+    let guardrail = live.guardrail(&id);
+    assert!(
+        live.owns(&guardrail.name),
+        "the default guardrail should carry the name its block configures"
+    );
+    let listed = live
+        .reader()
+        .list_guardrails(None)
+        .expect("listing guardrails");
+    assert!(
+        listed.iter().any(|item| item.id == id),
+        "a materialized default guardrail is an ordinary guardrail from then on"
+    );
+}
+
+/// Writes a budget and an edited description in one apply, and keeps the
+/// budget only if OpenRouter accepted it.
+///
+/// The shape of the answer is what matters here, not which answer it is.
+/// Workspace budgets are documented as an Enterprise feature, so a plan
+/// restriction is a perfectly good outcome — as long as it arrives as a
+/// *definite* `403` naming the interval, and as long as the rest of the same
+/// action still landed. Two things this must not see: a write that settles
+/// nothing, since ADR-0004 item 4 promises a budget refusal is never ambiguous;
+/// and a definite refusal that is not a `403`, which would be OpenRouter
+/// objecting to the request rather than the account's plan.
+fn budget_write_is_definite_and_the_rest_lands(
+    live: &Live,
+    project: &Project,
+    club: &mut Club,
+    workspace: &Uuid,
+) {
+    club.description = format!("{run} budgeted description", run = live.run);
+    club.budgets = MONTHLY_BUDGET;
+    project.write_config(&club.toml());
+
+    let attempted = Streams::of(&project.run(&["--json", "apply"]));
+    let document = attempted.document();
+    let action = action_at(&document, "workspaces.club");
+    let detail = action["detail"].as_str().expect("an action detail");
+    assert!(
+        !detail.contains("no answer that settles anything"),
+        "a budget write is definite or it is a finding: {detail}"
+    );
+
+    match action["status"].as_str() {
+        Some("applied") => {
+            assert!(detail.contains("Budgets written: monthly"), "{detail}");
+            assert_eq!(
+                live.workspace(workspace)
+                    .budgets
+                    .get(&BudgetInterval::Monthly)
+                    .map(|limit| limit.micros()),
+                Some(1_000_000),
+                "the budget OpenRouter reports back is the one that was written"
+            );
+        }
+        Some("failed") => {
+            assert!(
+                detail.contains("OpenRouter refused") && detail.contains("monthly"),
+                "a refusal names the interval it refused: {detail}"
+            );
+            // Only one refusal is an expected outcome, and it is the documented
+            // one: budgets are an Enterprise feature and an account without it
+            // is answered `403`. Every other definite `4xx` says the request
+            // itself was wrong — a malformed body, an interval OpenRouter does
+            // not take, a workspace it will not budget — and passing that off
+            // as "your plan" would hide a real finding behind a shrug.
+            assert!(
+                detail.contains("HTTP 403"),
+                "a budget write is accepted or refused with 403; anything else is a finding \
+                 about the request rather than about the account's plan: {detail}"
+            );
+            eprintln!("live: this organization's plan refused a workspace budget: {detail}");
+            // Removing the table is the only way a refused budget converges,
+            // and everything after this step is placed in this workspace —
+            // which the planner holds back while a budget has not converged.
+            club.budgets = "";
+            project.write_config(&club.toml());
+        }
+        other => panic!("a budget write is applied or refused, not {other:?}: {document}"),
+    }
+
+    assert_eq!(
+        live.workspace(workspace).description.as_deref(),
+        Some(club.description.as_str()),
+        "the rest of the workspace write lands whatever became of the budget"
+    );
+}
+
+/// Creates a key inside the workspace under `--workspace`.
+///
+/// A scoped run places what it creates in its scope, which is the only reason
+/// the key ends up there: the block names the workspace by address, and the
+/// scope is what a host running one club per `Context` would set.
+fn scoped_run_places_a_key_in_the_workspace(
+    live: &Live,
+    project: &Project,
+    club: &mut Club,
+    workspace: &Uuid,
+) {
+    club.sink = Some(project.secrets.path().join("club.key"));
+    project.write_config(&club.toml());
+
+    let applied = project.succeed(&["--json", "--workspace", workspace.as_str(), "apply"]);
+    assert_eq!(applied.document()["outcome"], "applied");
+
+    let created = live.adopt_new_keys();
+    let [key] = created.as_slice() else {
+        panic!("the scoped apply should have created exactly one key, not {created:?}");
+    };
+    assert_eq!(
+        live.key(key).workspace_id.as_ref(),
+        Some(workspace),
+        "a scoped run places what it creates in its scope"
+    );
+    let sink = club.sink.clone().expect("the receiver was just configured");
+    project.assert_delivered_secret_stayed_put(&sink, live);
+}
+
+/// Forgets the workspace, edits its description on disk, and imports it back by
+/// UUID.
+///
+/// The reported difference has to name what OpenRouter holds, as it does for a
+/// guardrail. The import is run unscoped on purpose: a scoped run refuses a
+/// workspace block that is not already bound to the scope, and forgetting one
+/// is exactly how a block stops being bound.
+fn workspace_import_reports_the_remote_value(
+    live: &Live,
+    project: &Project,
+    club: &mut Club,
+    workspace: &Uuid,
+) {
+    let remembered = club.description.clone();
+    project.succeed(&["--json", "state", "forget", "workspaces.club"]);
+
+    club.description = format!("{run} imported description", run = live.run);
+    project.write_config(&club.toml());
+
+    let imported = project.succeed(&[
+        "--json",
+        "import",
+        "workspace",
+        "club",
+        "--id",
+        workspace.as_str(),
+    ]);
+    let document = imported.document();
+    let changes = document["changes"]
+        .as_array()
+        .expect("an import reports the fields an apply would reconcile");
+    let description = changes
+        .iter()
+        .find(|change| change["field"] == "description")
+        .unwrap_or_else(|| panic!("no description change in {changes:?}"));
+    assert_eq!(
+        description["from"], remembered,
+        "the import must report the description OpenRouter holds"
+    );
+    assert_eq!(description["to"], club.description);
+
+    let converged = project.succeed(&["--json", "apply"]);
+    assert_eq!(converged.document()["outcome"], "applied");
+    assert_eq!(
+        live.workspace(workspace).description.as_deref(),
+        Some(club.description.as_str()),
+        "the update should have landed"
+    );
+}
+
+/// Changes a destination's `config` and nothing else, and proves the write is
+/// the only difference the plan sees.
+///
+/// `config` is write-only: OpenRouter masks it on read, so the comparison is
+/// between the digest state records and the digest of what is configured now
+/// (ADR-0006, item 3). The apply that follows has to leave the plan converged,
+/// which is the only evidence available that the write landed.
+fn config_update_travels_alone(live: &Live, project: &Project, destination: &Uuid) {
+    let second = format!("https://example.invalid/{run}/two", run = live.run);
+    project.write_config(&destination_config(&live.run, &second));
+
+    let planned = project.succeed(&["--json", "plan"]);
+    let document = planned.document();
+    let action = action_at(&document, "log_destinations.hook");
+    let changed: Vec<&str> = action["changes"]
+        .as_array()
+        .expect("a change list")
+        .iter()
+        .map(|change| change["field"].as_str().expect("a field name"))
+        .collect();
+    assert_eq!(
+        changed,
+        vec!["config"],
+        "a masked field is compared by digest, and nothing else moved: {document}"
+    );
+
+    let applied = project.succeed(&["--json", "apply"]);
+    assert_eq!(applied.document()["outcome"], "applied");
+    assert_eq!(
+        live.destination(destination).name,
+        format!("{run}-hook", run = live.run),
+        "the update leaves the destination the same one"
+    );
+
+    let again = project.succeed(&["--json", "plan"]);
+    assert_eq!(
+        again.document()["outcome"],
+        "converged",
+        "the digest recorded by the write is what makes the next plan quiet"
+    );
+}
+
+/// The one action at `address` in a plan or apply document.
+fn action_at<'a>(document: &'a Value, address: &str) -> &'a Value {
+    document["actions"]
+        .as_array()
+        .expect("an action array")
+        .iter()
+        .find(|action| action["address"] == address)
+        .unwrap_or_else(|| panic!("no action at {address} in {document}"))
+}
+
+/// What the host's code was handed, with the plaintext reduced to the one fact
+/// a test needs about it.
+///
+/// The secret itself is never recorded. A record holding it would be a second
+/// copy of a live credential, and the scan of the report would pass for the
+/// wrong reason.
+#[derive(Clone, Debug)]
+struct Handed {
+    address: String,
+    hash: String,
+    destination: Option<String>,
+    looks_like_a_key: bool,
+}
+
+impl Handed {
+    fn of(metadata: &DeliveryMetadata, plaintext: &KeyPlaintext) -> Self {
+        Self {
+            address: metadata.address().to_string(),
+            hash: metadata.hash().to_string(),
+            destination: metadata.destination().map(str::to_owned),
+            looks_like_a_key: plaintext.expose().starts_with("sk-or-"),
+        }
+    }
 }
 
 // ------------------------------------------------------------------ the gate
@@ -349,6 +820,16 @@ struct Live {
     /// delete a guardrail and has to hand the operator something they can find
     /// in a dashboard, where a UUID alone is not much help.
     guardrails: RefCell<Vec<(Uuid, String)>>,
+    /// Workspaces this run created, by UUID and remote name.
+    workspaces: RefCell<Vec<(Uuid, String)>>,
+    /// Log destinations this run created, by UUID and remote name.
+    destinations: RefCell<Vec<(Uuid, String)>>,
+    /// The `default_guardrail_id` of each workspace above.
+    ///
+    /// A workspace's own default guardrail is deleted with the workspace and
+    /// cannot be deleted on its own, so it must not be reported to the operator
+    /// as a guardrail to remove by hand.
+    default_guardrails: RefCell<Vec<Uuid>>,
 }
 
 impl Live {
@@ -361,6 +842,9 @@ impl Live {
             journal,
             keys: RefCell::new(Vec::new()),
             guardrails: RefCell::new(Vec::new()),
+            workspaces: RefCell::new(Vec::new()),
+            destinations: RefCell::new(Vec::new()),
+            default_guardrails: RefCell::new(Vec::new()),
         };
         // Before anything exists: a run that dies between the create and the
         // record is swept by prefix, and the prefix is the one fact that
@@ -457,6 +941,98 @@ impl Live {
         self.keys.borrow().contains(hash)
     }
 
+    fn tracks_workspace(&self, id: &Uuid) -> bool {
+        self.workspaces
+            .borrow()
+            .iter()
+            .any(|(tracked, _)| tracked == id)
+    }
+
+    fn tracks_destination(&self, id: &Uuid) -> bool {
+        self.destinations
+            .borrow()
+            .iter()
+            .any(|(tracked, _)| tracked == id)
+    }
+
+    /// Journals every workspace this run owns that it has not recorded yet.
+    ///
+    /// Each one's default guardrail identity is recorded beside it, from the
+    /// same listing, so the sweep knows which guardrail goes with the
+    /// workspace and which is left for the operator.
+    fn adopt_workspaces(&self) -> Vec<Uuid> {
+        let observed = self.reader().list_workspaces().expect("listing workspaces");
+        let mut adopted = Vec::new();
+        for workspace in observed.iter().filter(|item| self.owns(&item.name)) {
+            if self.tracks_workspace(&workspace.id) {
+                continue;
+            }
+            self.workspaces
+                .borrow_mut()
+                .push((workspace.id.clone(), workspace.name.clone()));
+            self.record("workspace", workspace.id.as_str(), &workspace.name);
+            if let Some(default) = &workspace.default_guardrail_id {
+                self.default_guardrails.borrow_mut().push(default.clone());
+            }
+            adopted.push(workspace.id.clone());
+        }
+        adopted
+    }
+
+    fn adopt_one_workspace(&self) -> Uuid {
+        let adopted = self.adopt_workspaces();
+        let [workspace] = adopted.as_slice() else {
+            panic!("expected exactly one new workspace, not {adopted:?}");
+        };
+        workspace.clone()
+    }
+
+    /// Journals every log destination this run owns that it has not recorded
+    /// yet.
+    ///
+    /// Destinations are listed one workspace at a time, so the question is
+    /// asked of the credential's default workspace and of every workspace this
+    /// run has made.
+    fn adopt_destinations(&self) -> Vec<Uuid> {
+        let observed = self
+            .reader()
+            .list_log_destinations(&self.workspace_ids())
+            .expect("listing log destinations");
+        let mut adopted = Vec::new();
+        for destination in observed.iter().filter(|item| self.owns(&item.name)) {
+            if self.tracks_destination(&destination.id) {
+                continue;
+            }
+            self.destinations
+                .borrow_mut()
+                .push((destination.id.clone(), destination.name.clone()));
+            self.record(
+                "log-destination",
+                destination.id.as_str(),
+                &destination.name,
+            );
+            adopted.push(destination.id.clone());
+        }
+        adopted
+    }
+
+    fn adopt_one_destination(&self) -> Uuid {
+        let adopted = self.adopt_destinations();
+        let [destination] = adopted.as_slice() else {
+            panic!("expected exactly one new log destination, not {adopted:?}");
+        };
+        destination.clone()
+    }
+
+    /// The workspaces this run tracks, as the destination listing takes them.
+    fn workspace_ids(&self) -> Vec<Uuid> {
+        self.workspaces
+            .borrow()
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Loads the identities an earlier run journaled.
     ///
     /// A sweep by prefix reads what OpenRouter lists; this reads what the
@@ -473,7 +1049,12 @@ impl Live {
         // that created it, so the deletions have to be known first.
         let deleted: Vec<&str> = records
             .iter()
-            .filter(|record| record["kind"] == "key-deleted")
+            .filter(|record| {
+                matches!(
+                    record["kind"].as_str(),
+                    Some("key-deleted" | "workspace-deleted" | "destination-deleted")
+                )
+            })
             .filter_map(|record| record["identity"].as_str())
             .collect();
         for record in records {
@@ -502,6 +1083,22 @@ impl Live {
                 {
                     self.record("recovered-guardrail", identity, name);
                     self.guardrails.borrow_mut().push((id, name.to_owned()));
+                }
+            }
+            "workspace" if !deleted.contains(&identity) => {
+                if let Ok(id) = Uuid::parse(identity)
+                    && !self.tracks_workspace(&id)
+                {
+                    self.record("recovered-workspace", identity, name);
+                    self.workspaces.borrow_mut().push((id, name.to_owned()));
+                }
+            }
+            "log-destination" if !deleted.contains(&identity) => {
+                if let Ok(id) = Uuid::parse(identity)
+                    && !self.tracks_destination(&id)
+                {
+                    self.record("recovered-log-destination", identity, name);
+                    self.destinations.borrow_mut().push((id, name.to_owned()));
                 }
             }
             _ => {}
@@ -539,6 +1136,20 @@ impl Live {
         self.record("key-deleted", hash.as_str(), "verified 404");
     }
 
+    fn forget_workspace(&self, id: &Uuid) {
+        self.workspaces
+            .borrow_mut()
+            .retain(|(tracked, _)| tracked != id);
+        self.record("workspace-deleted", id.as_str(), "verified 404");
+    }
+
+    fn forget_destination(&self, id: &Uuid) {
+        self.destinations
+            .borrow_mut()
+            .retain(|(tracked, _)| tracked != id);
+        self.record("destination-deleted", id.as_str(), "verified 404");
+    }
+
     fn key(&self, hash: &KeyHash) -> openrouter_keymaster_core::api::ObservedKey {
         self.reader().get_key(hash).expect("reading a key by hash")
     }
@@ -547,6 +1158,28 @@ impl Live {
         self.reader()
             .get_guardrail(id)
             .expect("reading a guardrail by UUID")
+    }
+
+    fn workspace(&self, id: &Uuid) -> openrouter_keymaster_core::api::ObservedWorkspace {
+        self.reader()
+            .get_workspace(id)
+            .expect("reading a workspace by UUID")
+    }
+
+    fn destination(&self, id: &Uuid) -> openrouter_keymaster_core::api::ObservedDestination {
+        self.reader()
+            .get_log_destination(id)
+            .expect("reading a log destination by UUID")
+    }
+
+    /// The HTTP status of a destination read, or [`None`] when it succeeded.
+    fn destination_status(&self, id: &Uuid) -> Option<u16> {
+        match self.reader().get_log_destination(id) {
+            Ok(_) => None,
+            Err(error) => Some(error.status().unwrap_or_else(|| {
+                panic!("expected an HTTP status, got {kind}", kind = error.kind())
+            })),
+        }
     }
 
     fn guardrail_named(&self, name: &str) -> Uuid {
@@ -676,7 +1309,8 @@ impl Drop for Live {
 
 /// What a sweep could not finish, split by whether it is a problem.
 struct Swept {
-    /// Keys still out there. Each one fails the run.
+    /// What this run created and could not remove: a key, a log destination, or
+    /// a workspace. Each one fails the run.
     failures: Vec<String>,
     /// Resources deliberately left in place, named so an operator can remove
     /// them by hand.
@@ -692,7 +1326,13 @@ impl Live {
     /// from a failed cleanup call is exactly the place a stray credential
     /// echo would end up.
     fn sweep(&self) -> Swept {
-        let mut failures = Vec::new();
+        // Destinations first. A destination is the thing that *watches* the
+        // keys, so removing it before they are deleted means the run stops
+        // forwarding before it starts churning what was being forwarded —
+        // rather than aiming a burst of log traffic at an endpoint that, in
+        // this suite, deliberately cannot answer.
+        let mut failures = self.delete_destinations();
+
         let mut hashes = self.keys.borrow().clone();
         match self.reader().list_keys(None) {
             Ok(observed) => {
@@ -713,11 +1353,138 @@ impl Live {
                 failures.push(reason);
             }
         }
+        // Workspaces last, because OpenRouter refuses to delete one that still
+        // holds anything, and everything above may have been placed in one.
+        failures.extend(self.delete_workspaces());
         let guardrails = self.report_guardrails();
         failures.extend(guardrails.failures);
         Swept {
             failures,
             notices: guardrails.notices,
+        }
+    }
+
+    /// Deletes the log destinations this run created, each verified by a 404.
+    ///
+    /// The first step of the sweep: nothing else has to wait for it, and it
+    /// stops log forwarding before the keys it was forwarding are deleted.
+    ///
+    /// Unlike a guardrail, a destination has a delete, so one left behind is a
+    /// failure rather than a notice: Keymaster can remove it and this run made
+    /// it.
+    fn delete_destinations(&self) -> Vec<String> {
+        let mut failures = Vec::new();
+        let mut named: Vec<(Uuid, String)> = self.destinations.borrow().clone();
+        match self.reader().list_log_destinations(&self.workspace_ids()) {
+            Ok(observed) => {
+                for destination in observed.iter().filter(|item| self.owns(&item.name)) {
+                    if !named.iter().any(|(id, _)| id == &destination.id) {
+                        named.push((destination.id.clone(), destination.name.clone()));
+                    }
+                }
+            }
+            Err(error) => failures.push(format!(
+                "could not list log destinations while sweeping {run} ({kind}); run \
+                 `just live-sweep {run}`",
+                run = self.run,
+                kind = error.kind()
+            )),
+        }
+
+        let writer = Writer::new(&self.client);
+        for (id, name) in named {
+            match writer.delete_log_destination(&id) {
+                Ok(()) => {}
+                Err(error) if error.status() == Some(404) => {}
+                Err(error) => {
+                    failures.push(format!(
+                        "log destination {id} (\"{name}\") not deleted ({kind}); delete it by ID",
+                        kind = error.kind()
+                    ));
+                    continue;
+                }
+            }
+            match self.destination_status_quietly(&id) {
+                Some(404) => self.forget_destination(&id),
+                Some(status) => failures.push(format!(
+                    "log destination {id} (\"{name}\") still readable after delete (HTTP \
+                     {status}); delete it by ID"
+                )),
+                None => failures.push(format!(
+                    "log destination {id} (\"{name}\") still exists after a successful delete; \
+                     delete it by ID"
+                )),
+            }
+        }
+        failures
+    }
+
+    /// Deletes the workspaces this run created, each verified by a 404.
+    ///
+    /// A workspace that still holds a key, a guardrail, or a destination is
+    /// refused, which is the point of running this after both. Its own default
+    /// guardrail is not an occupant and goes with it.
+    fn delete_workspaces(&self) -> Vec<String> {
+        let mut failures = Vec::new();
+        let mut named: Vec<(Uuid, String)> = self.workspaces.borrow().clone();
+        match self.reader().list_workspaces() {
+            Ok(observed) => {
+                for workspace in observed.iter().filter(|item| self.owns(&item.name)) {
+                    if !named.iter().any(|(id, _)| id == &workspace.id) {
+                        named.push((workspace.id.clone(), workspace.name.clone()));
+                    }
+                }
+            }
+            Err(error) => failures.push(format!(
+                "could not list workspaces while sweeping {run} ({kind}); run \
+                 `just live-sweep {run}`",
+                run = self.run,
+                kind = error.kind()
+            )),
+        }
+
+        let writer = Writer::new(&self.client);
+        for (id, name) in named {
+            match writer.delete_workspace(&id) {
+                Ok(()) => {}
+                Err(error) if error.status() == Some(404) => {}
+                Err(error) => {
+                    failures.push(format!(
+                        "workspace {id} (\"{name}\") not deleted ({kind}); it may still hold a \
+                         key, a guardrail, or a log destination — empty it and delete it by ID",
+                        kind = error.kind()
+                    ));
+                    continue;
+                }
+            }
+            match self.workspace_status_quietly(&id) {
+                Some(404) => self.forget_workspace(&id),
+                Some(status) => failures.push(format!(
+                    "workspace {id} (\"{name}\") still readable after delete (HTTP {status}); \
+                     delete it by ID"
+                )),
+                None => failures.push(format!(
+                    "workspace {id} (\"{name}\") still exists after a successful delete; delete \
+                     it by ID"
+                )),
+            }
+        }
+        failures
+    }
+
+    /// Like [`Live::destination_status`], but reports rather than panics.
+    fn destination_status_quietly(&self, id: &Uuid) -> Option<u16> {
+        match self.reader().get_log_destination(id) {
+            Ok(_) => None,
+            Err(error) => error.status().or(Some(0)),
+        }
+    }
+
+    /// The same, for a workspace.
+    fn workspace_status_quietly(&self, id: &Uuid) -> Option<u16> {
+        match self.reader().get_workspace(id) {
+            Ok(_) => None,
+            Err(error) => error.status().or(Some(0)),
         }
     }
 
@@ -786,8 +1553,15 @@ impl Live {
                 kind = error.kind()
             )),
         }
+        // A workspace's own default guardrail is not one of these. It cannot be
+        // deleted on its own and the workspace deletion above took it, so
+        // naming it would send an operator looking for something that is not
+        // there — or, if that deletion failed, to a guardrail they cannot
+        // remove until the workspace goes.
+        let defaults = self.default_guardrails.borrow();
         let notices = named
             .into_iter()
+            .filter(|(id, _)| !defaults.contains(id))
             .map(|(id, name)| {
                 format!(
                     "guardrail {id} (\"{name}\") of run {run} left in place; Keymaster deletes \
@@ -800,21 +1574,25 @@ impl Live {
     }
 }
 
-// ----------------------------------------------------------------- workspace
+// ------------------------------------------------------------------- project
 
 /// A throwaway project directory and the runs made in it.
+///
+/// Named for the directory rather than for anything remote: in this file a
+/// *workspace* is an OpenRouter workspace, which is a resource these runs
+/// create.
 ///
 /// Two directories, not one. The project directory holds the configuration and
 /// the state file and is scanned for the delivered plaintext; the receiver
 /// writes into the other one, because what it writes is a live credential and
 /// finding it in the scanned tree is supposed to be a failure.
-struct Workspace {
+struct Project {
     directory: TempDir,
     secrets: TempDir,
     transcript: RefCell<Vec<String>>,
 }
 
-impl Workspace {
+impl Project {
     fn new() -> Self {
         Self {
             directory: TempDir::new().expect("a project directory"),
@@ -825,6 +1603,10 @@ impl Workspace {
 
     fn config_path(&self) -> PathBuf {
         self.directory.path().join("openrouter-keymaster.toml")
+    }
+
+    fn state_path(&self) -> PathBuf {
+        self.directory.path().join("state.json")
     }
 
     fn write_config(&self, contents: &str) {
@@ -846,7 +1628,7 @@ impl Workspace {
             .arg("--config")
             .arg(self.config_path())
             .arg("--state")
-            .arg(self.directory.path().join("state.json"))
+            .arg(self.state_path())
             .args(arguments);
         let output = command.output().expect("running openrouter-keymaster");
         let streams = Streams::of(&output);
@@ -960,6 +1742,110 @@ fn key_config(run: &str, sink: &Path, disabled: bool) -> String {
          type = \"file\"\n\
          path = \"{sink}\"\n",
         sink = sink.display()
+    )
+}
+
+/// The `budgets` table the workspace scenario asks for: one dollar a month.
+///
+/// A budget has to be greater than zero to be a budget at all, so this is the
+/// smallest one there is. It caps a workspace whose guardrail already caps
+/// everything in it at zero.
+const MONTHLY_BUDGET: &str = "budgets = { monthly = 1 }\n";
+
+/// The club workspace's configuration, as the scenario edits it.
+///
+/// A struct rather than four arguments, because each step changes one field and
+/// leaves the rest as the previous step left them — which is what the file on
+/// disk does too.
+struct Club {
+    run: String,
+    description: String,
+    /// The `budgets` line, kept only while OpenRouter accepts it.
+    budgets: &'static str,
+    /// Where the key inside the workspace is delivered, once there is one.
+    sink: Option<PathBuf>,
+}
+
+impl Club {
+    fn new(run: &str) -> Self {
+        Self {
+            run: run.to_owned(),
+            description: format!("{run} original description"),
+            budgets: "",
+            sink: None,
+        }
+    }
+
+    /// One workspace, its default guardrail, and — once a sink is named — one
+    /// disabled zero-budget key inside it.
+    fn toml(&self) -> String {
+        let key = self.sink.as_ref().map_or(String::new(), |sink| {
+            format!(
+                "\n[keys.member]\n\
+                 name = \"{run}-member\"\n\
+                 limit_usd = 0\n\
+                 limit_reset = \"daily\"\n\
+                 disabled = true\n\
+                 workspace = \"club\"\n\
+                 receiver = \"sink\"\n\
+                 \n[receivers.sink]\n\
+                 type = \"file\"\n\
+                 path = \"{sink}\"\n",
+                run = self.run,
+                sink = sink.display()
+            )
+        });
+        format!(
+            "version = 1\n\
+             \n[workspaces.club]\n\
+             name = \"{run}-club\"\n\
+             slug = \"{run}-club\"\n\
+             description = \"{description}\"\n\
+             {budgets}\
+             default_guardrail = \"house\"\n\
+             \n[guardrails.house]\n\
+             name = \"{run}-house\"\n\
+             limit_usd = 0\n\
+             reset_interval = \"daily\"\n\
+             {key}",
+            run = self.run,
+            description = self.description,
+            budgets = self.budgets,
+        )
+    }
+}
+
+/// One zero-budget key delivered to the host's own code (ADR-0005).
+fn caller_config(run: &str) -> String {
+    format!(
+        "version = 1\n\
+         \n[keys.hostkey]\n\
+         name = \"{run}-hostkey\"\n\
+         limit_usd = 0\n\
+         limit_reset = \"daily\"\n\
+         disabled = true\n\
+         receiver = \"host\"\n\
+         \n[receivers.host]\n\
+         type = \"caller\"\n\
+         destination = \"live/caller\"\n"
+    )
+}
+
+/// One `webhook` log destination, in the credential's default workspace.
+///
+/// `.invalid` is reserved so that a name in it can never resolve, which is what
+/// makes this endpoint harmless: nothing is listening and nothing can be. What
+/// OpenRouter makes of an unreachable URL at create time is one of the things a
+/// live run is here to find out — if it validates reachability, the create
+/// fails and that is a finding about the API rather than a bug in this test.
+/// See [`docs/live-tests.md`](../docs/live-tests.md).
+fn destination_config(run: &str, url: &str) -> String {
+    format!(
+        "version = 1\n\
+         \n[log_destinations.hook]\n\
+         type = \"webhook\"\n\
+         name = \"{run}-hook\"\n\
+         config = {{ url = \"{url}\" }}\n"
     )
 }
 

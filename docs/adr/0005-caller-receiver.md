@@ -1,7 +1,12 @@
 # ADR-0005: The caller receiver
 
 - **Date:** 2026-08-27
-- **Status:** Proposed
+- **Status:** Accepted
+
+Accepted on 2026-08-27, through automated code review of the commit that
+implements it. This repository currently has a single maintainer committing
+directly to `main`, so that review stands in for a second human reviewer; see
+[the ADR convention](README.md#review).
 
 ## Context
 
@@ -83,3 +88,49 @@ back. A callback is the smallest thing that works.
 
 - [ADR-0002](0002-journaled-key-creation.md), [ADR-0003](0003-core-library-split.md)
 - [`docs/receiver-protocol.md`](../receiver-protocol.md)
+
+### Implementation checks
+
+Merged. These checks exist and run in `just check`. The decision above is
+unchanged; this section records where each part of it is enforced.
+
+- **The receiver and its callback** (items 1 and 2) —
+  `crates/core/src/receiver/caller.rs` wraps `Context.deliver` as an ordinary
+  `SecretReceiver`. What a host actually touches is the public `deliver` field
+  on `Context` and the types in its signature — `DeliveryMetadata`,
+  `KeyPlaintext`, and `DeliveryOutcome`, all `pub` from
+  `crates/core/src/ops/mod.rs` — so a callback is written as a boxed closure and
+  the alias naming that boxed type, `receiver::Deliver`, stays `pub(crate)`.
+  That is deliberate and is what the decision above describes: a host supplies a
+  closure, never an implementation of the receiver trait, so the trait and the
+  receivers behind it need no public name either. The fingerprint of
+  `("caller", address, destination)` is
+  `crates/core/src/config/mod.rs::Receiver::digest`, which is why
+  `a_changed_destination_plans_a_replacement` and
+  `a_plan_fingerprint_refuses_an_apply_after_the_destination_changes` hold in
+  `crates/cli/tests/caller.rs`.
+- **Delivery, once, routed by metadata** (items 1 and 4) — the same file:
+  `a_created_key_is_handed_to_the_callback_exactly_once`,
+  `two_keys_in_one_apply_are_two_calls_with_distinct_metadata`,
+  `a_rotation_delivers_the_successor_to_the_callback`,
+  `a_refused_delivery_holds_at_secured_and_disables_the_key`, and
+  `a_panicking_callback_is_ambiguous_and_is_never_called_again` — which also
+  proves the panic payload is not repeated.
+- **The refusal before any issuance** (item 3) — the shared preflight in
+  `crates/core/src/ops/issuance.rs`, and the whole-plan scan `apply` makes ahead
+  of its first phase in `crates/core/src/ops/apply.rs`. Covered by
+  `an_apply_with_no_callback_creates_nothing`,
+  `a_write_in_an_earlier_phase_never_lands_when_a_later_key_cannot_be_delivered`,
+  `a_rotation_with_no_callback_stages_nothing`,
+  `a_recover_replace_with_no_callback_closes_nothing`,
+  `a_refusal_reports_the_promotion_it_completed_first`, and
+  `planning_needs_no_callback`.
+- **Nothing escapes the callback** — every case in that file runs
+  `assert_nothing_leaked`, which scans the serialized report and the whole
+  project directory for the sentinel the callback was handed.
+
+The live counterpart is the opt-in
+`live_caller_receiver_hands_a_key_to_host_code` in
+`crates/cli/tests/live.rs`, which calls `ops::apply` against the real API with
+a real callback. It has not been run;
+see [`docs/live-tests.md`](../live-tests.md).

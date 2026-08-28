@@ -1,7 +1,15 @@
 # ADR-0004: Workspaces as a managed resource
 
 - **Date:** 2026-08-27
-- **Status:** Proposed
+- **Status:** Accepted
+
+Accepted on 2026-08-27, through automated code review of the two commits that
+implement it. This repository currently has a single maintainer committing
+directly to `main`, so that review stands in for a second human reviewer; see
+[the ADR convention](README.md#review).
+
+The status changed only after the last of those commits, so nothing was binding
+while the shape was still moving.
 
 ## Context
 
@@ -145,3 +153,61 @@ workspace budget is that cap; otherwise the host sizes per-key limits.
 - Workspace budgets: <https://openrouter.ai/docs/guides/features/workspaces/workspace-budgets>
 - Guardrails: <https://openrouter.ai/docs/guides/features/guardrails>
 - OpenAPI: <https://openrouter.ai/openapi.json>
+
+### Implementation checks
+
+Both steps are merged. These checks exist and run in `just check`. The decision
+above is unchanged; this section records where each part of it is enforced, and
+what is still unverified.
+
+- **The workspace as a managed resource** (item 1) —
+  `crates/core/src/config/mod.rs` and `crates/core/src/config/validate.rs` for
+  the block, `crates/core/src/plan/` for the diff, `crates/core/src/ops/apply.rs`
+  for the create and update, `crates/core/src/ops/import.rs::import_workspace`,
+  and `crates/core/src/ops/lifecycle.rs::delete_workspace` and `forget`. Covered
+  by `crates/cli/tests/workspaces.rs`: the identity is recorded before anything
+  else, removing the block orphans the binding and deletes nothing, a delete is
+  refused while the workspace still holds a key, a guardrail, or a log
+  destination, and a bound workspace that vanished is reported rather than
+  recreated.
+- **Workspace by local address, and the ordering** (item 2) —
+  `crates/core/src/plan/mod.rs` orders workspaces before guardrails before keys
+  and holds back a block whose workspace is not bound
+  (`a_key_naming_an_unbound_workspace_is_held_back_until_the_binding_exists`).
+  A guardrail OpenRouter has in another workspace is held back rather than
+  patched, and `import guardrail` refuses it
+  (`importing_a_guardrail_from_another_workspace_binds_nothing`).
+- **The default guardrail** (item 3) — planned as a create carrying
+  `default_guardrail_unmaterialized` and performed as the first `PATCH` to the
+  identity the workspace names
+  (`a_default_guardrail_is_materialized_by_patching_the_identity_its_workspace_names`),
+  bound by `import workspace`
+  (`importing_a_workspace_records_its_default_guardrail_and_binds_the_block`),
+  held back when the address owns another guardrail, and released with the
+  workspace by both `delete workspace` and `state forget`.
+- **Budgets, their order, and definite refusals** (item 4) —
+  `crates/core/src/ops/apply.rs` (`budget_writes` and `Budgets`) with
+  `crates/core/src/api/mod.rs::put_workspace_budget` and
+  `delete_workspace_budget`; the offline ordering rule is in
+  `crates/core/src/config/validate.rs`. Covered by
+  `budget_increases_are_written_widest_first_and_decreases_narrowest_first`,
+  `an_interval_the_table_drops_is_deleted_before_anything_is_raised`,
+  `a_refused_budget_interval_fails_alone_and_holds_back_everything_it_would_have_capped`,
+  and `a_budget_write_that_never_got_an_answer_is_unverified_rather_than_refused`
+  — which is the line between a definite refusal and an unsettled write.
+- **The scope** (item 5) — `crates/core/src/ops/mod.rs`
+  (`refuse_other_workspaces`, `refuse_out_of_scope`) with the filtering in
+  `crates/core/src/plan/` and `crates/core/src/report/`. Covered by
+  `crates/cli/tests/scope.rs`: reports omit another workspace's `unmanaged`
+  resources, an identically named resource elsewhere is neither a candidate nor
+  a collision, a bound key is judged present or missing the same way either way,
+  the plan fingerprint separates a scoped plan from an unscoped one, and a
+  misplaced block is refused before any request.
+
+What no local check can reach is whether the real API behaves this way. The
+opt-in `live_workspace_create_budget_default_guardrail_and_scoped_key` in
+`crates/cli/tests/live.rs` covers the create, the default guardrail, one budget
+`PUT`, the update, a scoped key, and the import — and **it has not been run**.
+The reads behind this decision were checked by hand against a real organization;
+no budget `PUT` and no workspace create or delete has ever been sent. See
+[`docs/live-tests.md`](../live-tests.md).

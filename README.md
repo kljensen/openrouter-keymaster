@@ -168,6 +168,54 @@ present or missing exactly as it is without a scope, and two scopes pointed at
 one state file produce correct but mixed plans. A host that wants clubs to stay
 separate keeps one configuration and one state file per club.
 
+### One Context per club, from an async handler
+
+The pieces above compose into what a web application actually does: a request
+arrives for one club, the handler builds a context scoped to that club's
+workspace with a callback that stores the plaintext where the club can see it,
+and moves the whole call off the async runtime.
+
+```rust
+async fn issue_key(club: Club) -> Result<ApplyReport, Error> {
+    let context = Context {
+        paths: Paths { config: club.config.clone(), state: club.state.clone() },
+        options: Options::default(),
+        key: Some(ManagementKey::from_secret(vault.management_key()?)?),
+        // This club's workspace. Every key and guardrail the run creates is
+        // placed here, and a configuration naming another workspace is refused
+        // before any request goes out.
+        workspace: Some(club.workspace.clone()),
+        deliver: Some(Box::new(move |metadata, plaintext| {
+            match vault.store(metadata.destination().unwrap_or_default(), plaintext.expose()) {
+                Ok(()) => DeliveryOutcome::delivered("stored for the club"),
+                Err(error) if error.wrote_nothing() => DeliveryOutcome::rejected(error.to_string()),
+                Err(error) => DeliveryOutcome::ambiguous(error.to_string()),
+            }
+        })),
+    };
+
+    // The client is blocking and panics on a runtime thread, and the state lock
+    // refuses a concurrent writer rather than queueing it — so the whole call
+    // moves to a blocking thread, and the application serializes the calls that
+    // share one club's state file.
+    let outcome = tokio::task::spawn_blocking(move || ops::apply(context, None)).await??;
+    Ok(outcome.report)
+}
+```
+
+**One configuration and one state file per club**, as the paths above say. The
+scope guards placement and filters reports; it does not isolate, and two scopes
+pointed at one state file give correct but mixed plans.
+
+**How much a club may spend is the application's policy, not Keymaster's.**
+Keymaster writes the caps OpenRouter enforces — a workspace budget where the
+account's plan has them, a guardrail limit, a per-key `limit_usd` — and reports
+what `spend` says was used. It does not decide what a club is allowed, does not
+sum spend across clubs, and does not stop issuing when some total is reached.
+Deciding that a club gets ten dollars a month, sizing the key it asks for, and
+refusing the eleventh request belong to the application, which is the only place
+that knows what a club is.
+
 What the crate promises, and what it does not, is
 [`docs/compatibility.md`](docs/compatibility.md#the-core-crates-rust-api).
 
@@ -178,13 +226,13 @@ This README is the reference for what each command does and why. The pages under
 
 | Page | What it is for |
 | --- | --- |
-| [operations.md](docs/operations.md) | Runbooks: first run, adoption, changes, key creation, rotation, retirement, recovery, and looking after state. |
+| [operations.md](docs/operations.md) | Runbooks: first run, adoption, changes, workspaces, log destinations, scoped runs, key creation, rotation, retirement, recovery, spend, and looking after state. |
 | [configuration.md](docs/configuration.md) | Every field of the desired-state file. |
 | [threat-model.md](docs/threat-model.md) | Supplying the management credential, and what Keymaster does and does not protect. |
 | [receiver-protocol.md](docs/receiver-protocol.md) | The contract for writing a command receiver, and the `caller` receiver a library host delivers through. |
-| [compatibility.md](docs/compatibility.md) | v0.1 non-goals, which surfaces are contracts, and how state migrations will work. |
+| [compatibility.md](docs/compatibility.md) | Non-goals, which surfaces are contracts, and how state migrations will work. |
 | [live-tests.md](docs/live-tests.md) | The opt-in acceptance suite that runs against a real organization. |
-| [release-checklist.md](docs/release-checklist.md) | The v0.1 release gate, with the command that verifies each item. |
+| [release-checklist.md](docs/release-checklist.md) | The release gate, with the command that verifies each item. |
 | [adr/](docs/adr/) | The decisions that are expensive to reverse. |
 
 [`CHANGELOG.md`](CHANGELOG.md) records what each release changed.

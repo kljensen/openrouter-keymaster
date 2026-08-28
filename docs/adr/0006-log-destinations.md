@@ -1,7 +1,12 @@
 # ADR-0006: Log destinations as a managed resource
 
 - **Date:** 2026-08-27
-- **Status:** Proposed
+- **Status:** Accepted
+
+Accepted on 2026-08-27, through automated code review of the commit that
+implements it. This repository currently has a single maintainer committing
+directly to `main`, so that review stands in for a second human reviewer; see
+[the ADR convention](README.md#review).
 
 ## Context
 
@@ -97,3 +102,48 @@ the club case.
 
 - [ADR-0004](0004-workspaces.md)
 - OpenAPI: <https://openrouter.ai/openapi.json>
+
+### Implementation checks
+
+Merged. These checks exist and run in `just check`. The decision above is
+unchanged; this section records where each part of it is enforced.
+
+- **The destination as a managed resource** (item 1) —
+  `crates/core/src/config/mod.rs` and `crates/core/src/config/validate.rs` for
+  the block, `crates/core/src/api/mod.rs` for the reads and writes (the listing
+  asks one workspace at a time, which is why `crates/core/src/ops/mod.rs`
+  reads the workspaces first), `crates/core/src/ops/import.rs::
+  import_log_destination`, and `crates/core/src/ops/lifecycle.rs::
+  delete_log_destination` and `forget`. Covered by
+  `crates/cli/tests/destinations.rs`: the identity is recorded with the digest,
+  a destination whose workspace is unbound is held back, removing the block
+  orphans the binding, a delete of an untracked destination is refused without a
+  request, and `an_allowlist_openrouter_holds_is_drift_the_apply_clears_with_null`.
+- **The immutable `type` and workspace** (item 2) —
+  `a_changed_type_or_workspace_is_held_back_naming_the_field_and_the_way_out`,
+  and `deleting_a_workspace_is_refused_while_it_still_holds_a_log_destination`
+  for the ADR-0004 side of the same rule.
+- **Write-only `config`** (item 3) — the digest is recorded in
+  `crates/core/src/state/mod.rs` and compared in `crates/core/src/plan/`.
+  Covered by `a_created_destination_records_its_identity_and_the_digest_of_what_it_wrote`,
+  `an_ordinary_field_change_is_patched_without_resending_the_configuration`,
+  `a_changed_configuration_is_an_update_whose_diff_says_config_and_nothing_else`,
+  `an_imported_destination_has_no_digest_so_its_first_apply_writes_the_configuration_once`,
+  and `a_repeated_import_compares_against_the_digest_the_binding_records`.
+- **`config` as a secret-bearing type** (item 4) —
+  `crates/core/src/config/destination.rs` (its own visitors, `[redacted]`
+  `Debug`, no public `Serialize`, zeroized strings) with the exact-match
+  registry in `crates/core/src/redaction.rs`. Covered by
+  `the_configuration_never_appears_in_plan_or_status_output`,
+  `a_configuration_value_is_scrubbed_from_a_message_that_would_have_quoted_it`,
+  `a_configuration_value_never_reaches_a_deserializer_error`, and
+  `a_failed_write_reports_a_status_and_a_code_and_never_the_body` — each of
+  which scans for a fake provider token as well as the key sentinel every
+  binary-level test already scans for.
+
+The live counterpart is the opt-in
+`live_log_destination_webhook_create_update_delete` in
+`crates/cli/tests/live.rs`. It has not been run, and **no destination has ever
+been created against the real API** from this repository — including the
+question of whether OpenRouter accepts a `webhook` pointed at an unreachable
+URL. See [`docs/live-tests.md`](../live-tests.md).

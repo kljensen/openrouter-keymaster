@@ -480,11 +480,13 @@ impl Validator {
             "description",
         );
 
+        let written_budgets = block.budgets.is_some();
         let budgets = self.budgets(&path, block.budgets);
         let include_byok_in_budgets = self.byok_in_budgets(
             &format!("{path}.include_byok_in_budgets"),
             block.include_byok_in_budgets,
             budgets.as_ref(),
+            written_budgets,
         );
         let default_guardrail = self.reference(
             &format!("{path}.default_guardrail"),
@@ -511,6 +513,19 @@ impl Validator {
             self.problem(path, "is required");
             return None;
         };
+        // Before the shape check, because a credential is *already* shaped
+        // like a slug — `sk-or-v1-…` is lowercase alphanumeric segments
+        // separated by single hyphens — so nothing below would catch one, and
+        // the answer an operator needs is about the secret rather than about
+        // the pattern.
+        if looks_like_credential(&value) {
+            self.problem(
+                path,
+                "must not look like a credential; Keymaster never accepts secret material in \
+                 configuration",
+            );
+            return None;
+        }
         let shaped = !value.is_empty()
             && value.len() <= SLUG_LENGTH_MAX
             && value
@@ -589,13 +604,24 @@ impl Validator {
     }
 
     /// The workspace-wide BYOK setting, which only a budget `PUT` can write.
+    ///
+    /// `written` says the block has a `budgets` table at all, which is not the
+    /// same question as whether one survived validation: [`Self::budgets`]
+    /// answers [`None`] both for a block that wrote no table and for a table
+    /// whose own problems it has already reported. The refusal below is about
+    /// the first. Telling a block with a *broken* budget that it has none would
+    /// be false, and would bury the one problem there is to fix.
     fn byok_in_budgets(
         &mut self,
         path: &str,
         value: Option<bool>,
         budgets: Option<&BTreeMap<BudgetInterval, Usd>>,
+        written: bool,
     ) -> Option<bool> {
         let value = value?;
+        if written && budgets.is_none() {
+            return None;
+        }
         if budgets.is_none_or(BTreeMap::is_empty) {
             self.problem(
                 path,

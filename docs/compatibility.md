@@ -1,7 +1,7 @@
-# v0.1 scope and compatibility
+# Scope and compatibility
 
-What Keymaster 0.1 deliberately does not do, and what an operator or a script
-may rely on not changing under them.
+What Keymaster deliberately does not do, and what an operator or a script may
+rely on not changing under them.
 
 ## Non-goals
 
@@ -32,7 +32,10 @@ exists only in memory between the create response and the receiver. There is no
 command that prints one and no fallback that would.
 
 **No multi-machine coordination.** The state lock is a local file. Two machines
-can apply against one organization simultaneously and nothing detects it.
+can apply against one organization simultaneously and nothing detects it. A
+`--workspace` scope does not change that: it guards where a run places what it
+creates and filters what it reports, and two scopes pointed at one state file
+give correct but mixed plans.
 
 **No saved plans.** `apply` recomputes the plan under its own lock, so there is
 nothing to save and nothing to go stale. There is no plan file format, no
@@ -46,12 +49,21 @@ sends one.
 delete-by-name, no bulk import, no generated configuration.
 
 **Unix only.** The durability and permission guarantees are built on Unix
-primitives. v0.1 fails to build elsewhere rather than offering a weaker version
-of them.
+primitives. Keymaster fails to build elsewhere rather than offering a weaker
+version of them.
 
-**A narrow slice of OpenRouter.** Keys, guardrails, and the assignments between
-them. Not workspaces as managed resources, BYOK credentials, content filters,
-members, analytics, or any inference endpoint.
+**A chosen slice of OpenRouter.** Keys, guardrails and the assignments between
+them, workspaces with their budgets and default guardrail, and observability log
+destinations. Not BYOK credentials, content filters, workspace members,
+guardrail assignments to members, a workspace's model defaults, or any inference
+endpoint. Analytics is read, for `spend`, and never written.
+
+**No spending policy of its own.** Keymaster writes the caps OpenRouter
+enforces — a workspace budget, a guardrail limit, a key's `limit_usd` — and
+reports what the analytics API says was spent. It does not sum spend across
+resources, does not decide what anyone is allowed, and does not stop issuing
+when some total is reached. A host that needs that owns it, because only the
+host knows what the total is for.
 
 **No shell completions, TUI, progress spinners, or color.** Output is text or
 one JSON document, and never colored.
@@ -108,11 +120,28 @@ Covered:
 - **The `ops` functions**, their names and their signatures: the `Context` a
   caller builds (`Paths`, `Options`, `ManagementKey`), the arguments each takes,
   and the `Outcome<R>` or `Error` each returns. A `Context` stays movable to
-  another thread, and the operations stay synchronous and blocking.
+  another thread, and the operations stay synchronous and blocking. They are
+  `plan`, `status`, `apply`, `spend`, `import_key`, `import_guardrail`,
+  `import_workspace`, `import_log_destination`, `rotate`, `recover_inspect`,
+  `recover_resolve`, `recover_replace`, `retire`, `decommission`, `delete_key`,
+  `delete_workspace`, `delete_log_destination`, and `forget` — with
+  `SpendQuery`, `Granularity`, and `Finding` as the argument types they take.
+- **`Context.workspace`**, the run's workspace scope, and what it does: every
+  key, guardrail, and log destination the run creates is placed there, a
+  configuration naming another workspace is refused before any request, reports
+  omit `unmanaged` resources elsewhere, and matching by name considers only
+  that workspace. `None` is the whole organization. It is a guard on placement
+  and a filter on reports, never isolation
+  ([ADR-0004](adr/0004-workspaces.md)).
 - **The report types** `ops` returns, their public accessors, and the field
   names and enumerated string values of their JSON. These are the same DTOs the
   `--json` contract above describes; a field is one promise, made once, in both
-  places.
+  places. That includes a plan or apply action at a `workspaces.NAME` or
+  `log_destinations.NAME` address, the `budgets` and `include_byok_in_budgets`
+  a `status` reports per workspace, and a `spend` document's `credits`,
+  `range`, `granularity`, `columns` (`key_dimension`, `cost_metric`,
+  `tokens_metric`), and `rows` of `key`, optional `address`, `cost_usd`,
+  `tokens`, and `periods`.
 - **`PlanFingerprint`** as an opaque value: a plan's fingerprint can be handed
   back to `ops::apply` and nothing else. Its digest inputs and its encoding are
   not a contract — a build that computes a different digest simply refuses a
@@ -159,9 +188,11 @@ concurrent writer rather than queueing it.
 ## State format migrations
 
 The state file carries its own schema version, independent of the crate
-version. **v0.1 ships schema version 1, and is where the compatibility promise
+version. **v0.1 shipped schema version 1, and is where the compatibility promise
 starts.** There is nothing to migrate from yet; every state file in existence
-claims version 1, and the reader accepts exactly that.
+claims version 1, and the reader accepts exactly that. The workspace and log
+destination bindings added since are new optional records inside that version, so
+a state file written by v0.1 is read unchanged.
 
 From here on:
 
