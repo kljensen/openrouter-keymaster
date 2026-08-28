@@ -194,3 +194,12 @@ pub(crate) fn plural(count: usize, noun: &str) -> String {
     let suffix = if count == 1 { "" } else { "s" };
     format!("{count} {noun}{suffix}")
 }
+
+/// A count with the phrase that agrees with it.
+///
+/// [`plural`] only ever appends an `s`, which is right for a bare noun and
+/// wrong for anything carrying a verb: "2 planned write wass".
+pub(crate) fn counted(count: usize, one: &str, many: &str) -> String {
+    let phrase = if count == 1 { one } else { many };
+    format!("{count} {phrase}")
+}

@@ -9,6 +9,25 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Fixed
 
+- A configuration that creates a workspace and puts a guardrail or a key inside
+  it now converges in one `apply` rather than two. The planner treated every
+  unbound workspace as something only an operator could resolve, so a fresh
+  `[workspaces.club]` was created while the guardrail and key naming it were
+  reported `held_back`, `blocked_by workspaces.club`. A workspace this plan
+  creates is now an ordinary in-plan dependency: its contents depend on the
+  create, run after it, and resolve their placement from the binding apply
+  records before anything else — the same way a key create depending on a
+  guardrail create in the same run already worked. A workspace only an operator
+  can bind, through an adoption or one nobody can find, still holds everything
+  in it back. A workspace's default guardrail is planned the same way: a create
+  by `PATCH` to the identity the workspace binding will carry. Found by a live
+  run against a real organization (#36).
+
+- The held-back warning agrees with the number it counts: "2 planned writes were
+  held back", not "2 planned write wass held back". The same defect ran through
+  the apply summary's skipped, unverified, failed, and widened counts, and
+  `recover inspect`'s candidate count (#36).
+
 - A guardrail `limit_usd` of `0` is now rejected offline, at
   `guardrails.NAME.limit_usd`. The first live run against a real organization
   found that `POST /guardrails` answers a zero budget with a 400, "Too small:

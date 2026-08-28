@@ -20,7 +20,7 @@ use std::fs;
 use openrouter_keymaster_core::state::Origin;
 use serde_json::{Value, json};
 use support::fixtures::{
-    FAKE_DESTINATION_ID, FAKE_WORKSPACE_ID, OTHER_FAKE_DESTINATION_ID, log_destination,
+    FAKE_DESTINATION_ID, FAKE_WORKSPACE_ID, OTHER_FAKE_DESTINATION_ID, log_destination, workspace,
 };
 use support::http::json_response;
 use support::project::{Project, address, at, uuid};
@@ -215,12 +215,19 @@ fn a_created_destination_records_its_identity_and_the_digest_of_what_it_wrote() 
 }
 
 #[test]
-fn a_destination_naming_an_unbound_workspace_is_held_back_until_the_binding_exists() {
+fn a_destination_naming_a_workspace_no_run_can_bind_is_held_back() {
     let project = Project::new(&project_toml(""));
     project.observe(Vec::new(), Vec::new(), Vec::new());
+    // A remote workspace carries the configured name and nothing binds it, so
+    // only an operator's `import` can give the block an identity. Nothing this
+    // run does will supply one, and the destination waits (ADR-0004, item 2).
+    project.observe_workspaces(vec![workspace(CLUB, "Golf Club", "golf-club")]);
 
     let document = project.succeed(&["--json", "plan"]).document();
-    assert_eq!(action(&document, "workspaces.club")["kind"], "create");
+    assert_eq!(
+        action(&document, "workspaces.club")["kind"],
+        "adoption_required"
+    );
 
     let destination = action(&document, "log_destinations.audit");
     assert_eq!(destination["kind"], "create", "{document}");
@@ -234,6 +241,52 @@ fn a_destination_naming_an_unbound_workspace_is_held_back_until_the_binding_exis
         "the destination says which workspace it waits on: {document}"
     );
     project.assert_read_only();
+}
+
+#[test]
+fn a_destination_is_created_in_a_workspace_the_same_apply_created() {
+    let project = Project::new(&project_toml(""));
+    project.observe_sequence(vec![Vec::new()], vec![Vec::new()], vec![Vec::new()]);
+    project.observe_destination_sequence(vec![
+        Vec::new(),
+        vec![log_destination(AUDIT, "datadog", "Club audit")],
+    ]);
+    project.observe_workspace_sequence(vec![
+        Vec::new(),
+        vec![workspace(CLUB, "Golf Club", "golf-club")],
+    ]);
+    project.server.mount(
+        Mock::given(method("POST"))
+            .and(path("/api/v1/workspaces"))
+            .respond_with(json_response(
+                200,
+                &json!({ "data": workspace(CLUB, "Golf Club", "golf-club") }),
+            )),
+    );
+    project.server.mount(
+        Mock::given(method("POST"))
+            .and(path(DESTINATIONS))
+            .respond_with(json_response(
+                200,
+                &json!({ "data": log_destination(AUDIT, "datadog", "Club audit") }),
+            )),
+    );
+
+    let document = project.succeed(&["--json", "apply"]).document();
+    assert_eq!(document["outcome"], "applied", "{document}");
+    assert_eq!(
+        project.write_trace(),
+        vec![
+            "POST /api/v1/workspaces".to_owned(),
+            format!("POST {DESTINATIONS}"),
+        ],
+        "the workspace is created first, and the destination follows it"
+    );
+    assert_eq!(
+        sent_body(&project, "POST", DESTINATIONS)["workspace_id"],
+        CLUB,
+        "the destination is placed by the identity the create recorded a phase earlier"
+    );
 }
 
 // --- update, and the digest that drives `config` ----------------------------

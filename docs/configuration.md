@@ -234,10 +234,14 @@ generation = 1
 so changing one here plans a replacement rather than an update. So does raising
 `generation` or changing which receiver the key delivers to.
 
-**A key or guardrail whose `workspace` block is not bound yet is held back.**
+**A key or guardrail is created after the `workspace` block it names.**
 OpenRouter fixes a workspace at creation, so the identity has to exist before
-anything is placed in it. The first run creates the workspace; the next one
-creates what goes inside.
+anything is placed in it. When the same run creates the workspace, that is an
+ordering rule and nothing more: the workspace is created first, its identity is
+recorded, and what goes inside is placed by it in the same apply. When only an
+operator can bind the workspace — a name that matches something OpenRouter
+already has, or a bound workspace nobody can find — everything inside it is
+held back until they do.
 
 **A key with no `receiver` can be managed and imported but never created.**
 There is no fallback destination for a plaintext key and Keymaster will not
@@ -340,8 +344,9 @@ reason a workspace is: a new destination has a new UUID, and recreating one
 silently would restart log forwarding under an identity nothing recorded.
 
 Destinations are ordered after workspaces, and one naming a `workspace` block
-nothing is bound to yet is held back until the binding exists — the same rule
-keys and guardrails follow.
+is created after that workspace is — in the same apply when the run creates it,
+and never while only an operator can bind it. The same rule keys and guardrails
+follow.
 
 ## `[receivers.ADDRESS]`
 

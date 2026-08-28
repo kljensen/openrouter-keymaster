@@ -13,17 +13,21 @@ use std::fs;
 use openrouter_keymaster_core::state::Origin;
 use serde_json::{Value, json};
 use support::fixtures::{
-    FAKE_DEFAULT_GUARDRAIL_ID, FAKE_GUARDRAIL_ID, FAKE_WORKSPACE_ID, api_key, guardrail, workspace,
-    workspace_budgets,
+    FAKE_DEFAULT_GUARDRAIL_ID, FAKE_GUARDRAIL_ID, FAKE_WORKSPACE_ID, api_key, assignment,
+    created_key, guardrail, workspace, workspace_budgets,
 };
 use support::http::json_response;
 use support::project::{Project, address, at, uuid};
+use support::sentinel::SECRET_SENTINEL_KEY;
+use tempfile::TempDir;
 use wiremock::Mock;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param};
 
 const CLUB: &str = FAKE_WORKSPACE_ID;
 const DEFAULT_RAIL: &str = FAKE_DEFAULT_GUARDRAIL_ID;
 const JOBFEED_HASH: &str = "hash-jobfeed-1";
+const MEMBER_HASH: &str = "hash-member-1";
+const ASSIGNMENT_ID: &str = "44444444-4444-4444-8444-444444444444";
 
 /// A club: one workspace with a pooled budget, its default guardrail, and one
 /// key placed in it by address.
@@ -67,6 +71,16 @@ fn action<'a>(document: &'a Value, address: &str) -> &'a Value {
         .iter()
         .find(|action| action["address"] == address)
         .unwrap_or_else(|| panic!("no action at {address} in {document}"))
+}
+
+/// The body of the one request matching `verb` and `route`.
+fn sent_body(project: &Project, verb: &str, route: &str) -> Value {
+    let requests = project.server.requests();
+    let request = requests
+        .iter()
+        .find(|request| request.method == verb && request.url.path() == route)
+        .unwrap_or_else(|| panic!("no {verb} {route} in {:?}", project.request_trace()));
+    serde_json::from_slice(&request.body).expect("a JSON request body")
 }
 
 /// The budgets a workspace has, as the API reports them.
@@ -479,24 +493,185 @@ fn importing_a_workspace_records_its_default_guardrail_and_binds_the_block() {
 // --- placement --------------------------------------------------------------
 
 #[test]
-fn a_key_naming_an_unbound_workspace_is_held_back_until_the_binding_exists() {
+fn a_key_naming_a_workspace_no_run_can_bind_is_held_back() {
     let project = Project::new(PROJECT);
     project.observe(Vec::new(), Vec::new(), Vec::new());
+    // A remote workspace carries the configured name and nothing binds it, so
+    // only an operator's `import` can give the block an identity. This run will
+    // not create one, and everything inside waits (ADR-0004, item 2).
+    project.observe_workspaces(vec![workspace(CLUB, "Golf Club", "golf-club")]);
 
     let document = project.succeed(&["--json", "plan"]).document();
-    assert_eq!(action(&document, "workspaces.club")["kind"], "create");
-
-    let key = action(&document, "keys.jobfeed");
-    assert_eq!(key["kind"], "create", "{document}");
-    assert_eq!(key["executable"], false, "{document}");
-    assert!(
-        key["reasons"]
-            .as_array()
-            .expect("a reason list")
-            .iter()
-            .any(|reason| reason["dependency"] == "workspaces.club"),
-        "the key says which workspace it waits on: {document}"
+    assert_eq!(
+        action(&document, "workspaces.club")["kind"],
+        "adoption_required"
     );
+
+    for at in ["guardrails.house", "keys.jobfeed"] {
+        let held = action(&document, at);
+        assert_eq!(held["kind"], "create", "{document}");
+        assert_eq!(held["executable"], false, "{at}: {document}");
+        assert!(
+            held["reasons"]
+                .as_array()
+                .expect("a reason list")
+                .iter()
+                .any(|reason| reason["dependency"] == "workspaces.club"),
+            "{at} says which workspace it waits on: {document}"
+        );
+    }
+    project.assert_read_only();
+}
+
+/// A whole club from nothing: the workspace, the default guardrail it names,
+/// and one key placed in it and secured by that guardrail.
+fn whole_club(vault: &TempDir) -> Project {
+    let project = Project::new(&format!(
+        "version = 1\n\n[receivers.vault]\ntype = \"file\"\npath = \"{vault}/member.key\"\n\n\
+         [workspaces.club]\nname = \"Golf Club\"\nslug = \"golf-club\"\n\
+         budgets = {{ monthly = 1 }}\ndefault_guardrail = \"house\"\n\n\
+         [guardrails.house]\nname = \"house-rail\"\n\n\
+         [keys.member]\nname = \"club-member\"\nlimit_usd = 5\nlimit_reset = \"monthly\"\n\
+         receiver = \"vault\"\nworkspace = \"club\"\nguardrail = \"house\"\n",
+        vault = vault.path().display()
+    ));
+    let rail = guardrail(DEFAULT_RAIL, "house-rail", &[]);
+    let attached = assignment(ASSIGNMENT_ID, MEMBER_HASH, DEFAULT_RAIL);
+
+    // Nothing exists on the first read; everything the run wrote is there on
+    // the next, which is what the verification and the second apply see.
+    project.observe_sequence(
+        vec![Vec::new(), vec![api_key(MEMBER_HASH, "club-member")]],
+        vec![Vec::new(), vec![rail.clone()]],
+        vec![Vec::new(), vec![attached.clone()]],
+    );
+    project.observe_workspace_sequence(vec![
+        Vec::new(),
+        vec![workspace(CLUB, "Golf Club", "golf-club")],
+    ]);
+    project.observe_budgets(CLUB, &budgets(&[("monthly", 1.0)]));
+    project.server.mount(
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/guardrails/{DEFAULT_RAIL}")))
+            .respond_with(json_response(200, &json!({ "data": rail }))),
+    );
+    project.server.mount(
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/keys/{MEMBER_HASH}")))
+            .respond_with(json_response(
+                200,
+                &json!({ "data": api_key(MEMBER_HASH, "club-member") }),
+            )),
+    );
+    // Offset-aware, like every other listing the harness serves.
+    project.server.mount(
+        Mock::given(method("GET"))
+            .and(path(assignments_route()))
+            .and(query_param("offset", "0"))
+            .respond_with(json_response(200, &json!({ "data": [attached] })))
+            .with_priority(1),
+    );
+    project.server.mount(
+        Mock::given(method("GET"))
+            .and(path(assignments_route()))
+            .respond_with(json_response(200, &json!({ "data": [] })))
+            .with_priority(2),
+    );
+
+    for (verb, route, answer) in [
+        (
+            "POST",
+            "/api/v1/workspaces".to_owned(),
+            json!({ "data": workspace(CLUB, "Golf Club", "golf-club") }),
+        ),
+        (
+            "PUT",
+            format!("/api/v1/workspaces/{CLUB}/budgets/monthly"),
+            json!({}),
+        ),
+        (
+            "PATCH",
+            format!("/api/v1/guardrails/{DEFAULT_RAIL}"),
+            json!({}),
+        ),
+        (
+            "POST",
+            "/api/v1/keys".to_owned(),
+            created_key(MEMBER_HASH, "club-member", SECRET_SENTINEL_KEY),
+        ),
+        ("PATCH", format!("/api/v1/keys/{MEMBER_HASH}"), json!({})),
+        ("POST", assignments_route(), json!({})),
+    ] {
+        project.server.mount(
+            Mock::given(method(verb))
+                .and(path(route))
+                .respond_with(json_response(200, &answer)),
+        );
+    }
+    project
+}
+
+/// The route the default guardrail's assignments live under.
+fn assignments_route() -> String {
+    format!("/api/v1/guardrails/{DEFAULT_RAIL}/assignments/keys")
+}
+
+#[test]
+fn a_workspace_its_default_guardrail_and_a_key_all_converge_in_one_apply() {
+    // The whole club, from nothing, in one run: the workspace's create records
+    // the identity and the default guardrail it names, and every write after it
+    // resolves its placement from that binding rather than waiting for a second
+    // apply (ADR-0004, items 2 and 3).
+    let vault = TempDir::new().expect("a temporary vault directory");
+    let project = whole_club(&vault);
+
+    let document = project.succeed(&["--json", "apply"]).document();
+    assert_eq!(document["outcome"], "applied", "{document}");
+    for at in ["workspaces.club", "guardrails.house", "keys.member"] {
+        assert_eq!(
+            action(&document, at)["status"],
+            "applied",
+            "{at}: {document}"
+        );
+    }
+
+    assert_eq!(
+        project.write_trace(),
+        vec![
+            "POST /api/v1/workspaces".to_owned(),
+            format!("PUT /api/v1/workspaces/{CLUB}/budgets/monthly"),
+            format!("PATCH /api/v1/guardrails/{DEFAULT_RAIL}"),
+            "POST /api/v1/keys".to_owned(),
+            format!("PATCH /api/v1/keys/{MEMBER_HASH}"),
+            format!("POST {route}", route = assignments_route()),
+        ],
+        "the workspace, its budget, the default guardrail it names, then the key it holds"
+    );
+    assert_eq!(
+        sent_body(&project, "POST", "/api/v1/keys")["workspace_id"],
+        CLUB,
+        "the key is placed by the identity the workspace create recorded two phases earlier"
+    );
+
+    let state = project.read_state();
+    assert_eq!(
+        state
+            .workspace(&address("club"))
+            .expect("the workspace binding")
+            .id,
+        uuid(CLUB)
+    );
+    assert_eq!(
+        state
+            .guardrail(&address("house"))
+            .expect("the default guardrail binding")
+            .id,
+        uuid(DEFAULT_RAIL)
+    );
+
+    // And the second run has nothing left to do.
+    let again = project.succeed(&["--json", "apply"]).document();
+    assert_eq!(again["outcome"], "converged", "{again}");
 }
 
 #[test]

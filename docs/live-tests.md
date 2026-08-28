@@ -65,15 +65,17 @@ silently would tell you the API had been checked when it had not.
 
 **The budget write is the one whose answer is not predicted.** Workspace
 budgets are documented as an Enterprise feature, so a `403` is a perfectly good
-outcome. What the test requires is the *shape* of the answer ADR-0004 item 4
-promises: written, or refused `403` naming the interval — never a write that
-settles nothing, and never some other definite `4xx`, which would be OpenRouter
-objecting to the request rather than to the account's plan. Either way the rest
-of the same action has to land. When the budget is
+outcome; **on the account this suite has been run against, the `PUT` was
+accepted** and the workspace's `monthly` budget was written. What the test
+requires is the *shape* of the answer ADR-0004 item 4 promises: written, or
+refused `403` naming the interval — never a write that settles nothing, and
+never some other definite `4xx`, which would be OpenRouter objecting to the
+request rather than to the account's plan. Either way the rest of the same
+action has to land. When the budget is
 refused the test drops the `budgets` table before it goes on, because that is
 the only way a refused budget converges and everything after it is placed in
 that workspace — which the planner holds back while a configured budget has not
-converged. The refusal is printed, so a run says which kind of account it met.
+converged. The outcome is printed, so a run says which kind of account it met.
 
 **The webhook URL is `https://example.invalid/<run>/…`.** `.invalid` is
 reserved precisely so that a name in it can never resolve, which is what makes
@@ -226,6 +228,8 @@ the test. The suite also compiles on every build, and
 Some of what the newer scenarios assert is predicted rather than observed. The
 read side of workspaces and analytics was checked by hand against a real
 organization — `GET /workspaces`, `GET /workspaces/{id}/budgets`, and the
-`/analytics/meta` vocabulary — but **no budget `PUT`, no log destination, and no
-workspace create or delete has ever been sent** from this repository. Those are
-the assertions most likely to move on a first run.
+`/analytics/meta` vocabulary. A workspace create and one budget `PUT` have since
+been sent against a real organization, and **both were accepted**: budgets are
+documented as Enterprise, and they were accepted on the tested account. **No log
+destination request of any kind has ever been sent** from this repository, so
+those are the assertions most likely to move on a first run.

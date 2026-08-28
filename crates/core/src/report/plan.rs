@@ -790,7 +790,7 @@ fn unfinished(operation: &str, phase: &str, phase_at: &str) -> String {
 fn unmaterialized(workspace: &str) -> String {
     format!(
         "this is {workspace}'s default guardrail, which OpenRouter materializes the first time \
-         its configuration is written; apply writes it to the identity the workspace already names"
+         its configuration is written; apply writes it to the identity that workspace names"
     )
 }
 

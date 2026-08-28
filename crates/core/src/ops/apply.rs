@@ -687,12 +687,7 @@ impl Apply<'_> {
                 .any(|binding| binding.default_guardrail_id.as_ref() == Some(&id))
                 .then_some(id),
             None => {
-                let workspace = self
-                    .config
-                    .workspaces
-                    .iter()
-                    .find(|(_, workspace)| workspace.default_guardrail.as_ref() == Some(address))
-                    .map(|(address, _)| address)?;
+                let workspace = plan::workspace_defaulting_to(self.config, address)?;
                 state.workspace(workspace)?.default_guardrail_id.clone()
             }
         }
@@ -728,10 +723,11 @@ impl Apply<'_> {
     /// The workspace a created guardrail is placed in: the one its block names,
     /// or this run's scope.
     ///
-    /// A block naming a workspace nothing binds yet resolves to nothing, and
-    /// falls back to the scope like a block that names none — which is
-    /// unreachable, because the planner holds such a create back until the
-    /// binding exists (ADR-0004, item 2).
+    /// Resolved from `state` at execution time, not from the plan: a workspace
+    /// this same apply created a phase ago is bound by now, so a block naming
+    /// it lands where the configuration says (ADR-0004, item 2). A block naming
+    /// a workspace nothing binds still falls back to the scope like a block
+    /// that names none, and the planner holds such a create back.
     fn placement(&self, desired: &crate::config::Guardrail, state: &State) -> Option<Uuid> {
         plan::guardrail_placement(state, desired)
             .identity()
@@ -1049,7 +1045,8 @@ impl Apply<'_> {
         // identity from the moment its workspace does, and OpenRouter
         // materializes it the first time its configuration is written — so the
         // create the planner proposed is one `PATCH` to an identity state
-        // already binds (ADR-0004, item 3).
+        // already binds, including one the workspace phase of this very apply
+        // recorded a moment ago (ADR-0004, item 3).
         if let Some(id) = self.workspace_default(address, state) {
             self.writer
                 .update_guardrail(&id, &GuardrailBody::create(desired, None))
@@ -1058,6 +1055,20 @@ impl Apply<'_> {
             return Ok(ActionOutcome::applied(format!(
                 "materialized guardrail {id}, the default guardrail of the workspace that names \
                  it, by writing its configuration for the first time"
+            )));
+        }
+
+        // Still a workspace's default, but with no identity to write to: the
+        // workspace object is the only thing that can supply one, and the
+        // create response carried none. A `POST` here would put a second
+        // guardrail beside the default that governs the workspace anyway, so
+        // this run writes nothing and the next reads the identity off the
+        // workspace listing (ADR-0004, item 3).
+        if let Some(workspace) = plan::workspace_defaulting_to(self.config, address) {
+            return Ok(ActionOutcome::held_back(format!(
+                "held back: the workspace `{workspace}` has not told this run the identity of its \
+                 default guardrail, and that guardrail is never created by `POST`. The next run \
+                 reads the identity from the workspace listing and materializes it."
             )));
         }
 

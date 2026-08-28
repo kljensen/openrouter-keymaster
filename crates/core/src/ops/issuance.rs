@@ -239,9 +239,10 @@ impl Issuer<'_> {
             generation: next_generation(address, state, desired)?,
             // The block's own workspace first — a raw UUID, or the identity a
             // `workspace` address is bound to — and this run's scope only when
-            // it names none. A block naming an unbound workspace resolves to
-            // nothing here, which the planner has already held this create back
-            // for (ADR-0004, item 2).
+            // it names none. Read from `state` rather than from the plan, so a
+            // workspace this same apply created a phase ago places the key it
+            // holds: the workspace phase records the binding before anything
+            // else runs (ADR-0004, item 2).
             workspace: plan::key_placement(state, desired)
                 .identity()
                 .cloned()

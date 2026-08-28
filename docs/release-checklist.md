@@ -113,14 +113,17 @@ gained four scenarios — a workspace end to end, a `caller` receiver driven
 through `ops`, a `webhook` log destination, and a `spend` report — and its sweep
 now deletes the destinations and workspaces a run creates.
 
-**What is unverified is larger than it was.** These reads were checked by hand
-against a real organization while the work was being done: `GET /workspaces`,
-`GET /workspaces/{id}/budgets`, and the `/analytics/meta` vocabulary. **No
-budget `PUT`, no workspace create or delete, and no log destination request of
-any kind has ever been sent** from this repository, and the behavior of those
-endpoints is asserted from OpenRouter's documentation alone. The webhook
-scenario points at an unreachable `https://example.invalid/…` URL, and whether
-the API accepts one at create time is itself an open question.
+**What is unverified is smaller than it was, and still real.** These reads were
+checked by hand against a real organization while the work was being done: `GET
+/workspaces`, `GET /workspaces/{id}/budgets`, and the `/analytics/meta`
+vocabulary. A workspace create and one budget `PUT` have since been sent against
+a real organization and **both were accepted**: budgets are documented as
+Enterprise, and they were accepted on the tested account. **No workspace delete
+and no log destination request of any kind has ever been sent** from this
+repository, and the behavior of those endpoints is asserted from OpenRouter's
+documentation alone. The webhook scenario points at an unreachable
+`https://example.invalid/…` URL, and whether the API accepts one at create time
+is itself an open question.
 [`docs/live-tests.md`](live-tests.md) says what the first run needs, what it is
 likely to find, and how to clean up after it.
 

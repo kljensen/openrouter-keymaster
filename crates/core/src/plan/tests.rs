@@ -1763,22 +1763,78 @@ workspace = "club"
 "#;
 
 #[test]
-fn an_unconfigured_workspace_is_created_and_everything_in_it_waits_for_the_binding() {
+fn everything_in_a_workspace_this_plan_creates_depends_on_it_rather_than_waiting() {
     let world = World::new();
     let plan = world.plan(CLUB);
 
     let workspace = action_at(&plan, "workspaces.club");
     assert_eq!(workspace.kind, ActionKind::Create);
+    assert!(workspace.is_executable(false));
+
+    // An unbound workspace is not a blocker when this run creates it: apply
+    // records the identity in the workspace phase, and the phases after it read
+    // their placement from state. The dependency is what orders them, exactly
+    // as a key create depending on a guardrail create is ordered (ADR-0004,
+    // item 2).
+    let club = ResourceAddress::Workspace(address("club"));
+    for at in ["guardrails.house", "keys.jobfeed"] {
+        let action = action_at(&plan, at);
+        assert_eq!(action.kind, ActionKind::Create, "{at}");
+        assert!(
+            !action.is_blocked(),
+            "{at} is not held back by a workspace this plan creates: {:?}",
+            action.rationale
+        );
+        assert!(action.is_executable(false), "{at}");
+        assert!(
+            action.depends_on.contains(&club),
+            "{at} depends on the workspace: {:?}",
+            action.depends_on
+        );
+    }
+
+    // The default guardrail is still a create by `PATCH` to the identity its
+    // workspace will name, not a `POST` (ADR-0004, item 3).
     assert!(
-        workspace.is_executable(false),
-        "the workspace itself is the one thing this run can do"
+        action_at(&plan, "guardrails.house")
+            .rationale
+            .iter()
+            .any(|reason| matches!(
+                reason,
+                Reason::DefaultGuardrailUnmaterialized {
+                    workspace: ResourceAddress::Workspace(_)
+                }
+            )),
+        "{:?}",
+        action_at(&plan, "guardrails.house").rationale
     );
 
-    // Both of its inhabitants name it, and neither can be created before the
-    // create above has run and been recorded (ADR-0004, item 2).
+    let ordered: Vec<String> = plan
+        .executable()
+        .map(|action| action.address.to_string())
+        .collect();
+    assert_eq!(
+        ordered,
+        vec!["workspaces.club", "guardrails.house", "keys.jobfeed"],
+        "the workspace is created before what it holds"
+    );
+}
+
+#[test]
+fn a_workspace_waiting_on_an_adoption_still_holds_everything_in_it_back() {
+    let mut world = World::new();
+    // A remote workspace carries the configured name and nothing binds it, so
+    // an operator has to `import` it. Nothing in this run will give the block
+    // an identity, so nothing in it may be created (ADR-0004, item 2).
+    world.observe_workspace(CLUB_ID, "Golf Club", "golf-club");
+
+    let plan = world.plan(CLUB);
+    assert_eq!(
+        action_at(&plan, "workspaces.club").kind,
+        ActionKind::AdoptionRequired
+    );
     for address in ["guardrails.house", "keys.jobfeed"] {
         let action = action_at(&plan, address);
-        assert_eq!(action.kind, ActionKind::Create, "{address}");
         assert!(action.is_blocked(), "{address} must wait for the workspace");
         assert!(
             action.rationale.iter().any(|reason| matches!(
@@ -2462,7 +2518,7 @@ fn an_immutable_field_is_held_back_naming_the_field_and_writes_nothing() {
 }
 
 #[test]
-fn a_destination_is_ordered_after_the_workspace_it_waits_on() {
+fn a_destination_is_ordered_after_the_workspace_it_is_placed_in() {
     let plan = World::new().plan(WITH_DESTINATION);
     let ordered: Vec<String> = plan
         .actions()
@@ -2475,10 +2531,14 @@ fn a_destination_is_ordered_after_the_workspace_it_waits_on() {
         "workspaces exist before what is placed in them"
     );
 
+    // The workspace has no identity yet, and this plan creates one: the
+    // destination depends on it and reads its placement from the binding apply
+    // records, rather than being held back (ADR-0004, item 2).
     let destination = at_address(&plan, "log_destinations.audit");
     assert_eq!(destination.kind, ActionKind::Create);
-    assert!(
-        !destination.is_executable(false),
-        "nothing is created in a workspace no binding names yet"
+    assert!(destination.is_executable(false));
+    assert_eq!(
+        destination.depends_on,
+        vec![ResourceAddress::Workspace(address("club"))]
     );
 }

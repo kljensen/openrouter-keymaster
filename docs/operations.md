@@ -176,7 +176,8 @@ are created, and OpenRouter fixes that placement for good.
    that no intermediate state violates OpenRouter's lifetime > monthly > weekly
    > daily rule.
 
-   **Workspace budgets are documented as an Enterprise feature.** If your plan
+   **Workspace budgets are documented as an Enterprise feature**, and were
+   accepted on the account this repository has tested against. If your plan
    refuses them, the refusal is definite and names the interval, and every apply
    reports it again. While a configured budget has not converged, every write in
    that workspace the plan classifies `issuing` or `expanding` is held back — no
@@ -230,8 +231,9 @@ beyond that.
 
 2. **Apply.** The destination is created, its UUID is recorded, `config` is
    written once, and a digest of what was written is recorded with it. A
-   destination whose `workspace` block is not bound yet is held back until it
-   is, exactly as a key would be.
+   destination is created after the `workspace` block it names — in the same
+   apply when this run creates that workspace, and held back while only an
+   operator can bind it — exactly as a key would be.
 
 3. **Change it.** Everything except `type` and the workspace is an ordinary
    patch. `config` travels only when its digest changed, because OpenRouter

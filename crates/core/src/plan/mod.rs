@@ -87,8 +87,10 @@ pub enum Placement {
     /// A workspace this run can address: a raw `workspace_id`, or an address
     /// state binds.
     In(Uuid),
-    /// The block names a workspace block nothing is bound to yet. Every write
-    /// that would depend on the identity is held back until it is.
+    /// The block names a workspace block nothing is bound to yet. The planner
+    /// has no identity to show, so a create in this workspace depends on the
+    /// workspace's own action and resolves its placement from the binding
+    /// apply records; only a workspace this run cannot create holds it back.
     Unbound(Address),
 }
 
@@ -660,10 +662,10 @@ pub enum Reason {
         /// The resource that needs an operator first.
         dependency: ResourceAddress,
     },
-    /// This guardrail is the default of a workspace that exists, and OpenRouter
-    /// has not materialized it yet — it appears in no listing until its
-    /// configuration is first written. The one exception to "bound but absent
-    /// means missing" (ADR-0004, item 3).
+    /// This guardrail is the default of a workspace that exists or that this
+    /// plan creates, and OpenRouter has not materialized it yet — it appears in
+    /// no listing until its configuration is first written. The one exception
+    /// to "bound but absent means missing" (ADR-0004, item 3).
     DefaultGuardrailUnmaterialized {
         /// The workspace whose default guardrail this is.
         workspace: ResourceAddress,
@@ -874,7 +876,7 @@ pub fn plan(config: &Config, state: &State, observed: &Snapshot, workspace: Opti
     plan_orphans(&index, &mut actions);
     plan_unmanaged(&index, &mut actions);
 
-    mark_blocked(&index, &mut actions);
+    mark_blocked(&mut actions);
     hold_back_unbudgeted(&index, &mut actions);
     actions.sort_by(|left, right| ordering_key(left).cmp(&ordering_key(right)));
     Plan { actions }
@@ -942,7 +944,7 @@ fn is_budget_field(change: &FieldChange) -> bool {
 /// key at a time, so while one is unfinished `begin_create` refuses every
 /// other create — and a plan that offered one would be promising a write the
 /// state API would decline.
-fn mark_blocked(index: &Index<'_>, actions: &mut [Action]) {
+fn mark_blocked(actions: &mut [Action]) {
     if let Some(pending) = issuance_blocker(actions) {
         for action in actions.iter_mut() {
             if action.address != pending && issues_credential(action.kind, &action.address) {
@@ -953,22 +955,18 @@ fn mark_blocked(index: &Index<'_>, actions: &mut [Action]) {
         }
     }
 
-    // A configured workspace nothing binds yet is unresolved even though its
-    // own action is an ordinary create: a key or guardrail placed in it needs
-    // an identity that will not exist until the create has run and been
-    // recorded, so this run does not offer to create one (ADR-0004, item 2).
-    let mut unresolved: BTreeSet<ResourceAddress> = index
-        .config
-        .workspaces
-        .keys()
-        .filter(|address| index.state.workspace(address).is_none())
-        .map(|address| ResourceAddress::Workspace(address.clone()))
-        .chain(
-            actions
-                .iter()
-                .filter(|action| action.kind.blocks_dependents() || action.is_blocked())
-                .map(|action| action.address.clone()),
-        )
+    // A workspace nothing binds yet is not a blocker of its own: if this plan
+    // creates it, apply records its identity before the guardrails and keys
+    // inside it run, and those read their placement from state at execution
+    // time — exactly how a key create depending on a guardrail create in the
+    // same plan already works. What holds a dependent back is the state its own
+    // dependency is left in, which its action already says: an adoption, a
+    // resource nobody can find, or a create something else holds back
+    // (ADR-0004, item 2).
+    let mut unresolved: BTreeSet<ResourceAddress> = actions
+        .iter()
+        .filter(|action| action.kind.blocks_dependents() || action.is_blocked())
+        .map(|action| action.address.clone())
         .collect();
 
     // A fixpoint, so the block reaches a dependent's dependents.
@@ -994,18 +992,10 @@ fn mark_blocked(index: &Index<'_>, actions: &mut [Action]) {
         if action.kind.blocks_dependents() {
             continue;
         }
-        // A reason the planner already recorded is not repeated: a default
-        // guardrail names the workspace it waits on when it is planned, and
-        // that workspace is also its dependency.
-        let named = |dependency: &ResourceAddress| {
-            action.rationale.iter().any(|reason| {
-                matches!(reason, Reason::BlockedBy { dependency: named } if named == dependency)
-            })
-        };
         let blockers: Vec<ResourceAddress> = action
             .depends_on
             .iter()
-            .filter(|dependency| unresolved.contains(*dependency) && !named(dependency))
+            .filter(|dependency| unresolved.contains(*dependency))
             .cloned()
             .collect();
         action.rationale.extend(
@@ -1379,8 +1369,9 @@ impl<'a> Index<'a> {
             // A block that names no workspace is created wherever this run is
             // scoped, so a scoped run's budget rule reaches it too.
             Placement::Unspecified => self.workspace.cloned(),
-            // Unbound: nothing is written here at all, and the holdback that
-            // says so is the one about the binding.
+            // Unbound: the workspace has no identity to compare a budget
+            // against yet, and a workspace this run creates has no budget to
+            // have failed.
             Placement::Unbound(_) => None,
         }
     }
@@ -1638,13 +1629,17 @@ fn plan_guardrail(address: &Address, desired: &Guardrail, index: &Index<'_>) -> 
     let Some(id) = id else {
         if let Some(workspace) = default_of {
             // A default guardrail is never `POST`ed. Its identity is the one
-            // its workspace names, and until state binds that workspace this
-            // run does not know it (ADR-0004, item 3).
+            // its workspace names, and nothing here knows it yet — so this is
+            // the same create-by-`PATCH` as any other unmaterialized default
+            // guardrail, addressed to the identity the workspace binding will
+            // carry by the time the guardrail phase runs (ADR-0004, item 3).
+            // Whether that binding will exist is the workspace's action to
+            // say, and `mark_blocked` reads it from the dependency below.
             return Proposal {
                 changes: diff::guardrail_changes(desired, None),
                 depends_on,
-                rationale: vec![Reason::BlockedBy {
-                    dependency: ResourceAddress::Workspace(workspace.clone()),
+                rationale: vec![Reason::DefaultGuardrailUnmaterialized {
+                    workspace: ResourceAddress::Workspace(workspace.clone()),
                 }],
                 ..Proposal::default()
             }
@@ -1867,8 +1862,9 @@ fn plan_unbound_guardrail(
 /// The workspace block a resource names, as a dependency.
 ///
 /// A workspace is fixed at creation on both a key and a guardrail, so a create
-/// cannot run before the workspace has an identity — which is what makes an
-/// unbound workspace hold its contents back (ADR-0004, item 2).
+/// cannot run before the workspace has an identity. When this plan creates the
+/// workspace, that is an ordering constraint apply already honours; when it
+/// cannot, the dependency is what holds the contents back (ADR-0004, item 2).
 fn workspace_dependency(workspace: Option<&Address>) -> Vec<ResourceAddress> {
     workspace
         .map(|address| vec![ResourceAddress::Workspace(address.clone())])

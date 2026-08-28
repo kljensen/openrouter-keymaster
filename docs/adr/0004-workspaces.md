@@ -171,9 +171,21 @@ what is still unverified.
   destination, and a bound workspace that vanished is reported rather than
   recreated.
 - **Workspace by local address, and the ordering** (item 2) —
-  `crates/core/src/plan/mod.rs` orders workspaces before guardrails before keys
-  and holds back a block whose workspace is not bound
-  (`a_key_naming_an_unbound_workspace_is_held_back_until_the_binding_exists`).
+  `crates/core/src/plan/mod.rs` orders workspaces before guardrails before keys,
+  and `mark_blocked` holds back a block whose workspace is not bound.
+  *Refined on 2026-08-28, after the first live run.* "Not yet bound" is read as
+  the state the workspace's own action leaves it in, rather than as the absence
+  of a binding at plan time: when this plan creates the workspace, its contents
+  depend on that create and run after it, resolving their placement from the
+  binding apply records before anything else — the same shape as a key create
+  depending on a guardrail create in the same plan. A workspace only an operator
+  can bind — an adoption, one nobody can find — still holds everything in it
+  back. Without this a fresh configuration needed two applies to converge, which
+  the decision never intended. Covered by
+  `everything_in_a_workspace_this_plan_creates_depends_on_it_rather_than_waiting`,
+  `a_workspace_waiting_on_an_adoption_still_holds_everything_in_it_back`,
+  `a_bound_workspace_that_is_gone_is_missing_rather_than_recreated`, and
+  `a_workspace_its_default_guardrail_and_a_key_all_converge_in_one_apply`.
   A guardrail OpenRouter has in another workspace is held back rather than
   patched, and `import guardrail` refuses it
   (`importing_a_guardrail_from_another_workspace_binds_nothing`).
@@ -207,7 +219,11 @@ what is still unverified.
 What no local check can reach is whether the real API behaves this way. The
 opt-in `live_workspace_create_budget_default_guardrail_and_scoped_key` in
 `crates/cli/tests/live.rs` covers the create, the default guardrail, one budget
-`PUT`, the update, a scoped key, and the import — and **it has not been run**.
-The reads behind this decision were checked by hand against a real organization;
-no budget `PUT` and no workspace create or delete has ever been sent. See
-[`docs/live-tests.md`](../live-tests.md).
+`PUT`, the update, a scoped key, and the import.
+
+*Updated 2026-08-28.* It has now been run against a real organization. The
+workspace create and the budget `PUT` were both accepted: budgets are documented
+as Enterprise, and they were accepted on the tested account, so item 4's
+holdback path is still asserted from the documentation rather than observed. No
+workspace delete has been sent. The same run found the two-apply behavior
+corrected under item 2 above. See [`docs/live-tests.md`](../live-tests.md).

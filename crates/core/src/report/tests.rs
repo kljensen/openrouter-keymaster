@@ -1164,6 +1164,57 @@ fn an_apply_that_wrote_nothing_because_a_write_is_blocked_is_held_back() {
 }
 
 #[test]
+fn a_held_back_warning_agrees_with_the_number_it_counts() {
+    // The count and the verb have to agree: "2 planned write wass held back"
+    // is what a plural `s` glued onto a whole phrase produces.
+    let world = wide_world();
+    let plan = compute(&config(WIDE), &world.state, &world.snapshot);
+    let held = |count: usize| {
+        let outcomes: Vec<ActionOutcome> = plan
+            .actions()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                if index < count {
+                    ActionOutcome::held_back("held back: waiting on guardrails.cheap")
+                } else {
+                    ActionOutcome::reported()
+                }
+            })
+            .collect();
+        ApplyReport::new(&plan, &outcomes, None)
+    };
+
+    let one = held(1);
+    assert!(
+        one.warnings().iter().any(|warning| warning.starts_with(
+            "1 planned write was held back until an operator \
+                                                resolves what blocks it:"
+        )),
+        "{:?}",
+        one.warnings()
+    );
+    assert!(
+        one.to_string().contains("and 1 planned write is waiting"),
+        "{one}"
+    );
+
+    let two = held(2);
+    assert!(
+        two.warnings().iter().any(|warning| warning.starts_with(
+            "2 planned writes were held back until an operator \
+                                                resolves what blocks them:"
+        )),
+        "{:?}",
+        two.warnings()
+    );
+    assert!(
+        two.to_string().contains("and 2 planned writes are waiting"),
+        "{two}"
+    );
+}
+
+#[test]
 fn an_apply_that_could_not_verify_says_so() {
     let world = wide_world();
     let plan = compute(&config(WIDE), &world.state, &world.snapshot);

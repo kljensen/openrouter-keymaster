@@ -16,7 +16,7 @@ use std::fmt;
 use serde::Serialize;
 use time::OffsetDateTime;
 
-use super::{plural, scrubbed, timestamp};
+use super::{counted, scrubbed, timestamp};
 use crate::api::ObservedKey;
 use crate::ids::{Address, KeyHash};
 use crate::state::{PendingOperation, Phase, RetainedStatus};
@@ -286,7 +286,7 @@ fn candidate_warnings(phase: Phase, candidates: usize) -> Vec<String> {
     vec![format!(
         "{} listed as a candidate, not as a match; a display name is mutable and not unique, and \
          a creation time near the attempt proves nothing. Keymaster will not choose one.",
-        plural(candidates, "remote key is")
+        counted(candidates, "remote key is", "remote keys are")
     )]
 }
 

@@ -6,7 +6,7 @@ use std::fmt;
 use serde::Serialize;
 
 use super::plan::{ChangeReport, ExpansionReport, ReasonReport};
-use super::plural;
+use super::{counted, plural};
 use crate::plan::{Action, Identity, Plan};
 
 /// What happened to one planned action.
@@ -363,13 +363,13 @@ impl ApplyReport {
             warnings.push(format!(
                 "{} not made; `openrouter-keymaster apply` does not replace an inference key yet, \
                  so the configuration is not fully converged",
-                plural(self.skipped, "planned write was")
+                counted(self.skipped, "planned write was", "planned writes were")
             ));
         }
         if self.held_back > 0 {
             warnings.push(format!(
                 "{} held back until an operator resolves what blocks {them}: {addresses}",
-                plural(self.held_back, "planned write was"),
+                counted(self.held_back, "planned write was", "planned writes were"),
                 them = if self.held_back == 1 { "it" } else { "them" },
                 addresses = self.held_back_addresses().join(", "),
             ));
@@ -380,7 +380,11 @@ impl ApplyReport {
         if self.unverified > 0 {
             warnings.push(format!(
                 "{} not confirmed by the read that followed",
-                plural(self.unverified, "attempted write was")
+                counted(
+                    self.unverified,
+                    "attempted write was",
+                    "attempted writes were"
+                )
             ));
         }
         if let Some(failure) = &self.verification_failure {
@@ -389,7 +393,11 @@ impl ApplyReport {
         if self.expansions_occurred > 0 {
             warnings.push(format!(
                 "{} what a credential may do",
-                plural(self.expansions_occurred, "action widened")
+                counted(
+                    self.expansions_occurred,
+                    "action widened",
+                    "actions widened"
+                )
             ));
         }
         if self.expansions_unconfirmed > 0 {
@@ -400,7 +408,11 @@ impl ApplyReport {
                 "{} what a credential may do and was NOT confirmed by the read that followed; \
                  it may have taken effect, so check {resource} before assuming it did not: \
                  {addresses}",
-                plural(self.expansions_unconfirmed, "attempted write would widen"),
+                counted(
+                    self.expansions_unconfirmed,
+                    "attempted write would widen",
+                    "attempted writes would widen",
+                ),
                 resource = if self.expansions_unconfirmed == 1 {
                     "the resource"
                 } else {
@@ -503,15 +515,19 @@ impl ApplyReport {
                 "held back: applied {applied}, and {held} waiting on something an operator has \
                  to resolve; the configuration is not fully converged.",
                 applied = plural(self.applied, "change"),
-                held = plural(self.held_back, "planned write is"),
+                held = counted(self.held_back, "planned write is", "planned writes are"),
             ),
             Outcome::HeldBack => "held back: nothing was applied, and work remains that an \
                                   operator has to resolve first."
                 .to_owned(),
             Outcome::Failed => format!(
                 "incomplete: {failed} and {unverified}.",
-                failed = plural(self.failed, "write failed"),
-                unverified = plural(self.unverified, "attempted write is unverified"),
+                failed = counted(self.failed, "write failed", "writes failed"),
+                unverified = counted(
+                    self.unverified,
+                    "attempted write is unverified",
+                    "attempted writes are unverified",
+                ),
             ),
         }
     }
