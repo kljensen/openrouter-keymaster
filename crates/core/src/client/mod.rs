@@ -14,6 +14,15 @@
 //! disallowed list so a client without those cannot appear elsewhere by
 //! accident.
 //!
+//! **Ambient configuration cannot redirect a credential.** Proxies are disabled
+//! outright, because `reqwest` otherwise honours `HTTP_PROXY`, `HTTPS_PROXY`,
+//! and `ALL_PROXY`, and a proxy named there terminates TLS to inspect what
+//! passes through it — the `Authorization` header included. Where a request
+//! goes is decided by a parser rather than a prefix check: a base URL is
+//! validated with the same URL parser that will resolve the request, and
+//! refused unless it is already written the way it will be requested, because
+//! `https:///api` looks absolute and silently resolves to the host `api`.
+//!
 //! **Retries are a property of the operation, not of the transport.**
 //! [`Client::get_json`] retries a bounded number of times on a connection
 //! failure, a body that stops partway through, a 429, or one of a few 5xx
@@ -33,7 +42,11 @@
 //! **Nothing that leaves here carries a credential or a `reqwest` type.** The
 //! management key is handed in by the caller, is held as a [`ManagementKey`]
 //! that cannot be serialized or printed, and reaches the wire as a header
-//! marked sensitive. Errors are [`ApiError`], whose text has been redacted.
+//! marked sensitive. Errors are [`ApiError`], whose text has been redacted. A
+//! status that is definitive on its own — a redirect or a rejection — keeps its
+//! status even when the body underneath it cannot be read, so a create refused
+//! with a 400 stays a refusal rather than becoming an ambiguous failure that
+//! sends an operator to `recover`.
 //!
 //! Nothing here reads the environment. Where the credential and the endpoint
 //! come from is the caller's to decide; the binary reads them in its own

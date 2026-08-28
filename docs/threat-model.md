@@ -51,17 +51,27 @@ Note that Keymaster cannot run unattended anyway — an ambiguous operation stop
 and waits for a person — so a unit like this belongs on a `systemd` timer only
 if someone reads its result.
 
-`plan`, `status`, `apply`, `import`, `rotate`, `retire`, `decommission`,
-`delete key`, and some
-`recover` invocations need it. `state forget` and an inspection of an operation
-whose hash is already on disk do not, and will run without it.
+Every command that reaches OpenRouter needs it, which is every command but two.
+`state forget` makes no request at all. `recover inspect` makes none once the
+journal records a hash — every fact in its report is already on disk — and an
+inspect that does have to search for candidate keys reports
+`missing_credential` rather than guessing.
 
-Two other variables matter. `OPENROUTER_BASE_URL` names the API root; unset or
-empty means production. It exists so a binary can be pointed at the local test
-harness or a gateway the operator names deliberately. A value that is present
-but unusable stops the run, because quietly falling back to production would
-send the credential somewhere nobody chose. `KEYMASTER_STATE_FAULT` exists only
-in a build with the `fault-injection` feature, which is never a release build.
+`OPENROUTER_BASE_URL` names the API root, which is
+`https://openrouter.ai/api/v1` otherwise; unset or empty means production. It is
+not a credential, and it is validated like any other base URL: absolute, HTTP or
+HTTPS, with no trailing slash and no query. It exists so a binary can be pointed
+at the local test harness, or at a gateway the operator names deliberately
+rather than having ambient proxy settings redirect a credential. A value that is
+present but unusable — not valid Unicode, or not a base URL — stops the run,
+because quietly falling back to production would send the credential somewhere
+nobody chose.
+
+Every other environment variable Keymaster reads uses the short name as its
+prefix, and none of them is a credential: `KEYMASTER_LIVE_TESTS` and
+`KEYMASTER_LIVE_SWEEP` gate the live acceptance suite
+([`live-tests.md`](live-tests.md)), and `KEYMASTER_STATE_FAULT` exists only in a
+build with the `fault-injection` feature, which is never a release build.
 
 ## What Keymaster protects against
 

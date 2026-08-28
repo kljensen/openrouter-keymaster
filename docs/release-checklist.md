@@ -212,12 +212,12 @@ done
 ```
 
 **Expected:** every command in
-[the README's command list](../README.md#commands) appears, spelled the same
+[the command list](commands.md#the-command-tree) appears, spelled the same
 way; the four global options are `--config`, `--state`, `--workspace`, and
 `--json`; there is **no** option for the management credential.
 
 Reviewed on this commit. The tree is eleven commands; `import` and `delete`
-carry the four and three resource subcommands the README lists, spelled
+carry the four and three resource subcommands the reference lists, spelled
 `log-destination` in both. The surface itself, and the rules for changing it,
 are written down in
 [`docs/compatibility.md`](compatibility.md#compatibility-surfaces): the command
@@ -233,7 +233,7 @@ cargo tree --workspace --depth 1
 
 **Expected:** `cargo deny` passes, which item 3 ran online on this commit. Every
 direct dependency is justified in a comment in the crate's `Cargo.toml`, and the
-policy is [in the README](../README.md#dependency-policy): committed
+policy is [in `CONTRIBUTING.md`](../CONTRIBUTING.md#dependency-policy): committed
 `Cargo.lock`, `--locked` everywhere, an allow-list of permissive licenses, no
 wildcard requirements, crates.io as the only source. No dependency was added in
 this milestone.

@@ -79,20 +79,22 @@ Converge OpenRouter with the desired configuration.
 Apply takes the exclusive state lock, reloads the configuration and state under \
 it, reads a complete snapshot of OpenRouter, and computes the plan again — so \
 what runs is never the plan an earlier `openrouter-keymaster plan` printed. It then \
-executes that plan in three fixed phases: guardrail creates and updates, \
-updates to keys that already exist, and assignment changes. A created \
-guardrail's UUID is recorded before anything else happens. Finally it reads \
+executes that plan in five fixed phases: workspaces, log destinations, \
+guardrails, keys, then assignments — dependencies before dependents. A created \
+resource's identity is recorded before anything else happens. Finally it reads \
 OpenRouter again and reports, per action, whether the result was verified.
 
 Every write is sent exactly once. A write whose outcome is unknown is never \
 repeated; the read that follows says whether it took effect.
 
 A planned key creation runs the journaled transaction of ADR-0002: one durable \
-journal entry before and after every non-idempotent step, exactly one \
-`POST /keys` with retries disabled, restrictions and the guardrail applied and \
-verified before the plaintext goes anywhere, and the configured receiver \
-invoked exactly once. Any outcome other than a delivered key stops the whole \
-run and is resolved with `openrouter-keymaster recover`, never by trying again.
+journal entry before and after every non-idempotent step, at most one \
+`POST /keys` per journaled attempt with retries disabled, restrictions and the \
+guardrail applied and verified before the plaintext goes anywhere, and the \
+configured receiver invoked at most once. An ambiguous outcome stops the whole \
+run and is never retried automatically; it is resolved with \
+`openrouter-keymaster recover`. A definite failure before the key exists \
+clears the attempt, so a later run plans an ordinary create.
 
 A planned replacement — a raised generation, a moved receiver, a changed \
 immutable field — runs that same transaction. The key the address already holds \

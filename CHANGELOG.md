@@ -7,7 +7,15 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- Documentation restructured. The README is a short front door — what Keymaster
+  is, install, quick start, safety and operating limits, the command families,
+  the library, an index, and development — and the reference material it used to
+  carry moved to pages of its own: `docs/commands.md` for the full command
+  reference, `docs/library.md` for calling `ops` from Rust, and `CONTRIBUTING.md`
+  for the checks, the test harness, and the lint and dependency policies. No
+  behavior changed.
 
 ## [0.4.0] - 2026-08-28
 

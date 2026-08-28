@@ -1,8 +1,8 @@
 # Runbooks
 
-Ordered procedures for the things an operator does. The
-[README](../README.md) explains why each command behaves the way it does; this
-page is what to type, in what order, and what to check afterwards.
+Ordered procedures for the things an operator does.
+[`commands.md`](commands.md) says what each command does; this page is what to
+type, in what order, and what to check afterwards.
 
 Every procedure assumes `OPENROUTER_MANAGEMENT_KEY` is exported for the
 organization you mean to change. See
@@ -179,9 +179,13 @@ are created, and OpenRouter fixes that placement for good.
    ```
 
    The table is the complete desired set: an interval OpenRouter has and the
-   table does not is removed. Apply writes one request per interval, ordered so
-   that no intermediate state violates OpenRouter's lifetime > monthly > weekly
-   > daily rule.
+   table does not is removed. Apply writes one request per interval — a `PUT`
+   for each configured one, a `DELETE` for each removed one — ordered deletes
+   first, then increases from the widest interval to the narrowest, then
+   decreases from the narrowest to the widest, so that no intermediate state
+   violates OpenRouter's lifetime > monthly > weekly > daily rule. That rule is
+   checked offline too, so a table that could never be applied is refused before
+   anything is sent.
 
    **Workspace budgets are documented as an Enterprise feature**, and were
    accepted on the account this repository has tested against. If your plan
@@ -411,9 +415,10 @@ a rotation that began the journaled transaction leaves an operation behind, and
 
   Its last line names the one command for that phase — that is the mechanism,
   and it is better than guessing from a table. In practice: an ambiguous create
-  needs `recover resolve` and then `recover replace`; a create that succeeded
-  but whose delivery did not needs `recover replace`; and `delivered` needs no
-  operator at all, because only a local promotion is left and the next
+  needs `recover resolve`, which closes the operation, after which an ordinary
+  `plan`/`apply` picks it back up; a create that succeeded but whose delivery
+  did not needs `recover replace`; and `delivered` needs no operator at all,
+  because only a local promotion is left and the next
   `openrouter-keymaster apply` records it.
 
 Either way Keymaster neither disabled nor deleted the predecessor.
@@ -536,7 +541,7 @@ no API call at all, so it works with no credential.
 
 | Phase | What is true | What to do |
 | --- | --- | --- |
-| `create_started`, `create_ambiguous` | A key may or may not exist. Nobody knows. | [Resolve the ambiguity](#3-resolve-a-create-ambiguity), then replace. |
+| `create_started`, `create_ambiguous` | A key may or may not exist. Nobody knows. | [Resolve the ambiguity](#3-resolve-a-create-ambiguity), then run `plan`/`apply` again. |
 | `created`, `secured` | The key exists and its plaintext is gone for good. | [Replace it](#4-replace). |
 | `delivery_started`, `delivery_ambiguous` | The receiver may or may not have committed. The plaintext is gone either way. | [Replace it](#4-replace). |
 | `delivered` | The transaction finished; only the local promotion is outstanding. | Run `openrouter-keymaster apply`. It completes the promotion under its own lock and says so. |
@@ -592,8 +597,8 @@ first — and from `delivered`, which the next `apply` finishes by itself.
 
 There is deliberately no `resolve --delivered`. ADR-0002 permits resolving a
 lost acknowledgement as delivered only through a receiver contract that accepts
-the operation ID and can be asked authoritatively whether it committed, and v0.1
-defines no such contract. So a `delivery_ambiguous` costs a replacement even
+the operation ID and can be asked authoritatively whether it committed, and no
+such contract is defined. So a `delivery_ambiguous` costs a replacement even
 when the original delivery in fact succeeded. Replace the key, then clean up
 whatever the receiver's destination now holds.
 
@@ -671,8 +676,16 @@ it is safe to run against a directory whose configuration is mid-edit.
 
 ## Looking after state
 
-State lives in `.openrouter-keymaster/state.json` unless `--state` says
-otherwise, in a `0700` directory as a `0600` file.
+State lives in `.openrouter-keymaster/state.json` (git-ignored) unless `--state`
+says otherwise, in a `0700` directory as a `0600` file. It records which
+immutable remote identity — a key hash, a guardrail, workspace, or destination
+UUID — each local address owns, where that binding came from, and which
+lifecycle transitions an interrupted run left incomplete. It holds no observed
+policy and no usage: those are read fresh from OpenRouter every run.
+
+Writes are atomic. State is written to a sibling temporary file, fsynced, and
+renamed into place, so an interrupted write leaves the previous file intact
+rather than a truncated one.
 
 **Back it up.** This is the one operational duty Keymaster puts on you. State
 binds each local address to an immutable remote identity, and a display name
@@ -779,8 +792,8 @@ pgrep -f 'openrouter-keymaster' || rm .openrouter-keymaster/state.json.lock
 ```
 
 The lock is a local file. It does not coordinate two machines — nothing stops
-two operators applying against the same organization at once, and v0.1 does not
-try to ([ADR-0001](adr/0001-native-reconciliation.md)). If more than one person
+two operators applying against the same organization at once, and Keymaster does
+not try to ([ADR-0001](adr/0001-native-reconciliation.md)). If more than one person
 runs Keymaster, run it from one place.
 
 **Do not edit it by hand.** State carries a schema version and a serial, and
