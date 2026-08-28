@@ -11,9 +11,9 @@ Read this page before running it.
 
 **A dedicated test organization**, with no inference credits and nothing else in
 it. Not a shared organization, and not one that holds a key anything depends on.
-The suite deletes every key, log destination, and workspace whose name carries
-its run prefix, and a bug in that filter is only survivable if there is nothing
-else there to hit.
+The suite deletes every key, guardrail, log destination, and workspace whose
+name carries its run prefix, and a bug in that filter is only survivable if
+there is nothing else there to hit.
 
 **A management credential for that organization** — a key from OpenRouter's
 Management API Keys page — exported as `OPENROUTER_MANAGEMENT_KEY`. The suite never reads it into a test variable; the
@@ -79,10 +79,10 @@ converged. The outcome is printed, so a run says which kind of account it met.
 
 **The webhook URL is `https://example.invalid/<run>/…`.** `.invalid` is
 reserved precisely so that a name in it can never resolve, which is what makes
-the endpoint harmless: nothing is listening and nothing can be. Whether
-OpenRouter accepts an unreachable URL at create time is **unverified** — it is
-one of the things a first live run is there to find out. If it turns out to
-validate reachability, the create fails, and that is a finding about the API
+the endpoint harmless: nothing is listening and nothing can be. **OpenRouter
+accepts it**: the passing runs of 2026-08-28 created, updated, and deleted a
+destination pointing there, so the API does not validate reachability at create
+time. If that ever changes the create fails, which is a finding about the API
 rather than a bug in the test: replace the URL with a documented harmless echo
 endpoint you control and say so here.
 
@@ -141,17 +141,18 @@ adopts and sweeps by listing every workspace it created as well as the default
 one. A key created in a workspace is in that workspace's listing and in no
 other, and a sweep that read only the unscoped listing would leave it behind.
 
-**Cleanup in dependency order.** Log destinations first, then keys, then each
-workspace's own default guardrail, then workspaces. A destination is what watches the keys, so it goes before them: the
+**Cleanup in dependency order.** Log destinations first, then keys, then the
+guardrails the run created, then each workspace's own default guardrail, then
+workspaces. A destination is what watches the keys, so it goes before them: the
 run stops forwarding before it starts churning what was being forwarded, rather
 than aiming a burst of log traffic at an endpoint that deliberately cannot
 answer. OpenRouter refuses to delete a workspace that still holds anything, so a
 workspace goes last and only once its occupants are gone. A workspace's own
-default guardrail is not an occupant: it goes with the workspace, so it is not
-reported as something to remove by hand. Whether it can be deleted on its own is
-a question the sweep asks once per run — one `DELETE` per default guardrail,
-where a `400` or a `403` is the expected answer — and journals, because the
-answer is the API's to give and nothing in Keymaster depends on it.
+default guardrail is not an occupant: it goes with the workspace. Whether it can
+be deleted on its own is a question the sweep asks once per run — one `DELETE`
+per default guardrail, where a `400` or a `403` is the expected answer — and
+journals, because the answer is the API's to give and nothing in Keymaster
+depends on it.
 
 **No response bodies in cleanup output.** A failure is reported as an identity
 and an error kind. A body from a failed cleanup call is exactly where a stray
@@ -168,8 +169,8 @@ ls target/live-runs                    # each file is named for a run prefix
 just live-sweep km-live-1a2b3c4d
 ```
 
-The sweep deletes every key, log destination, and workspace whose name carries
-that prefix, and verifies each deletion by reading the identity back. It also
+The sweep deletes every key, guardrail, log destination, and workspace whose
+name carries that prefix, and verifies each deletion by reading the identity back. It also
 reads the named run's journal, so a resource the run recorded is cleaned up even
 if the listing cannot reach it, and it writes its own records to a new journal
 rather than overwriting the evidence.
@@ -198,17 +199,20 @@ A journal with no endpoint line predates this check and is refused the same way;
 set `OPENROUTER_BASE_URL` explicitly to the endpoint that run used. A missing
 journal is refused too — without one the sweep cannot know the endpoint.
 
-**Guardrails are reported, not deleted.** Nothing in Keymaster deletes a
-guardrail: config removal is deliberately not authority to destroy one, so the
-client has no delete for it. A guardrail spends nothing, so leaving one behind
-is safe, but a test organization will accumulate them. The sweep prints each
-one's UUID and name; remove them in the OpenRouter dashboard. The exception is a
-workspace's default guardrail, which is deleted with its workspace and is
-therefore not reported.
+**Guardrails are deleted by the suite, not by Keymaster.** No Keymaster
+operation deletes a guardrail: removing a block from a configuration is
+deliberately not authority to destroy one, and there is no `delete guardrail` on
+the command line. That is a rule about the tool, not about a test organization,
+which would otherwise collect four guardrails per run forever. So the sweep uses
+`Writer::delete_guardrail_for_tests`, a `DELETE /guardrails/{id}` that lives
+behind the `test-support` feature and that no operation calls, and it verifies
+each deletion by reading the guardrail back until OpenRouter answers 404 like
+every other resource. `crates/core/tests/lints.rs` and `crates/cli/tests/cli.rs`
+assert that the delete stays out of `ops` and out of the CLI.
 
-**A workspace or destination left behind is a failure, not a notice.**
-Keymaster can delete both, and the run created them, so anything still there
-after the sweep fails the run and is named by UUID with what to do about it. A
+**Anything left behind is a failure.** Key, guardrail, log destination, or
+workspace — the run created it and the sweep can delete it, so anything still
+there afterwards fails the run and is named by UUID with what to do about it. A
 workspace that refuses deletion is usually one that still holds something the
 sweep could not remove; empty it and delete it by ID.
 
@@ -224,21 +228,25 @@ so it can never mask the failure that caused it.
 
 ## Status
 
-The suite has been run against a live organization once, and **has not yet
-passed**; see [the release checklist](release-checklist.md). That first run
-stopped in four of seven scenarios on exactly the kind of thing it exists to
-find: `POST /guardrails` rejects `limit_usd = 0`, which the OpenAPI document
-does not say and this suite assumed. The guardrail fixtures now ask for one
-cent. Every run should be treated the same way — what it finds about the
-production API is a finding about OpenRouter first, and only then maybe a bug in
-the test. The suite also compiles on every build, and
-`cargo test --locked --test live --no-run` is the check that keeps it that way.
+**Passed 2026-08-28, 7 of 7 scenarios, against a real organization**, and
+four times in a row on that day; see [the release checklist](release-checklist.md).
+Every endpoint the suite touches — workspaces, budgets, log destinations,
+analytics — has now been exercised for real, so nothing here is asserted from
+OpenRouter's documentation alone any more.
 
-Some of what the newer scenarios assert is predicted rather than observed. The
-read side of workspaces and analytics was checked by hand against a real
-organization — `GET /workspaces`, `GET /workspaces/{id}/budgets`, and the
-`/analytics/meta` vocabulary. A workspace create and one budget `PUT` have since
-been sent against a real organization, and **both were accepted**: budgets are
-documented as Enterprise, and they were accepted on the tested account. **No log
-destination request of any kind has ever been sent** from this repository, so
-those are the assertions most likely to move on a first run.
+Two rules the runs surfaced that the OpenAPI document does not state:
+
+- **A guardrail limit must be greater than zero.** `POST /guardrails` answers
+  `limit_usd = 0` with a 400, "Too small: expected number to be >0". This
+  stopped four of seven scenarios on the first run. The guardrail fixtures now
+  ask for one cent, and the validator rejects a zero guardrail budget offline.
+- **An unscoped listing answers for the Default workspace only.** `GET /keys`
+  and `GET /guardrails` with no `workspace_id` return that workspace's
+  resources and no others, and `include_disabled` does not change it. A
+  snapshot now reads once unscoped and once per workspace it found, and the
+  sweep does the same.
+
+Every run should be read the same way: what it finds about the production API is
+a finding about OpenRouter first, and only then maybe a bug in the test. The
+suite also compiles on every build, and
+`cargo test --locked --test live --no-run` is the check that keeps it that way.

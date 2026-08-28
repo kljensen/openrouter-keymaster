@@ -4,9 +4,10 @@
 //! standing between the codebase and an HTTP client with no timeout, no
 //! redirect policy, and no `Authorization` header. And the transport's own
 //! retry policy only shows itself over HTTP/2, which the local harness does not
-//! speak — so the line that disables it is checked where it is written. The
-//! last two belong to ADR-0003: a library consumer gets no argument parser, and
-//! the modules behind `ops` stay behind it.
+//! speak — so the line that disables it is checked where it is written. Two
+//! belong to ADR-0003 — a library consumer gets no argument parser, and the
+//! modules behind `ops` stay behind it — and the last to ADR-0001: no
+//! operation deletes a guardrail.
 
 use std::fs;
 use std::process::Command;
@@ -80,6 +81,31 @@ fn the_modules_behind_ops_are_not_part_of_the_public_surface() {
         assert!(
             lib.contains(&format!("pub(crate) mod {internal};")),
             "`{internal}` is reachable by a host; ADR-0003 keeps it behind `ops`"
+        );
+    }
+}
+
+#[test]
+fn no_operation_deletes_a_guardrail() {
+    // ADR-0001: removing a guardrail block from a configuration is not
+    // authority to destroy the guardrail, so no operation may delete one. The
+    // crate's only `DELETE /guardrails/{id}` belongs to the live acceptance
+    // suite, which deletes the guardrails its own runs create, and is gated on
+    // `test-support` — a feature that promises nothing to anyone
+    // (`docs/compatibility.md`).
+    let api = fs::read_to_string("src/api/mod.rs").expect("the API surface is readable");
+    assert!(
+        api.contains("#[cfg(feature = \"test-support\")]\n    pub fn delete_guardrail_for_tests("),
+        "the only guardrail delete must stay behind `test-support`"
+    );
+
+    for entry in fs::read_dir("src/ops").expect("the ops directory is readable") {
+        let path = entry.expect("an ops entry").path();
+        let source = fs::read_to_string(&path).expect("an ops module is readable");
+        assert!(
+            !source.contains("delete_guardrail"),
+            "{path} deletes a guardrail; ADR-0001 gives no operation that authority",
+            path = path.display()
         );
     }
 }

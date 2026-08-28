@@ -9,6 +9,20 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ### Fixed
 
+- The live acceptance suite deletes the guardrails its own runs create, so a
+  test organization no longer collects four of them per run. Nothing in
+  Keymaster deletes a guardrail — removing a block from a configuration is not
+  authority to destroy one, and there is still no `delete guardrail` operation
+  or command — so the sweep uses `Writer::delete_guardrail_for_tests`, a
+  `DELETE /guardrails/{id}` behind the `test-support` feature that no operation
+  calls. Cleanup order is now destinations, keys, the run's own guardrails, each
+  workspace's default guardrail, then workspaces; each guardrail deletion is
+  verified by reading it back until OpenRouter answers 404 and journaled as
+  `guardrail-deleted`, so a crashed run's guardrails are recovered from its
+  journal and one that cannot be deleted fails the run by UUID rather than being
+  reported as something to remove by hand. Two tests assert the delete stays out
+  of `ops` and off the command line (#37).
+
 - A workspace's default guardrail no longer sends a `name`, and no longer looks
   missing once it exists. OpenRouter names that guardrail itself — `Workspace
   <workspace-uuid> Default` — and answers a `PATCH` carrying a `name` with

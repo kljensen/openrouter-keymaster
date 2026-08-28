@@ -127,6 +127,24 @@ fn delete_key_requires_a_hash_and_takes_no_name() {
 }
 
 #[test]
+fn delete_guardrail_is_not_a_command() {
+    // ADR-0001: removing a guardrail block from a configuration is not
+    // authority to destroy the guardrail. The live suite deletes the guardrails
+    // its own runs create, through a `test-support` method no operation calls;
+    // the binary offers no such resource at all.
+    keymaster()
+        .args([
+            "delete",
+            "guardrail",
+            "--id",
+            "d0c4d1ee-0000-4000-8000-000000000000",
+        ])
+        .assert()
+        .code(USAGE_ERROR)
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
 fn recover_resolve_requires_exactly_one_finding() {
     keymaster()
         .args(["recover", "resolve", "jobfeed"])

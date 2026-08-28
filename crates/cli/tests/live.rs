@@ -27,7 +27,8 @@
 //!   verifies each deletion by reading the immutable identity back until
 //!   OpenRouter answers 404. Log destinations go first, so forwarding stops
 //!   before the keys it watched are deleted; then the keys; then the
-//!   workspaces, because a workspace that still holds either cannot be
+//!   guardrails, this run's own and then each workspace's default; then the
+//!   workspaces, because a workspace that still holds any of them cannot be
 //!   deleted at all.
 //! - **Cleanup never logs a response body.** Bodies are drained by the client
 //!   and discarded; a failure is reported as an identity and an error kind.
@@ -838,9 +839,9 @@ struct Live {
     /// Append-only record of what exists, so a killed run leaves evidence.
     journal: PathBuf,
     keys: RefCell<Vec<KeyHash>>,
-    /// UUID and remote name. The name is carried because the sweep cannot
-    /// delete a guardrail and has to hand the operator something they can find
-    /// in a dashboard, where a UUID alone is not much help.
+    /// UUID and remote name. The name is carried so a guardrail the sweep
+    /// fails to delete is reported with something an operator can find in a
+    /// dashboard, where a UUID alone is not much help.
     guardrails: RefCell<Vec<(Uuid, String)>>,
     /// Workspaces this run created, by UUID and remote name.
     workspaces: RefCell<Vec<(Uuid, String)>>,
@@ -848,9 +849,9 @@ struct Live {
     destinations: RefCell<Vec<(Uuid, String)>>,
     /// The `default_guardrail_id` of each workspace above.
     ///
-    /// A workspace's own default guardrail is deleted with the workspace and
-    /// cannot be deleted on its own, so it must not be reported to the operator
-    /// as a guardrail to remove by hand.
+    /// A workspace's own default guardrail is deleted with the workspace, and
+    /// a `DELETE` on it may well be refused, so it is swept separately from the
+    /// guardrails this run created and named.
     default_guardrails: RefCell<Vec<Uuid>>,
 }
 
@@ -1077,7 +1078,12 @@ impl Live {
             .filter(|record| {
                 matches!(
                     record["kind"].as_str(),
-                    Some("key-deleted" | "workspace-deleted" | "destination-deleted")
+                    Some(
+                        "key-deleted"
+                            | "workspace-deleted"
+                            | "destination-deleted"
+                            | "guardrail-deleted"
+                    )
                 )
             })
             .filter_map(|record| record["identity"].as_str())
@@ -1102,7 +1108,7 @@ impl Live {
                     self.keys.borrow_mut().push(hash);
                 }
             }
-            "guardrail" => {
+            "guardrail" if !deleted.contains(&identity) => {
                 if let Ok(id) = Uuid::parse(identity)
                     && !self.tracks_guardrail(&id)
                 {
@@ -1178,6 +1184,13 @@ impl Live {
             .borrow_mut()
             .retain(|(tracked, _)| tracked != id);
         self.record("destination-deleted", id.as_str(), "verified 404");
+    }
+
+    fn forget_guardrail(&self, id: &Uuid) {
+        self.guardrails
+            .borrow_mut()
+            .retain(|(tracked, _)| tracked != id);
+        self.record("guardrail-deleted", id.as_str(), "verified 404");
     }
 
     fn key(&self, hash: &KeyHash) -> openrouter_keymaster_core::api::ObservedKey {
@@ -1311,19 +1324,16 @@ impl Live {
 
 impl Drop for Live {
     fn drop(&mut self) {
-        let swept = self.sweep();
-        // Guardrails are expected to survive a sweep, so they are reported and
-        // journaled but do not fail anything. A key that outlived cleanup is a
-        // different matter: it is a live credential nothing tracks.
-        for notice in &swept.notices {
-            eprintln!("live cleanup: {notice}");
-            self.record("left-behind", &self.run, notice);
-        }
-        if swept.failures.is_empty() {
-            self.record("swept", &self.run, "every key deleted and verified gone");
+        let failures = self.sweep();
+        if failures.is_empty() {
+            self.record(
+                "swept",
+                &self.run,
+                "every resource deleted and verified gone",
+            );
             return;
         }
-        for failure in &swept.failures {
+        for failure in &failures {
             eprintln!("live cleanup FAILED: {failure}");
             self.record("cleanup-failed", &self.run, failure);
         }
@@ -1337,16 +1347,6 @@ impl Drop for Live {
     }
 }
 
-/// What a sweep could not finish, split by whether it is a problem.
-struct Swept {
-    /// What this run created and could not remove: a key, a log destination, or
-    /// a workspace. Each one fails the run.
-    failures: Vec<String>,
-    /// Resources deliberately left in place, named so an operator can remove
-    /// them by hand.
-    notices: Vec<String>,
-}
-
 impl Live {
     /// Deletes everything this run owns and returns what could not be removed,
     /// as non-secret identities an operator can act on.
@@ -1355,7 +1355,7 @@ impl Live {
     /// failure is reported as an identity plus an error kind, because a body
     /// from a failed cleanup call is exactly the place a stray credential
     /// echo would end up.
-    fn sweep(&self) -> Swept {
+    fn sweep(&self) -> Vec<String> {
         // Destinations first. A destination is the thing that *watches* the
         // keys, so removing it before they are deleted means the run stops
         // forwarding before it starts churning what was being forwarded —
@@ -1383,18 +1383,16 @@ impl Live {
                 failures.push(reason);
             }
         }
+        // Then the guardrails this run created, which are occupants of any
+        // workspace they were made in and would block its deletion.
+        failures.extend(self.delete_guardrails());
         // Then each workspace's own default guardrail, which is the one thing
         // left inside a workspace this run created.
         failures.extend(self.delete_default_guardrails());
         // Workspaces last, because OpenRouter refuses to delete one that still
         // holds anything, and everything above may have been placed in one.
         failures.extend(self.delete_workspaces());
-        let guardrails = self.report_guardrails();
-        failures.extend(guardrails.failures);
-        Swept {
-            failures,
-            notices: guardrails.notices,
-        }
+        failures
     }
 
     /// Deletes the log destinations this run created, each verified by a 404.
@@ -1483,7 +1481,8 @@ impl Live {
                     ),
                 ),
                 Err(error) => failures.push(format!(
-                    "default guardrail {id} could not be deleted or refused ({kind}); the                      workspace deletion that follows should still take it",
+                    "default guardrail {id} could not be deleted or refused ({kind}); the \
+                     workspace deletion that follows should still take it",
                     kind = error.kind()
                 )),
             }
@@ -1560,6 +1559,14 @@ impl Live {
         }
     }
 
+    /// The same, for a guardrail.
+    fn guardrail_status_quietly(&self, id: &Uuid) -> Option<u16> {
+        match self.reader().get_guardrail(id) {
+            Ok(_) => None,
+            Err(error) => error.status().or(Some(0)),
+        }
+    }
+
     /// Deletes one key and reads it back until OpenRouter answers 404.
     ///
     /// A 2xx on the delete is not the proof; the absence of the immutable
@@ -1596,9 +1603,15 @@ impl Live {
         }
     }
 
-    /// Nothing in Keymaster deletes a guardrail — a guardrail spends nothing
-    /// and config removal is deliberately not authority to destroy one — so
-    /// the sweep names the ones this run created and leaves them.
+    /// Deletes the guardrails this run created, each verified by a 404.
+    ///
+    /// Keymaster deletes no guardrail: a guardrail spends nothing, and removing
+    /// a block from a configuration is deliberately not authority to destroy
+    /// one (ADR-0001). That is a rule about the tool, not about a test
+    /// organization, which would otherwise accumulate every guardrail every run
+    /// ever made — so the sweep reaches for
+    /// [`Writer::delete_guardrail_for_tests`], which exists behind
+    /// `test-support` and which no operation calls.
     ///
     /// The listing is not decoration. What this run journaled covers only the
     /// guardrails it got as far as recording; a run that died between the
@@ -1606,7 +1619,7 @@ impl Live {
     /// failed listing is a cleanup failure, exactly as it is on the key path:
     /// the alternative is a sweep that reports success while something it
     /// created stays behind unnamed.
-    fn report_guardrails(&self) -> Swept {
+    fn delete_guardrails(&self) -> Vec<String> {
         let mut failures = Vec::new();
         let mut named: Vec<(Uuid, String)> = self.guardrails.borrow().clone();
         match self.reader().list_guardrails(&self.workspace_ids()) {
@@ -1625,24 +1638,38 @@ impl Live {
                 kind = error.kind()
             )),
         }
-        // A workspace's own default guardrail is not one of these. It cannot be
-        // deleted on its own and the workspace deletion above took it, so
-        // naming it would send an operator looking for something that is not
-        // there — or, if that deletion failed, to a guardrail they cannot
-        // remove until the workspace goes.
-        let defaults = self.default_guardrails.borrow();
-        let notices = named
-            .into_iter()
-            .filter(|(id, _)| !defaults.contains(id))
-            .map(|(id, name)| {
-                format!(
-                    "guardrail {id} (\"{name}\") of run {run} left in place; Keymaster deletes \
-                     no guardrail, so remove it in the OpenRouter dashboard",
-                    run = self.run
-                )
-            })
-            .collect();
-        Swept { failures, notices }
+
+        // A workspace's own default guardrail is not one of these: it carries
+        // OpenRouter's name rather than this run's, so it cannot have reached
+        // the list above. `delete_default_guardrails` asks about it separately,
+        // because there a refusal is the expected answer.
+        let defaults = self.default_guardrails.borrow().clone();
+        let writer = Writer::new(&self.client);
+        for (id, name) in named.into_iter().filter(|(id, _)| !defaults.contains(id)) {
+            match writer.delete_guardrail_for_tests(&id) {
+                Ok(()) => {}
+                Err(error) if error.status() == Some(404) => {}
+                Err(error) => {
+                    failures.push(format!(
+                        "guardrail {id} (\"{name}\") not deleted ({kind}); delete it by ID",
+                        kind = error.kind()
+                    ));
+                    continue;
+                }
+            }
+            match self.guardrail_status_quietly(&id) {
+                Some(404) => self.forget_guardrail(&id),
+                Some(status) => failures.push(format!(
+                    "guardrail {id} (\"{name}\") still readable after delete (HTTP {status}); \
+                     delete it by ID"
+                )),
+                None => failures.push(format!(
+                    "guardrail {id} (\"{name}\") still exists after a successful delete; delete \
+                     it by ID"
+                )),
+            }
+        }
+        failures
     }
 }
 

@@ -13,17 +13,16 @@ rather than repeating the work.
 | 1 | [All milestone issues closed](#1-all-milestone-issues-closed) | ✓ |
 | 2 | [ADRs accepted and reconciled with the code](#2-adrs-accepted-and-reconciled-with-the-code) | ✓ |
 | 3 | [`just check` passes](#3-just-check-passes) | ✓ |
-| 4 | [The live suite passes](#4-the-live-suite-passes) | ☐ **run once, did not pass** |
+| 4 | [The live suite passes](#4-the-live-suite-passes) | ✓ |
 | 5 | [No secret plaintext in history, fixtures, or artifacts](#5-no-secret-plaintext-in-history-fixtures-or-artifacts) | ✓ |
 | 6 | [CLI help and output reviewed as a compatibility surface](#6-cli-help-and-output-reviewed-as-a-compatibility-surface) | ✓ |
 | 7 | [Dependency policy reviewed](#7-dependency-policy-reviewed) | ✓ |
 | 8 | [License chosen](#8-license-chosen) | ✓ |
 | 9 | [Changelog written and the version decided](#9-changelog-written-and-the-version-decided) | ✓ |
 
-One item is open, and it is not quietly checked: item 4 still needs a
-dedicated test organization, which does not exist yet. The owner chose to
-tag 0.3.0 with it open, knowing that; the live suite remains the first thing
-to run when such an organization exists.
+No items are open. Item 4 was the last, and it closed on 2026-08-28: `just
+live` passed 7 of 7 against a real organization, four runs in a row, over
+`cbd5923..70cc0b5`.
 
 ---
 
@@ -94,40 +93,39 @@ cargo test --locked --test live --no-run
 just live
 ```
 
-**Status: run once, did not pass.** The first run stopped in four of seven
-scenarios: `POST /guardrails` rejects `limit_usd = 0` with a 400, "Too small:
-expected number to be >0", so the guardrail create failed and apply stopped.
-That is a finding about the API rather than a bug — the OpenAPI document does
-not state the minimum. The guardrail fixtures now ask for one cent and the
-validator rejects a zero guardrail budget offline; the suite has not been run
-again since.
+**Status: passed 2026-08-28**, against a dedicated OpenRouter test
+organization, on commits `cbd5923..70cc0b5`. Four consecutive runs, each 7 of 7
+scenarios, the last on `70cc0b5`. Nothing in the suite is asserted from
+OpenRouter's documentation alone any more: workspace create and delete, the
+budget `PUT`, every log destination request, and the analytics vocabulary have
+all been sent for real.
 
-This needs a dedicated OpenRouter test organization with no inference credits
-and a management credential for it. Running it against a shared organization is
-not an acceptable substitute — the suite deletes every key, log destination, and
-workspace carrying its run prefix, and that filter is only survivable where
-there is nothing else to hit.
+Two API rules the runs surfaced, neither of them in the OpenAPI document:
 
-The suite is written, gated, and compiles on every build. Since v0.1 it has
-gained four scenarios — a workspace end to end, a `caller` receiver driven
-through `ops`, a `webhook` log destination, and a `spend` report — and its sweep
-now deletes the destinations and workspaces a run creates.
+- `POST /guardrails` rejects `limit_usd = 0` with a 400, "Too small: expected
+  number to be >0". This stopped four of seven scenarios on the first run. The
+  guardrail fixtures now ask for one cent and the validator rejects a zero
+  guardrail budget offline.
+- An unscoped `GET /keys` or `GET /guardrails` answers for the Default workspace
+  and no other, and `include_disabled` does not change it. A snapshot now reads
+  once unscoped and once per workspace it found, and the sweep does the same.
 
-**What is unverified is smaller than it was, and still real.** These reads were
-checked by hand against a real organization while the work was being done: `GET
-/workspaces`, `GET /workspaces/{id}/budgets`, and the `/analytics/meta`
-vocabulary. A workspace create and one budget `PUT` have since been sent against
-a real organization and **both were accepted**: budgets are documented as
-Enterprise, and they were accepted on the tested account. **No workspace delete
-and no log destination request of any kind has ever been sent** from this
-repository, and the behavior of those endpoints is asserted from OpenRouter's
-documentation alone. The webhook scenario points at an unreachable
-`https://example.invalid/…` URL, and whether the API accepts one at create time
-is itself an open question.
-[`docs/live-tests.md`](live-tests.md) says what the first run needs, what it is
-likely to find, and how to clean up after it.
+The budget `PUT` was **accepted** on the tested account, though budgets are
+documented as Enterprise, and OpenRouter accepted the unreachable
+`https://example.invalid/…` webhook URL at create time.
 
-Check this item only after a real run against a real organization.
+Every one of those four runs left its guardrails behind — `alpha`, `beta`,
+`gamma`, and `cap` in the Default workspace — which had to be removed by hand
+with `DELETE /guardrails/{id}`, 200 each. The sweep now deletes them itself
+(#37); that is a change to the suite, not a change to what the runs proved.
+
+Re-running this needs the same thing it always did: a dedicated test
+organization with no inference credits and a management credential for it.
+Running it against a shared organization is not an acceptable substitute — the
+suite deletes every key, guardrail, log destination, and workspace carrying its
+run prefix, and that filter is only survivable where there is nothing else to
+hit. [`docs/live-tests.md`](live-tests.md) says what a run needs, what it found,
+and how to clean up after one that crashed.
 
 ## 5. No secret plaintext in history, fixtures, or artifacts
 
