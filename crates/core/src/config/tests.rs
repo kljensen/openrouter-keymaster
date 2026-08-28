@@ -662,6 +662,43 @@ limit_usd = inf
 }
 
 #[test]
+fn a_guardrail_budget_must_be_greater_than_zero() {
+    // Live: `POST /guardrails` with `limit_usd = 0` is a 400, "Too small:
+    // expected number to be >0". The OpenAPI document does not say so.
+    let problems = problems(
+        r#"
+version = 1
+[guardrails.free]
+name = "free"
+limit_usd = 0
+reset_interval = "daily"
+"#,
+    );
+    let paths: Vec<&str> = problems.iter().map(|p| p.path.as_str()).collect();
+    assert_eq!(paths, ["guardrails.free.limit_usd"]);
+    assert!(problems[0].message.contains("greater than zero"));
+}
+
+#[test]
+fn a_key_budget_of_zero_is_a_cap_the_api_accepts() {
+    // Live: `POST /keys` with `limit: 0` is a 201, and the key comes back with
+    // `limit_remaining: 0`. Only guardrails carry the positive minimum.
+    let config = parse(
+        r#"
+version = 1
+[keys.spent]
+name = "spent"
+limit_usd = 0
+limit_reset = "daily"
+"#,
+    );
+    let Managed::Set(limit) = key(&config, "spent").limit else {
+        panic!("a limit was configured");
+    };
+    assert_eq!(limit.micros(), 0);
+}
+
+#[test]
 fn reset_intervals_must_be_one_of_the_supported_three() {
     assert_eq!(
         paths(
@@ -1146,10 +1183,19 @@ fn budgets_must_grow_as_the_interval_widens() {
 }
 
 #[test]
-fn a_budget_must_be_greater_than_zero() {
-    let source = "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
-                  budgets = { monthly = 0 }\n";
-    assert_eq!(paths(source), vec!["workspaces.club.budgets.monthly"]);
+fn a_workspace_budget_must_be_greater_than_zero() {
+    // `PUT /workspaces/{id}/budgets/{interval}` documents `limit_usd` as "Must
+    // be greater than 0", so every interval carries the same minimum.
+    for interval in ["daily", "weekly", "monthly", "lifetime"] {
+        let source = format!(
+            "version = 1\n\n[workspaces.club]\nname = \"Club\"\nslug = \"club\"\n\
+             budgets = {{ {interval} = 0 }}\n"
+        );
+        let problems = problems(&source);
+        let paths: Vec<&str> = problems.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(paths, [format!("workspaces.club.budgets.{interval}")]);
+        assert!(problems[0].message.contains("greater than zero"));
+    }
 }
 
 #[test]

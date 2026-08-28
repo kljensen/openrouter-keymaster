@@ -1707,13 +1707,21 @@ fn assert_absent_in(path: &Path, needle: &str) {
 
 // ------------------------------------------------------------ configurations
 
+/// The smallest guardrail budget OpenRouter accepts, in USD.
+///
+/// `POST /guardrails` answers `limit_usd = 0` with a 400, "Too small: expected
+/// number to be >0" — a minimum its OpenAPI document does not state. So a
+/// guardrail cannot cap spending at nothing the way a key can, and one cent is
+/// as close as this suite gets.
+const GUARDRAIL_LIMIT_USD: &str = "0.01";
+
 /// Three guardrails, so a one-record page size has something to page through.
 fn guardrail_config(run: &str, description: &str) -> String {
     let mut config = String::from("version = 1\n");
     for name in ["alpha", "beta", "gamma"] {
         config.push_str(&format!(
             "\n[guardrails.{name}]\nname = \"{run}-{name}\"\ndescription = \"{description}\"\n\
-             limit_usd = 0\nreset_interval = \"daily\"\n"
+             limit_usd = {GUARDRAIL_LIMIT_USD}\nreset_interval = \"daily\"\n"
         ));
     }
     config
@@ -1721,15 +1729,17 @@ fn guardrail_config(run: &str, description: &str) -> String {
 
 /// One guardrail, one zero-budget key, and a file receiver.
 ///
-/// The limit is zero on purpose: a key this suite loses track of has to be one
-/// that cannot spend anything. `disabled` is the field the create cannot set,
-/// so it is what proves the update-only policy ran.
+/// The key's limit is zero on purpose: a key this suite loses track of has to
+/// be one that cannot spend anything. The guardrail over it can only go down to
+/// [`GUARDRAIL_LIMIT_USD`], which is why the key carries its own cap rather
+/// than leaning on the guardrail's. `disabled` is the field the create cannot
+/// set, so it is what proves the update-only policy ran.
 fn key_config(run: &str, sink: &Path, disabled: bool) -> String {
     format!(
         "version = 1\n\
          \n[guardrails.cap]\n\
          name = \"{run}-cap\"\n\
-         limit_usd = 0\n\
+         limit_usd = {GUARDRAIL_LIMIT_USD}\n\
          reset_interval = \"daily\"\n\
          \n[keys.jobfeed]\n\
          name = \"{run}-jobfeed\"\n\
@@ -1747,9 +1757,9 @@ fn key_config(run: &str, sink: &Path, disabled: bool) -> String {
 
 /// The `budgets` table the workspace scenario asks for: one dollar a month.
 ///
-/// A budget has to be greater than zero to be a budget at all, so this is the
-/// smallest one there is. It caps a workspace whose guardrail already caps
-/// everything in it at zero.
+/// A workspace budget has to be greater than zero, which the API documents. It
+/// caps a workspace whose default guardrail already holds everything in it to
+/// [`GUARDRAIL_LIMIT_USD`] a day, and whose only key cannot spend at all.
 const MONTHLY_BUDGET: &str = "budgets = { monthly = 1 }\n";
 
 /// The club workspace's configuration, as the scenario edits it.
@@ -1805,7 +1815,7 @@ impl Club {
              default_guardrail = \"house\"\n\
              \n[guardrails.house]\n\
              name = \"{run}-house\"\n\
-             limit_usd = 0\n\
+             limit_usd = {GUARDRAIL_LIMIT_USD}\n\
              reset_interval = \"daily\"\n\
              {key}",
             run = self.run,

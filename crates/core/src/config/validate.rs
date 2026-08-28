@@ -667,6 +667,19 @@ impl Validator {
             &cleared,
             BudgetPairing::ResetRequired,
         );
+        // `POST /guardrails` answers `limit_usd = 0` with "Too small: expected
+        // number to be >0", a minimum its OpenAPI document does not state. The
+        // rule is the guardrail's alone: `POST /keys` takes `limit: 0` and
+        // returns a key that has spent its whole budget, which is a useful cap.
+        if let Some(amount) = limit.value()
+            && amount.micros() <= 0
+        {
+            self.problem(
+                format!("{path}.limit_usd"),
+                "must be greater than zero; OpenRouter requires a positive guardrail budget, \
+                 though a key `limit_usd` of 0 is a cap it accepts",
+            );
+        }
         let allowed_models = self.slugs(&path, "allowed_models", block.allowed_models);
         let denied_models = self.slugs(&path, "denied_models", block.denied_models);
         let allowed_providers = self.slugs(&path, "allowed_providers", block.allowed_providers);

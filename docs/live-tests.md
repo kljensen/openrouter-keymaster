@@ -106,15 +106,21 @@ derived from the clock, the process, and a counter. The sweep touches nothing
 whose name does not start with that exact prefix followed by a hyphen, so
 `km-live-1a2b3c4d` cannot match `km-live-1a2b3c4de`.
 
-**Zero-budget keys.** Every key the suite creates carries `limit_usd = 0`, and
-so does every guardrail — including the workspace default guardrail, which
-governs all traffic in the workspace it belongs to. A key that escapes cleanup
-cannot spend anything. Keys are also created `disabled = true` and only enabled
-where the scenario needs it, which is the same step that proves the update-only
-disabled policy works. The one non-zero amount in the suite is the workspace
-budget it tries to write, which is one dollar a month: a budget has to be
-greater than zero to be a budget at all, and it caps a workspace whose
-guardrail already caps everything inside it at zero.
+**Zero-budget keys.** Every key the suite creates carries `limit_usd = 0`, so a
+key that escapes cleanup cannot spend anything: `POST /keys` takes `limit: 0`
+and returns a key with nothing left to spend. Keys are also created
+`disabled = true` and only enabled where the scenario needs it, which is the
+same step that proves the update-only disabled policy works.
+
+**One-cent guardrails.** Guardrails cannot go to zero the way keys can.
+`POST /guardrails` answers `limit_usd = 0` with a 400, "Too small: expected
+number to be >0" — the first live run found this, and the OpenAPI document does
+not mention the minimum. So every guardrail in the suite, including the
+workspace default guardrail that governs all traffic in its workspace, carries
+`limit_usd = 0.01` a day. Nothing under a guardrail can spend anyway, because
+every key is capped at zero in its own right. The other non-zero amount is the
+workspace budget the suite tries to write, one dollar a month, which is
+documented as having to be greater than zero.
 
 **A journal written before the resource exists.** `target/live-runs/<prefix>.jsonl`
 gets the run prefix and the base URL as its first line, before anything is
@@ -207,12 +213,15 @@ so it can never mask the failure that caused it.
 
 ## Status
 
-The suite has **not been run against a live organization yet**; see
-[the release checklist](release-checklist.md). It compiles on every build, and
+The suite has been run against a live organization once, and **has not yet
+passed**; see [the release checklist](release-checklist.md). That first run
+stopped in four of seven scenarios on exactly the kind of thing it exists to
+find: `POST /guardrails` rejects `limit_usd = 0`, which the OpenAPI document
+does not say and this suite assumed. The guardrail fixtures now ask for one
+cent. Every run should be treated the same way — what it finds about the
+production API is a finding about OpenRouter first, and only then maybe a bug in
+the test. The suite also compiles on every build, and
 `cargo test --locked --test live --no-run` is the check that keeps it that way.
-Its first real run should be treated as an experiment: anything it finds about
-the production API — a rejected zero limit, a differently shaped response — is a
-finding about OpenRouter, not necessarily a bug in the test.
 
 Some of what the newer scenarios assert is predicted rather than observed. The
 read side of workspaces and analytics was checked by hand against a real

@@ -187,7 +187,7 @@ require_zdr = true
 | `denied_models` | array of string | no | no (use `[]`) | Model slugs refused. Sent as `ignored_models`. |
 | `allowed_providers` | array of string | no | no (use `[]`) | Provider slugs permitted. |
 | `denied_providers` | array of string | no | no (use `[]`) | Provider slugs refused. Sent as `ignored_providers`. |
-| `limit_usd` | number | no | yes | USD budget. Needs `reset_interval`. |
+| `limit_usd` | number | no | yes | USD budget. Needs `reset_interval`. Must be greater than zero. |
 | `reset_interval` | `"daily"`, `"weekly"`, `"monthly"` | no | yes | Needs `limit_usd`, and is required whenever `limit_usd` is set. |
 | `include_byok_in_limit` | bool | no | no | Inherits `defaults`. Always managed. |
 | `require_zdr` | bool | no | no | Restrict inference to zero-data-retention providers. Omitted means unmanaged. Sent as `enforce_zdr`. |
@@ -216,7 +216,7 @@ generation = 1
 | Field | Type | Required | Clearable | Notes |
 | --- | --- | --- | --- | --- |
 | `name` | string | yes | no | Remote display name. |
-| `limit_usd` | number | no | yes | USD spending limit. |
+| `limit_usd` | number | no | yes | USD spending limit. `0` is allowed and means a key that cannot spend anything. |
 | `limit_reset` | `"daily"`, `"weekly"`, `"monthly"` | no | yes | Needs `limit_usd`, but is optional with it: a key limit with no reset never refills. Note the key-level spelling differs from a guardrail's `reset_interval`. |
 | `expires_at` | RFC 3339 string | no | yes | Quoted string, not a bare TOML datetime. Normalized to UTC. |
 | `disabled` | bool | no (default `false`) | no | Always managed. |
@@ -404,6 +404,16 @@ API defines a key with no `limit_reset` as a spending cap that never refills.
 **USD amounts** (`limit_usd`) accept an integer or a float; `10`, `10.50`, and
 `1e1` are all legal. An amount must be non-negative, at most 1 000 000 000, and
 no finer than a millionth of a dollar. Infinities and NaN are refused.
+
+**Zero is where the kinds differ.** A guardrail budget must be greater than
+zero: `POST /guardrails` answers `limit_usd = 0` with a 400, "Too small:
+expected number to be >0", a minimum its OpenAPI document does not state and a
+live run found. A workspace budget carries the same rule, and the API documents
+it. A key's `limit_usd = 0` is legal and means what it says — `POST /keys` with
+`limit: 0` returns a key whose remaining budget is already zero, so it is a hard
+cap rather than an absent one. Both were verified against the live API.
+Keymaster rejects a zero guardrail or workspace budget offline, at
+`guardrails.NAME.limit_usd` or `workspaces.NAME.budgets.INTERVAL`.
 
 **Model and provider slugs** are trimmed and lowercased, then must be printable
 ASCII with no spaces, at most 200 characters — `google/gemini-2.5-flash` is the

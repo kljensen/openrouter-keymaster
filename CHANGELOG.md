@@ -7,7 +7,24 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- A guardrail `limit_usd` of `0` is now rejected offline, at
+  `guardrails.NAME.limit_usd`. The first live run against a real organization
+  found that `POST /guardrails` answers a zero budget with a 400, "Too small:
+  expected number to be >0" — a minimum the OpenAPI document does not state.
+  Workspace budgets already carried the rule, which the API does document. A
+  key's `limit_usd = 0` stays legal and unchanged: `POST /keys` with `limit: 0`
+  returns a key whose remaining budget is already zero, which is a useful hard
+  cap. `docs/configuration.md` records both, live-verified.
+
+- The live suite's guardrails ask for one cent rather than zero, including the
+  workspace default guardrail, so `just live` gets past the guardrail create.
+  Its keys still carry `limit_usd = 0` and `disabled = true`, which is what
+  keeps a key that escapes cleanup from spending anything;
+  `docs/live-tests.md` explains why the two kinds differ. Both it and
+  `docs/release-checklist.md` now record that the suite has been run once and
+  has not yet passed.
 
 ## [0.3.0] - 2026-08-28
 

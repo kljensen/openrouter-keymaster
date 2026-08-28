@@ -13,7 +13,7 @@ rather than repeating the work.
 | 1 | [All milestone issues closed](#1-all-milestone-issues-closed) | ✓ |
 | 2 | [ADRs accepted and reconciled with the code](#2-adrs-accepted-and-reconciled-with-the-code) | ✓ |
 | 3 | [`just check` passes](#3-just-check-passes) | ✓ |
-| 4 | [The live suite passes](#4-the-live-suite-passes) | ☐ **not yet executed** |
+| 4 | [The live suite passes](#4-the-live-suite-passes) | ☐ **run once, did not pass** |
 | 5 | [No secret plaintext in history, fixtures, or artifacts](#5-no-secret-plaintext-in-history-fixtures-or-artifacts) | ✓ |
 | 6 | [CLI help and output reviewed as a compatibility surface](#6-cli-help-and-output-reviewed-as-a-compatibility-surface) | ✓ |
 | 7 | [Dependency policy reviewed](#7-dependency-policy-reviewed) | ✓ |
@@ -94,10 +94,17 @@ cargo test --locked --test live --no-run
 just live
 ```
 
-**Status: not yet executed.** This needs a dedicated OpenRouter test
-organization with no inference credits and a management credential for it, and
-no such organization exists yet. Running it against a shared organization is not
-an acceptable substitute — the suite deletes every key, log destination, and
+**Status: run once, did not pass.** The first run stopped in four of seven
+scenarios: `POST /guardrails` rejects `limit_usd = 0` with a 400, "Too small:
+expected number to be >0", so the guardrail create failed and apply stopped.
+That is a finding about the API rather than a bug — the OpenAPI document does
+not state the minimum. The guardrail fixtures now ask for one cent and the
+validator rejects a zero guardrail budget offline; the suite has not been run
+again since.
+
+This needs a dedicated OpenRouter test organization with no inference credits
+and a management credential for it. Running it against a shared organization is
+not an acceptable substitute — the suite deletes every key, log destination, and
 workspace carrying its run prefix, and that filter is only survivable where
 there is nothing else to hit.
 
