@@ -7,6 +7,10 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] - 2026-08-28
+
 ### Added
 
 - Live acceptance scenarios for everything below, and the operator
@@ -442,5 +446,6 @@ assignments between them from a checked-in description of what should exist.
   `retire` or `delete key`; clean it up in the OpenRouter dashboard.
 - No license is chosen and the crate is `publish = false`.
 
-[Unreleased]: https://github.com/kljensen/openrouter-keymaster/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/kljensen/openrouter-keymaster/releases/tag/v0.1.0
+[Unreleased]: https://github.com/kljensen/openrouter-keymaster/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kljensen/openrouter-keymaster/compare/f0bd125...v0.3.0
+[0.1.0]: https://github.com/kljensen/openrouter-keymaster/commit/f0bd125

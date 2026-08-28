@@ -18,12 +18,12 @@ rather than repeating the work.
 | 6 | [CLI help and output reviewed as a compatibility surface](#6-cli-help-and-output-reviewed-as-a-compatibility-surface) | ✓ |
 | 7 | [Dependency policy reviewed](#7-dependency-policy-reviewed) | ✓ |
 | 8 | [License chosen](#8-license-chosen) | ✓ |
-| 9 | [Changelog written and the version decided](#9-changelog-written-and-the-version-decided) | ☐ **version not bumped** |
+| 9 | [Changelog written and the version decided](#9-changelog-written-and-the-version-decided) | ✓ |
 
-Two items are open, and neither is quietly checked. Item 4 still needs a
-dedicated test organization, which does not exist yet. Item 9 is a decision the
-owner has not made: the milestone's work sits under `Unreleased` and the
-workspace version is still `0.1.0`.
+One item is open, and it is not quietly checked: item 4 still needs a
+dedicated test organization, which does not exist yet. The owner chose to
+tag 0.3.0 with it open, knowing that; the live suite remains the first thing
+to run when such an organization exists.
 
 ---
 
@@ -253,21 +253,14 @@ crates.io is a separate decision from licensing.
 
 ```sh
 grep '^version' Cargo.toml
-sed -n '/## \[Unreleased\]/,/## \[0.1.0\]/p' CHANGELOG.md
+sed -n '/## \[0.3.0\]/,/## \[0.1.0\]/p' CHANGELOG.md
 ```
 
-**Status: half.** The changelog is written: everything since 0.1.0 — the
-workspace scope, the `caller` receiver, workspaces, log destinations, `spend`,
-and this milestone's live scenarios and documentation — is one coherent
-`Unreleased` section in [`CHANGELOG.md`](../CHANGELOG.md).
-
-**The version is deliberately not bumped.** `Cargo.toml` still says
-`version = "0.1.0"`. Nothing was released between 0.1.0 and now — there is no
-0.2.0 tag and no 0.2.0 changelog section — so the number to move to and when to
-move it is the owner's call, and moving it here would name a release nobody has
-decided to cut. It should not be cut while item 4 is open in any case, which is
-the same thing the v0.1 checklist said about tagging.
-
-To close this item: set `version` under `[workspace.package]`, rename the
-`Unreleased` heading to that version with today's date, add the comparison link
-at the foot of the changelog beside the existing ones, and tag.
+**Status: verified.** `[workspace.package] version = "0.3.0"`, and everything
+since 0.1.0 — the workspace scope, the `caller` receiver, workspaces, log
+destinations, `spend`, and this milestone's live scenarios and documentation —
+is the `[0.3.0] - 2026-08-28` section of [`CHANGELOG.md`](../CHANGELOG.md),
+with `Unreleased` empty above it. The number skips 0.2.0 because nothing was
+tagged between 0.1.0 and now; the v0.2 milestone's work ships in 0.3.0.
+v0.1.0 was never tagged either, so the changelog links `[0.1.0]` to the commit
+that finalized it and compares `[0.3.0]` from there. The tag is `v0.3.0`.

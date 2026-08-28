@@ -6,7 +6,7 @@ default-members = ["crates/cli"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 # Must equal `toolchain.channel` in rust-toolchain.toml.
 # crates/cli/tests/toolchain_pin.rs fails if the two ever disagree.
