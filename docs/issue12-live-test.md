@@ -15,9 +15,8 @@ BYOK and do not point `OPENROUTER_BASE_URL` at a proxy or a test endpoint by
 accident. The probe sends `include_byok_in_limit = false` on every key and
 `include_byok_in_budgets = false` on the workspace budget.
 
-Choose two current, canonically distinct, text-capable catalog model slugs.
-Resolve aliases first with `GET /api/v1/model/{author}/{slug}` and supply the
-returned `canonical_slug` values:
+Choose two current, canonically distinct, text-capable catalog request IDs from
+`GET /api/v1/models` (the `id` fields, not the dated `canonical_slug` fields):
 
 - `KEYMASTER_ISSUE12_ALLOWED_MODEL` is permitted by the new guardrail.
 - `KEYMASTER_ISSUE12_DENIED_MODEL` is valid but is not in that allowlist.
@@ -25,6 +24,12 @@ returned `canonical_slug` values:
 The test deliberately does not bake model names into source. A stale name
 would turn a model-policy assertion into an unrelated catalog failure. The
 operator must record the selected catalog revision alongside the test result.
+Before creating anything, the probe resolves both IDs with
+`GET /api/v1/model/{author}/{slug}`, refuses aliases or IDs that resolve to the
+same canonical model, and compares the created guardrail's normalized
+allowlist with the returned canonical identity. Inference still uses the live
+request IDs; OpenRouter's model endpoint does not accept every dated canonical
+slug as a request path.
 
 The probe creates one new `tf-i12-<UUID>` workspace and one named guardrail.
 It creates six named keys inside that workspace, initially at a zero limit,

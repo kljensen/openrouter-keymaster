@@ -234,7 +234,19 @@ fn required(name: &str) -> Result<String, String> {
 /// surprising response cannot put a credential in a test failure or journal.
 struct Probe {
     client: reqwest::blocking::Client,
+    base_url: String,
     endpoint: String,
+}
+
+#[derive(Deserialize)]
+struct ModelResponse {
+    data: ModelIdentity,
+}
+
+#[derive(Deserialize)]
+struct ModelIdentity {
+    id: String,
+    canonical_slug: String,
 }
 
 impl Probe {
@@ -249,8 +261,27 @@ impl Probe {
             .expect("building the bounded inference probe client");
         Self {
             client,
+            base_url: base_url.to_owned(),
             endpoint: format!("{base_url}/chat/completions"),
         }
+    }
+
+    fn resolve_model(&self, model: &str) -> Result<ModelIdentity, String> {
+        let response = self
+            .client
+            .get(format!("{}/model/{model}", self.base_url))
+            .send()
+            .map_err(|error| format!("model lookup failed: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "model lookup for {model} returned HTTP {}",
+                response.status().as_u16()
+            ));
+        }
+        response
+            .json::<ModelResponse>()
+            .map(|response| response.data)
+            .map_err(|error| format!("model lookup for {model} was invalid: {error}"))
     }
 
     fn request(&self, secret: &str, model: &str, max_tokens: u16) -> Result<u16, String> {
@@ -700,6 +731,18 @@ fn live_issue12_controls() {
         "issue #12 live testing requires the exact production OpenRouter API endpoint"
     );
     let probe = Probe::new(client.base_url());
+    let allowed_model = probe
+        .resolve_model(&settings.allowed_model)
+        .expect("resolving allowed model identity");
+    let denied_model = probe
+        .resolve_model(&settings.denied_model)
+        .expect("resolving denied model identity");
+    assert_eq!(allowed_model.id, settings.allowed_model);
+    assert_eq!(denied_model.id, settings.denied_model);
+    assert_ne!(
+        allowed_model.canonical_slug, denied_model.canonical_slug,
+        "the allowed and denied model IDs resolve to the same canonical model"
+    );
     let mut run = Run::new(client);
 
     // No listing call occurs before or after this.  Every destructive request
@@ -760,7 +803,7 @@ fn live_issue12_controls() {
     assert_eq!(observed_policy.workspace_id.as_ref(), Some(&workspace_id));
     assert_eq!(
         observed_policy.allowed_models,
-        Some(BTreeSet::from([settings.allowed_model.clone()])),
+        Some(BTreeSet::from([allowed_model.canonical_slug.clone()])),
         "the created guardrail did not retain its exact model allowlist"
     );
 
@@ -880,7 +923,7 @@ fn live_issue12_controls() {
                 .get_guardrail(&policy_id)
                 .expect("re-reading exact guardrail")
                 .allowed_models,
-            Some(BTreeSet::from([settings.allowed_model.clone()])),
+            Some(BTreeSet::from([allowed_model.canonical_slug.clone()])),
             "the model allowlist changed while waiting for inference-edge propagation"
         );
         assert!(
