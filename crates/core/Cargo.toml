@@ -8,6 +8,14 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+# Exposes the supported blocking management API: `client` for transport and
+# one-time key creation, and `api` for typed OpenRouter reads and writes.
+#
+# This deliberately has no dependency edges. In particular, it does not enable
+# `test-support` or its optional Tokio/Wiremock harness dependencies; a host
+# supplies its own runtime, request scheduling, persistence, ambiguity
+# handling, and HTTP tests.
+low-level-api = []
 # Lets a test interrupt a real `openrouter-keymaster` run at a named durable
 # phase, by setting `KEYMASTER_STATE_FAULT`. ADR-0002 requires crash coverage
 # immediately before and after every journal entry, and the only faithful way
@@ -75,6 +83,13 @@ required-features = ["test-support"]
 [[test]]
 name = "harness"
 required-features = ["test-support"]
+
+# This is the supported public boundary under `low-level-api`. It intentionally
+# uses a tiny std-only local server instead of the Wiremock-bearing harness, so
+# it proves a consumer need not enable test support to use the API.
+[[test]]
+name = "low_level_api"
+required-features = ["low-level-api"]
 
 [[test]]
 name = "state"

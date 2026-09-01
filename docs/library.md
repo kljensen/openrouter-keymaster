@@ -52,6 +52,48 @@ equivalent; that is what `Context: Send + 'static` is for. And the state lock
 refuses a concurrent writer rather than queueing it, so a process that serves
 many requests serializes its own operations on one state file.
 
+## Calling the supported low-level API
+
+An application that already owns its database, policy, and lifecycle can opt
+into the blocking OpenRouter management boundary without opting into Keymaster's
+configuration, state file, or test harness:
+
+```toml
+[dependencies]
+openrouter-keymaster-core = { git = "https://github.com/kljensen/openrouter-keymaster", features = ["low-level-api"] }
+zeroize = "1"
+```
+
+The feature exposes `client::{Client, Options, ManagementKey,
+CreateKeyRequest, CreatedKey, KeyPlaintext, ApiError}` and the typed resource
+`api::{Reader, Writer}`. It is dependency-neutral: it does not enable
+`test-support` or its optional Tokio/Wiremock harness dependencies. A host
+writes its own hermetic HTTP tests, chooses timeout and retry policy through
+`Options`, and decides how requests are scheduled.
+
+```rust
+use openrouter_keymaster_core::api::{Reader, Writer};
+use openrouter_keymaster_core::client::{Client, ManagementKey, Options};
+use zeroize::Zeroizing;
+
+fn management_client(secret: String) -> Result<Client, Box<dyn std::error::Error>> {
+    let credential = ManagementKey::from_secret(Zeroizing::new(secret))?;
+    let client = Client::new(Options::default(), &credential)?;
+    let _reader = Reader::new(&client);
+    let _writer = Writer::new(&client);
+    Ok(client)
+}
+```
+
+`Client::get_json` retries safe reads within `Options::retry`; every write,
+including `Client::create_key_once`, is sent once and never retried. A failed
+write is ambiguous unless `ApiError::is_definite_rejection()` says otherwise;
+inspect the remote state through `Reader` before deciding what to do. Persist a
+created key's hash before disclosing `CreatedKey::plaintext()` to its intended
+recipient. `KeyPlaintext` is non-serializable, redacts `Debug`, and clears its
+buffer when dropped, but the application remains responsible for what it does
+with `expose()`.
+
 ## Receiving a key's plaintext in your own code
 
 A `caller` receiver hands a new key's plaintext to the host instead of writing

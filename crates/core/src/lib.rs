@@ -21,28 +21,31 @@ compile_error!(
 );
 
 // The public surface is curated (ADR-0003, item 7): what the `ops` signatures
-// expose, plus what a host needs to *read* configuration and state. Everything
-// else — the HTTP client, the OpenRouter resource layer, the planner, the
-// receivers, redaction — is an implementation detail behind `ops`.
+// expose, plus what a host needs to *read* configuration and state. The
+// `low-level-api` feature is the deliberate exception: it exposes the blocking
+// `client` and typed OpenRouter `api` layers for a host that owns its own
+// persistence, scheduling, policy, and reconciliation. Everything else — the
+// planner, receivers, and redaction — is an implementation detail behind
+// `ops`.
 //
-// Those five are declared twice. Under `test-support` they are `pub`, because
-// both crates' test suites drive them directly and a test is an external
-// consumer; without it — the shape every non-test build has, and the one a
-// host compiles against — they are `pub(crate)`. The feature pulls a mock HTTP
-// server into the dependency graph, so no shipped build turns it on.
+// `client` and `api` are public under `low-level-api` and under `test-support`.
+// The former is a supported, dependency-neutral opt-in; the latter lets both
+// crates' tests drive internals and pulls a mock server into the graph. The
+// remaining modules are public only for `test-support`; production hosts never
+// get them.
 //
 // The `pub(crate)` arm allows dead code because an accessor only the test
 // suites reach is unused there. The other arm never caught one either: a `pub`
 // item in a `pub` module is never dead.
-#[cfg(feature = "test-support")]
+#[cfg(any(feature = "low-level-api", feature = "test-support"))]
 pub mod api;
-#[cfg(not(feature = "test-support"))]
+#[cfg(not(any(feature = "low-level-api", feature = "test-support")))]
 #[allow(dead_code)]
 pub(crate) mod api;
 
-#[cfg(feature = "test-support")]
+#[cfg(any(feature = "low-level-api", feature = "test-support"))]
 pub mod client;
-#[cfg(not(feature = "test-support"))]
+#[cfg(not(any(feature = "low-level-api", feature = "test-support")))]
 #[allow(dead_code)]
 pub(crate) mod client;
 

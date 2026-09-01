@@ -70,7 +70,7 @@ one JSON document, and never colored.
 
 ## Compatibility surfaces
 
-Four things are contracts. Everything else in the repository is
+Five things are contracts. Everything else in the repository is
 implementation, and will change without ceremony.
 
 ### The command-line surface
@@ -158,11 +158,20 @@ Covered:
 - **The error types** — `Error`, its variants, the per-layer errors it wraps,
   and `Error::kind`, whose strings are already part of the JSON contract. Every
   one of them is `#[non_exhaustive]`; see the rule for variants below.
+- **The optional `low-level-api` feature** and the public items it exposes:
+  `client::{Client, Options, ManagementKey, CreateKeyRequest, CreatedKey,
+  KeyPlaintext, ApiError}` and `api::{Reader, Writer}` with their public
+  argument and return types. This is a blocking management-API boundary, not a
+  workflow engine: the host chooses its timeout and retry policy through
+  `Options`, and owns async scheduling, concurrency, persistence, policy, and
+  resolving ambiguous writes by fresh reads rather than replaying them. The
+  feature has no dependency edges and never enables `test-support` or its
+  optional Tokio/Wiremock harness dependencies.
 
 Not covered, and free to change in any release: everything behind `ops` — the
-HTTP client, the OpenRouter resource layer, the planner, the receiver
-implementations behind that callback, and redaction — the crate's internal module layout, and the `test-support` feature,
-which exists for this repository's own tests and makes no promise to anyone.
+planner, the receiver implementations behind that callback, and redaction —
+the crate's internal module layout, and the `test-support` feature, which exists
+for this repository's own tests and makes no promise to anyone.
 
 Within 0.x: a new `ops` function, a new field on a report, and a new accessor
 are minor changes — including a new function that takes extra arguments beside

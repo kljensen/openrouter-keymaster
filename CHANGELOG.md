@@ -7,6 +7,16 @@ named in [`docs/compatibility.md`](docs/compatibility.md).
 
 ## [Unreleased]
 
+### Added
+
+- `openrouter-keymaster-core` now has a supported, dependency-neutral
+  `low-level-api` feature for applications that need the blocking OpenRouter
+  management boundary without Keymaster's declarative workflow. It exposes the
+  existing `client` transport and one-time key-creation types plus the typed
+  `api::Reader` and `api::Writer`; it does not enable `test-support` or its
+  optional Tokio/Wiremock harness dependencies. Hosts retain ownership of
+  scheduling, persistence, policy, and ambiguous-write recovery (#13).
+
 ### Changed
 
 - Documentation restructured. The README is a short front door — what Keymaster
