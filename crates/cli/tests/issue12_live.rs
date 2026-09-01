@@ -753,13 +753,15 @@ fn live_issue12_controls() {
         .expect("creating exact-ID model guardrail");
     let policy_id = policy.id;
     run.record_guardrail(policy_id.clone());
+    let observed_policy = run
+        .reader()
+        .get_guardrail(&policy_id)
+        .expect("read exact guardrail");
+    assert_eq!(observed_policy.workspace_id.as_ref(), Some(&workspace_id));
     assert_eq!(
-        run.reader()
-            .get_guardrail(&policy_id)
-            .expect("read exact guardrail")
-            .workspace_id
-            .as_ref(),
-        Some(&workspace_id)
+        observed_policy.allowed_models,
+        Some(BTreeSet::from([settings.allowed_model.clone()])),
+        "the created guardrail did not retain its exact model allowlist"
     );
 
     // A zero-limit enabled key must reject before an inference request can
@@ -852,12 +854,48 @@ fn live_issue12_controls() {
         Some(OffsetDateTime::now_utc() + TimeDuration::minutes(10)),
     );
     raise_and_enable(&run, &model, "0.10");
-    assert!(
-        probe
+    let assigned = || {
+        run.reader()
+            .list_assignments_of(&policy_id)
+            .expect("re-reading exact guardrail assignment")
+            .iter()
+            .any(|assignment| assignment.key_hash == model.hash)
+    };
+    let model_policy_started = std::time::Instant::now();
+    let mut model_rejected_after = None;
+    for _ in 0..20 {
+        let status = probe
             .request(model.secret(), &settings.denied_model, 1)
-            .expect("denied-model probe")
-            == 403,
-        "the assigned model guardrail accepted its denied model"
+            .expect("denied-model probe");
+        if status == 403 {
+            model_rejected_after = Some(model_policy_started.elapsed());
+            break;
+        }
+        assert!(
+            status < 300,
+            "the denied-model probe returned unexpected HTTP {status}, not acceptance or a policy 403"
+        );
+        assert_eq!(
+            run.reader()
+                .get_guardrail(&policy_id)
+                .expect("re-reading exact guardrail")
+                .allowed_models,
+            Some(BTreeSet::from([settings.allowed_model.clone()])),
+            "the model allowlist changed while waiting for inference-edge propagation"
+        );
+        assert!(
+            assigned(),
+            "the key assignment disappeared while waiting for inference-edge propagation"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert!(
+        model_rejected_after.is_some(),
+        "the assigned model guardrail accepted its denied model for 10 seconds"
+    );
+    eprintln!(
+        "issue #12 observed model-policy propagation latency: {} ms",
+        model_rejected_after.expect("checked").as_millis()
     );
 
     // A successful allowed-model request establishes a live credential before

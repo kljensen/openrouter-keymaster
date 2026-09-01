@@ -15,7 +15,9 @@ BYOK and do not point `OPENROUTER_BASE_URL` at a proxy or a test endpoint by
 accident. The probe sends `include_byok_in_limit = false` on every key and
 `include_byok_in_budgets = false` on the workspace budget.
 
-Choose two current, distinct, text-capable catalog model slugs:
+Choose two current, canonically distinct, text-capable catalog model slugs.
+Resolve aliases first with `GET /api/v1/model/{author}/{slug}` and supply the
+returned `canonical_slug` values:
 
 - `KEYMASTER_ISSUE12_ALLOWED_MODEL` is permitted by the new guardrail.
 - `KEYMASTER_ISSUE12_DENIED_MODEL` is valid but is not in that allowlist.
@@ -65,7 +67,9 @@ This checks, in this order:
    rejection;
 4. a success from the same key before its explicit expiry, then its rejection
    after that timestamp;
-5. runtime rejection of an allowlist-excluded model;
+5. exact allowlist readback and runtime rejection of a canonically distinct,
+   allowlist-excluded model, polling for at most ten seconds while re-reading
+   the policy and assignment after every unexpected acceptance;
 6. observed latency from a verified management-plane disable to inference
    rejection; and
 7. exact created-key usage polling, a read-back-verified lifetime-budget
