@@ -72,9 +72,13 @@ This checks, in this order:
    rejection;
 4. a success from the same key before its explicit expiry, then its rejection
    after that timestamp;
-5. exact allowlist readback and runtime rejection of a canonically distinct,
-   allowlist-excluded model, polling for at most ten seconds while re-reading
-   the policy and assignment after every unexpected acceptance;
+5. exact allowlist readback, a successful request to a canonically distinct
+   model before assignment, then rejection of that same model by the same key
+   after assignment, polling for at most ten seconds while re-reading the
+   policy and assignment after every unexpected acceptance. OpenRouter's live
+   edge returned `404` for this policy denial on 2026-09-01 even though its
+   guardrail documentation describes denials as `403`, so either status counts
+   only after the same-key success proves the model is routable;
 6. observed latency from a verified management-plane disable to inference
    rejection; and
 7. exact created-key usage polling, a read-back-verified lifetime-budget

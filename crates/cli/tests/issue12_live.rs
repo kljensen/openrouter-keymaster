@@ -309,6 +309,10 @@ fn authorization_rejection(status: u16) -> bool {
     matches!(status, 401 | 403)
 }
 
+fn model_policy_rejection(status: u16) -> bool {
+    matches!(status, 403 | 404)
+}
+
 /// A live run with deletion authority limited to the identities in its own
 /// journal.  It never calls a listing endpoint.
 struct Run {
@@ -493,7 +497,7 @@ fn create_key(
     run: &mut Run,
     desired: &Key,
     workspace: &Uuid,
-    guardrail: &Uuid,
+    guardrail: Option<&Uuid>,
     expiry: Option<OffsetDateTime>,
 ) -> IssuedKey {
     let request = CreateKeyRequest {
@@ -515,18 +519,22 @@ fn create_key(
     run.writer()
         .update_key(&hash, &UpdateKey::new(one_key(&secured)))
         .expect("disabling zero-limit key");
-    run.writer()
-        .assign_key(guardrail, &hash)
-        .expect("assigning exact guardrail");
+    if let Some(guardrail) = guardrail {
+        run.writer()
+            .assign_key(guardrail, &hash)
+            .expect("assigning exact guardrail");
+    }
     let observed = run.reader().get_key(&hash).expect("reading exact key");
     assert!(observed.disabled && observed.limit.is_some_and(|limit| limit.micros() == 0));
-    assert!(
-        run.reader()
-            .list_assignments_of(guardrail)
-            .expect("reading exact guardrail assignment")
-            .iter()
-            .any(|assignment| assignment.key_hash == hash)
-    );
+    if let Some(guardrail) = guardrail {
+        assert!(
+            run.reader()
+                .list_assignments_of(guardrail)
+                .expect("reading exact guardrail assignment")
+                .iter()
+                .any(|assignment| assignment.key_hash == hash)
+        );
+    }
     IssuedKey { hash, created }
 }
 
@@ -815,7 +823,7 @@ fn live_issue12_controls() {
         &mut run,
         one_key(&zero_desired),
         &workspace_id,
-        &policy_id,
+        Some(&policy_id),
         Some(OffsetDateTime::now_utc() + TimeDuration::minutes(10)),
     );
     enable_zero(&run, &zero, one_key(&zero_desired));
@@ -836,7 +844,7 @@ fn live_issue12_controls() {
         &mut run,
         one_key(&expiry_desired),
         &workspace_id,
-        &policy_id,
+        Some(&policy_id),
         Some(expiry_at),
     );
     raise_and_enable(&run, &expiry, "0.10");
@@ -869,7 +877,7 @@ fn live_issue12_controls() {
         &mut run,
         one_key(&recurring_desired),
         &workspace_id,
-        &policy_id,
+        Some(&policy_id),
         Some(OffsetDateTime::now_utc() + TimeDuration::minutes(10)),
     );
     enable_zero(&run, &recurring, one_key(&recurring_desired));
@@ -893,9 +901,23 @@ fn live_issue12_controls() {
         &mut run,
         one_key(&model_desired),
         &workspace_id,
-        &policy_id,
+        None,
         Some(OffsetDateTime::now_utc() + TimeDuration::minutes(10)),
     );
+    raise_and_enable(&run, &model, "0.10");
+    assert!(
+        probe
+            .request(model.secret(), &settings.denied_model, 1)
+            .expect("unassigned denied-model control")
+            < 300,
+        "the denied model was not routable before guardrail assignment"
+    );
+    run.writer()
+        .disable_key(&model.hash)
+        .expect("disabling model-control key before assignment");
+    run.writer()
+        .assign_key(&policy_id, &model.hash)
+        .expect("assigning exact model guardrail after successful control request");
     raise_and_enable(&run, &model, "0.10");
     let assigned = || {
         run.reader()
@@ -910,13 +932,14 @@ fn live_issue12_controls() {
         let status = probe
             .request(model.secret(), &settings.denied_model, 1)
             .expect("denied-model probe");
-        if status == 403 {
+        if model_policy_rejection(status) {
             model_rejected_after = Some(model_policy_started.elapsed());
+            eprintln!("issue #12 observed model-policy rejection status: HTTP {status}");
             break;
         }
         assert!(
             status < 300,
-            "the denied-model probe returned unexpected HTTP {status}, not acceptance or a policy 403"
+            "the denied-model probe returned unexpected HTTP {status}, not acceptance or a policy rejection"
         );
         assert_eq!(
             run.reader()
@@ -1005,7 +1028,7 @@ fn live_issue12_controls() {
         &mut run,
         one_key(&aggregate_one_desired),
         &workspace_id,
-        &policy_id,
+        Some(&policy_id),
         Some(OffsetDateTime::now_utc() + TimeDuration::minutes(10)),
     );
     let aggregate_two_desired = key_config(&run.journal.run, "aggregate-two", "0", true);
@@ -1013,7 +1036,7 @@ fn live_issue12_controls() {
         &mut run,
         one_key(&aggregate_two_desired),
         &workspace_id,
-        &policy_id,
+        Some(&policy_id),
         Some(OffsetDateTime::now_utc() + TimeDuration::minutes(10)),
     );
     raise_and_enable(&run, &aggregate_one, "0.25");
