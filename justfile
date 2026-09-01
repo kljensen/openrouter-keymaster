@@ -36,6 +36,19 @@ live-sweep prefix:
     KEYMASTER_LIVE_TESTS=1 KEYMASTER_LIVE_SWEEP={{prefix}} \
         cargo test --locked --test live -- --ignored --exact live_sweep_named_prefix
 
+# Token Fund issue #12.  Unlike `live`, this deliberately never lists or
+# prefix-sweeps an account: it deletes only IDs it wrote to its 0600 journal.
+# Supply the two current model slugs and export the management credential
+# outside shell history; read docs/issue12-live-test.md before running.
+issue12-live:
+    KEYMASTER_ISSUE12_LIVE=1 cargo test --locked --test issue12_live -- --ignored --exact live_issue12_controls --test-threads=1
+
+# Exact-ID recovery for a prior issue #12 journal.  PATH is a journal file,
+# not a run prefix; it refuses a different OPENROUTER_BASE_URL.
+issue12-live-recover path:
+    KEYMASTER_ISSUE12_LIVE=1 KEYMASTER_ISSUE12_RECOVER={{path}} \
+        cargo test --locked --test issue12_live -- --ignored --exact live_issue12_recover_exact_journal --test-threads=1
+
 # The same battery CI runs.
 check: check-deny-version
     cargo fmt --all -- --check

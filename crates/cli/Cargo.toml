@@ -31,9 +31,11 @@ assert_cmd = "2.0"
 # The shared harness, compiled into core for the tests that need it.
 openrouter-keymaster-core = { path = "../core", features = ["test-support"] }
 predicates = "3.1"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "charset", "http2", "json", "rustls"] }
 sha2 = "0.10"
 tempfile = "3.23"
 time = { version = "0.3", features = ["macros", "serde-well-known"] }
+uuid = { version = "1.18", features = ["v4"] }
 wiremock = "0.6"
 
 [lints]
