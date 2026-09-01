@@ -525,6 +525,20 @@ const USD_MAX: f64 = 1_000_000_000.0;
 const USD_ROUNDING_SLOP: f64 = 1e-3;
 
 impl Usd {
+    /// Builds an amount from whole millionths of a dollar.
+    ///
+    /// This is the exact-input boundary for callers that already store money
+    /// as an integer. It never passes the amount through floating point.
+    pub const fn from_micros(micros: i64) -> Result<Self, UsdMicrosError> {
+        if micros < 0 {
+            return Err(UsdMicrosError::Negative);
+        }
+        if micros > 1_000_000_000_000_000 {
+            return Err(UsdMicrosError::TooLarge);
+        }
+        Ok(Self { micros })
+    }
+
     /// The amount in whole millionths of a dollar.
     #[must_use]
     pub const fn micros(self) -> i64 {
@@ -568,6 +582,27 @@ impl Usd {
         })
     }
 }
+
+/// Why an integer micro-dollar amount was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UsdMicrosError {
+    /// A budget cannot be negative.
+    Negative,
+    /// A budget cannot exceed one billion dollars.
+    TooLarge,
+}
+
+impl fmt::Display for UsdMicrosError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Negative => f.write_str("a USD amount must not be negative"),
+            Self::TooLarge => f.write_str("a USD amount must not exceed 1000000000"),
+        }
+    }
+}
+
+impl std::error::Error for UsdMicrosError {}
 
 impl fmt::Display for Usd {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

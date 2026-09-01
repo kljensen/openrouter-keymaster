@@ -1035,6 +1035,27 @@ limit_usd = 0.1
 }
 
 #[test]
+fn integer_micro_dollars_have_exact_checked_boundaries() {
+    use super::UsdMicrosError;
+
+    assert_eq!(
+        Usd::from_micros(0).expect("zero is representable").micros(),
+        0
+    );
+    assert_eq!(
+        Usd::from_micros(1_000_000_000_000_000)
+            .expect("one billion dollars is representable")
+            .micros(),
+        1_000_000_000_000_000
+    );
+    assert_eq!(Usd::from_micros(-1), Err(UsdMicrosError::Negative));
+    assert_eq!(
+        Usd::from_micros(1_000_000_000_000_001),
+        Err(UsdMicrosError::TooLarge)
+    );
+}
+
+#[test]
 fn parsing_the_same_text_twice_produces_the_same_configuration() {
     let source = include_str!("../../../../examples/openrouter-keymaster.toml");
     assert_eq!(parse(source), parse(source));
