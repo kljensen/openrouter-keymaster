@@ -123,6 +123,12 @@ pub struct AnalyticsFilter {
 pub struct AnalyticsResult {
     /// The rows, in the order OpenRouter returned them.
     pub rows: Vec<AnalyticsRow>,
+    /// Whether the provider explicitly supplied query metadata.
+    ///
+    /// A safety-sensitive caller must not infer completeness from absent
+    /// metadata: only `metadata_present && !truncated` proves the provider
+    /// represented the result as complete.
+    pub metadata_present: bool,
     /// Whether OpenRouter stopped short of answering the whole question.
     pub truncated: bool,
     /// OpenRouter's own warnings about the query, such as a filter value it
@@ -323,6 +329,7 @@ impl Reader<'_> {
                 .iter()
                 .map(|row| AnalyticsRow::from_value(row, &query.metrics))
                 .collect::<Result<Vec<AnalyticsRow>, ApiError>>()?,
+            metadata_present: answered.data.metadata.is_some(),
             truncated: answered.data.metadata.is_some_and(|meta| meta.truncated),
             warnings: answered.data.warnings,
         })

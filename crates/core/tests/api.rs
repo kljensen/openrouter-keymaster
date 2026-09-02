@@ -852,6 +852,7 @@ fn an_analytics_query_is_one_post_whose_body_says_what_was_asked() {
     assert_eq!(sent["time_range"]["start"], "2026-08-01T00:00:00Z");
     assert_eq!(sent["time_range"]["end"], "2026-08-02T00:00:00Z");
 
+    assert!(answered.metadata_present);
     assert!(answered.truncated);
     assert_eq!(answered.warnings.len(), 1);
     let row = answered.rows.first().expect("one row");
