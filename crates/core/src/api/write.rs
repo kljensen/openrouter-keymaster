@@ -182,7 +182,8 @@ impl GuardrailBody {
 /// is planned as a replacement.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UpdateKey {
-    /// Display name. Always managed, so always sent.
+    /// Display name. Always explicit: a key update is an exact description of
+    /// the mutable policy it is applying.
     name: String,
     #[serde(skip_serializing_if = "Patch::is_omitted")]
     limit: Patch<f64>,
@@ -204,6 +205,28 @@ impl UpdateKey {
             limit_reset: interval(&desired.limit_reset),
             include_byok_in_limit: desired.include_byok_in_limit,
             disabled: desired.disabled,
+        }
+    }
+
+    /// Sets a key's exact mutable policy with a non-resetting total limit.
+    ///
+    /// The reset is deliberately [`Patch::Clear`] rather than omitted: an
+    /// existing daily, weekly, or monthly reset would otherwise remain in
+    /// force. Every mutable field is required, so this body cannot silently
+    /// inherit a name, BYOK rule, or enabled state from the remote key.
+    #[must_use]
+    pub fn exact_lifetime_limit(
+        key_name: &RemoteName,
+        limit: Usd,
+        include_byok_in_limit: bool,
+        disabled: bool,
+    ) -> Self {
+        Self {
+            name: name(key_name),
+            limit: Patch::Set(limit.dollars()),
+            limit_reset: Patch::Clear,
+            include_byok_in_limit,
+            disabled,
         }
     }
 }
@@ -474,6 +497,22 @@ mod tests {
             }),
             "expires_at, workspace_id, and creator_user_id are fixed at creation and are never \
              patched"
+        );
+    }
+
+    #[test]
+    fn an_exact_lifetime_limit_clears_the_reset() {
+        let limit = Usd::from_micros(5_000_000).expect("five dollars is valid");
+        let name = RemoteName::parse("fund-grant").expect("a valid key name");
+        assert_eq!(
+            body(&UpdateKey::exact_lifetime_limit(&name, limit, true, false)),
+            json!({
+                "name": "fund-grant",
+                "limit": 5.0,
+                "limit_reset": null,
+                "include_byok_in_limit": true,
+                "disabled": false,
+            })
         );
     }
 
